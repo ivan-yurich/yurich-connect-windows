@@ -32,7 +32,7 @@ void main() {
     expect(profiles.first.kind, VpnProfileKind.naive);
     expect(profiles.first.outbound?['username'], 'example.com');
     expect(profiles.first.outbound?['password'], 'pass');
-    expect(proxy['type'], 'http');
+    expect(proxy['type'], 'naive');
     expect(proxy['tls'], {'enabled': true, 'server_name': 'example.com'});
     final dnsServers =
         (config['dns'] as Map<String, dynamic>)['servers'] as List;
@@ -161,6 +161,27 @@ void main() {
     expect(proxy['udp_over_tcp'], isNull);
   });
 
+  test('can use HTTPS CONNECT fallback for Naive profiles', () async {
+    const link = 'naive+https://example.com:pass@example.com:443#Naive';
+
+    final profiles = await ProfileImporter().importFromText(link);
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profiles.first,
+                naiveMode: NaiveOutboundMode.httpConnect,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(proxy['type'], 'http');
+    expect(proxy['tls'], {'enabled': true, 'server_name': 'example.com'});
+    expect(proxy['quic'], isNull);
+    expect(proxy['quic_congestion_control'], isNull);
+    expect(proxy['udp_over_tcp'], isNull);
+  });
+
   test('normalizes legacy Naive TLS fields from saved profiles', () {
     const profile = VpnProfile(
       id: 'legacy-naive',
@@ -188,8 +209,12 @@ void main() {
             as Map<String, dynamic>;
     final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
 
-    expect(proxy['type'], 'http');
-    expect(proxy['tls'], {'server_name': 'example.com', 'enabled': true});
+    expect(proxy['type'], 'naive');
+    expect(proxy['tls'], {
+      'enabled': true,
+      'server_name': 'example.com',
+      'insecure': true,
+    });
   });
 
   test('normalizes legacy VLESS tcp-only outbounds from saved profiles', () {

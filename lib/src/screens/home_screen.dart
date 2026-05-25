@@ -29,7 +29,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.8';
+const _appVersion = '1.0.9';
 
 enum _AppLanguage {
   ru('ru'),
@@ -2215,7 +2215,7 @@ class _Strings {
     dnsCountryValue: 'RU напрямую, остальное VPN',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Включён режим совместимости Naive: TUN MTU 1380, gVisor stack, строгий route, FakeDNS с Cloudflare DoH через VPN, fallback между Wi‑Fi/LTE и HTTPS CONNECT outbound для naive+https. Это ближе к NekoBox и твоему sing-box JSON.',
+        'Windows-режим: российские домены и GeoIP RU идут напрямую, остальное через VPN. Naive работает нативно и сохраняет QUIC/H3 из профиля; HTTPS CONNECT используется только для совместимых http-профилей.',
     endpointLabel: 'Сервер',
     connect: 'Подключить',
     disconnect: 'Отключить',
@@ -2246,9 +2246,9 @@ class _Strings {
             'Android требует постоянное уведомление для VPN. Разреши уведомления, чтобы видеть статус и скорость в шторке.',
       ),
       _FaqItem(
-        question: 'Почему теперь лучше работает мобильная сеть?',
+        question: 'Почему NaiveProxy может быть быстрее?',
         answer:
-            'Включён мобильный baseline: TUN MTU 1380, gVisor stack, strict route, IPv4-only strategy, FakeDNS + Cloudflare DoH через туннель, network fallback для Wi‑Fi/LTE и Naive через HTTPS CONNECT.',
+            'Aurum VPN не переводит naive+https в HTTPS CONNECT без необходимости. Если профиль содержит QUIC, sing-box сможет использовать H3/QUIC вместо более медленного совместимого режима.',
       ),
       _FaqItem(
         question: 'Безопасно ли отправлять отчёт?',
@@ -2337,7 +2337,7 @@ class _Strings {
     dnsCountryValue: 'RU direct, foreign via VPN',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Naive compatibility mode is enabled: TUN MTU 1380, gVisor stack, strict routing, FakeDNS with Cloudflare DoH through VPN, Wi‑Fi/LTE network fallback, and HTTPS CONNECT outbound for naive+https. This is closer to NekoBox and your sing-box JSON.',
+        'Windows mode: Russian domains and GeoIP RU go direct, everything else uses the VPN. Naive runs natively and keeps QUIC/H3 from the profile; HTTPS CONNECT is only used for compatible http profiles.',
     endpointLabel: 'Server',
     connect: 'Connect',
     disconnect: 'Disconnect',
@@ -2368,9 +2368,9 @@ class _Strings {
             'Android requires a persistent notification for VPN. Allow notifications to see status and speed in the shade.',
       ),
       _FaqItem(
-        question: 'Why should mobile networks work better now?',
+        question: 'Why can NaiveProxy be faster now?',
         answer:
-            'The mobile baseline uses TUN MTU 1380, gVisor stack, strict routing, IPv4-only strategy, FakeDNS + Cloudflare DoH through the tunnel, Wi‑Fi/LTE network fallback, and Naive via HTTPS CONNECT.',
+            'Aurum VPN no longer converts naive+https to HTTPS CONNECT unless needed. If the profile contains QUIC, sing-box can use H3/QUIC instead of the slower compatibility mode.',
       ),
       _FaqItem(
         question: 'Is sending a report safe?',

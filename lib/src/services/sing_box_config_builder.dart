@@ -4,6 +4,8 @@ import '../models/vpn_profile.dart';
 
 enum SingBoxConfigTarget { android, windows }
 
+enum NaiveOutboundMode { auto, native, httpConnect }
+
 class SingBoxConfigBuilder {
   static const windowsClashApiPort = 19090;
   static const localMixedProxyPort = 20808;
@@ -14,6 +16,7 @@ class SingBoxConfigBuilder {
   String build(
     VpnProfile profile, {
     SingBoxConfigTarget target = SingBoxConfigTarget.android,
+    NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
     List<String> splitTunnelExcludedProcesses = const [],
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
@@ -32,7 +35,7 @@ class SingBoxConfigBuilder {
     final proxyOutbound =
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
-    _normalizeOutbound(profile, proxyOutbound);
+    _normalizeOutbound(profile, proxyOutbound, naiveMode);
     _applyDialStability(proxyOutbound, target);
     final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
     final excludedProcesses = _normalizeProcessNames(
@@ -233,6 +236,7 @@ class SingBoxConfigBuilder {
   void _normalizeOutbound(
     VpnProfile profile,
     Map<String, dynamic> proxyOutbound,
+    NaiveOutboundMode naiveMode,
   ) {
     if (profile.kind == VpnProfileKind.vlessReality ||
         profile.kind == VpnProfileKind.vlessTls) {
@@ -247,6 +251,15 @@ class SingBoxConfigBuilder {
     }
 
     final originalTls = (proxyOutbound['tls'] as Map?)?.cast<String, dynamic>();
+    final outboundType = (proxyOutbound['type'] as String?)?.toLowerCase();
+    final useHttpConnect =
+        naiveMode == NaiveOutboundMode.httpConnect ||
+        (naiveMode == NaiveOutboundMode.auto && outboundType == 'http');
+    if (!useHttpConnect) {
+      proxyOutbound['type'] = 'naive';
+      return;
+    }
+
     proxyOutbound['type'] = 'http';
     proxyOutbound.remove('extra_headers');
     proxyOutbound.remove('insecure_concurrency');
