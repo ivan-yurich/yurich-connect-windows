@@ -165,7 +165,7 @@ internal static class Program
 
         var uninstallScript = Path.Combine(installDir, "uninstall_aurum_vpn.ps1");
         key.SetValue("DisplayName", "Aurum VPN");
-        key.SetValue("DisplayVersion", "1.0.10");
+        key.SetValue("DisplayVersion", "1.0.11");
         key.SetValue("Publisher", "ivan-it.net");
         key.SetValue("InstallLocation", installDir);
         key.SetValue("DisplayIcon", exePath);

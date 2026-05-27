@@ -186,6 +186,10 @@ void main() {
     expect(proxy['up_mbps'], 50);
     expect(proxy['down_mbps'], 120);
     expect(proxy['obfs'], 'mask');
+    expect(proxy['domain_resolver'], {
+      'server': 'local-dns',
+      'strategy': 'ipv4_only',
+    });
     expect(proxy['tls'], {
       'enabled': true,
       'server_name': 'cdn.example.com',
@@ -223,6 +227,10 @@ void main() {
     expect(proxy['server'], 'hy2.example.com');
     expect(proxy['server_port'], 8443);
     expect(proxy['password'], 'pa:ss');
+    expect(proxy['domain_resolver'], {
+      'server': 'local-dns',
+      'strategy': 'ipv4_only',
+    });
     expect(proxy['obfs'], {'type': 'salamander', 'password': 'mask'});
     expect(proxy['tls'], {'enabled': true, 'server_name': 'cdn.example.com'});
     expect(
@@ -433,6 +441,11 @@ void main() {
     expect(tunInbound['exclude_package'], isNull);
     expect(tunInbound['mtu'], 9000);
     expect(tunInbound['stack'], 'system');
+    expect((config['dns'] as Map<String, dynamic>)['strategy'], 'ipv4_only');
+    expect(route['default_domain_resolver'], {
+      'server': 'local-dns',
+      'strategy': 'ipv4_only',
+    });
     expect(route['find_process'], isTrue);
     expect(
       routeRules.any((rule) {

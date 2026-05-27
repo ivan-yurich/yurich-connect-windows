@@ -116,7 +116,7 @@ class SingBoxConfigBuilder {
               'url': russianGeoIpRuleSetUrl,
             },
           ],
-        'default_domain_resolver': 'local-dns',
+        'default_domain_resolver': _domainResolver(target),
         'auto_detect_interface': true,
         'find_process':
             target == SingBoxConfigTarget.windows &&
@@ -215,9 +215,7 @@ class SingBoxConfigBuilder {
             'server': 'fakeip',
           },
         ],
-      'strategy': target == SingBoxConfigTarget.android
-          ? 'ipv4_only'
-          : 'prefer_ipv4',
+      'strategy': 'ipv4_only',
       'cache_capacity': 8192,
       'reverse_mapping': true,
       'final': 'global-dns',
@@ -261,11 +259,36 @@ class SingBoxConfigBuilder {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
-    proxyOutbound.putIfAbsent('domain_resolver', () => 'local-dns');
+    if (target == SingBoxConfigTarget.windows) {
+      proxyOutbound['domain_resolver'] = _normalizeDomainResolver(
+        proxyOutbound['domain_resolver'],
+      );
+    } else {
+      proxyOutbound.putIfAbsent('domain_resolver', () => 'local-dns');
+    }
     if (target == SingBoxConfigTarget.android) {
       proxyOutbound.putIfAbsent('network_strategy', () => 'fallback');
       proxyOutbound.putIfAbsent('fallback_delay', () => '300ms');
     }
+  }
+
+  Object _domainResolver(SingBoxConfigTarget target) {
+    if (target == SingBoxConfigTarget.windows) {
+      return {'server': 'local-dns', 'strategy': 'ipv4_only'};
+    }
+    return 'local-dns';
+  }
+
+  Map<String, dynamic> _normalizeDomainResolver(Object? resolver) {
+    if (resolver is Map) {
+      final normalized = resolver.cast<String, dynamic>();
+      normalized['strategy'] = 'ipv4_only';
+      return normalized;
+    }
+    final server = resolver is String && resolver.isNotEmpty
+        ? resolver
+        : 'local-dns';
+    return {'server': server, 'strategy': 'ipv4_only'};
   }
 
   void _normalizeOutbound(
