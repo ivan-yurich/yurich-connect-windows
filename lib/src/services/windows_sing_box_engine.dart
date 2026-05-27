@@ -12,8 +12,10 @@ class WindowsSingBoxEngine implements VpnEngine {
   final _logs = <String>[];
 
   Process? _process;
+  Process? _naiveProcess;
   String _status = AurumVpnStatus.stopped;
   String _config = '{}';
+  String? _naiveProxyConfig;
   String _notificationTitle = 'Aurum VPN';
   String _notificationDescription = 'VPN connection is active';
   Timer? _trafficTimer;
@@ -64,8 +66,9 @@ class WindowsSingBoxEngine implements VpnEngine {
   }
 
   @override
-  Future<bool> saveConfig(String config) async {
+  Future<bool> saveConfig(String config, {String? naiveProxyConfig}) async {
     _config = config;
+    _naiveProxyConfig = naiveProxyConfig;
     return config.trim().isNotEmpty;
   }
 
@@ -86,6 +89,14 @@ class WindowsSingBoxEngine implements VpnEngine {
 
       final configFile = File('${configDir.path}\\config.json');
       await configFile.writeAsString(_config, encoding: utf8);
+
+      if (_naiveProxyConfig != null) {
+        final started = await _startNaiveProxy(runtimeDir, configDir);
+        if (!started) {
+          _setStatus(AurumVpnStatus.stopped);
+          return false;
+        }
+      }
 
       final exe = File('${runtimeDir.path}\\sing-box.exe');
       if (!await exe.exists()) {
@@ -110,6 +121,7 @@ class WindowsSingBoxEngine implements VpnEngine {
         process.exitCode.then((code) {
           _appendLog('sing-box exited with code $code');
           _process = null;
+          _stopNaiveProxy();
           _stopTrafficTicker();
           if (_status != AurumVpnStatus.stopping) {
             _setStatus(AurumVpnStatus.stopped);
@@ -126,6 +138,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       _appendLog('Не удалось запустить sing-box: $e');
     }
 
+    _stopNaiveProxy();
     _setStatus(AurumVpnStatus.stopped);
     return false;
   }
@@ -147,6 +160,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       process.kill(ProcessSignal.sigkill);
     }
     _process = null;
+    _stopNaiveProxy();
     _stopTrafficTicker();
     _setStatus(AurumVpnStatus.stopped);
     return true;
@@ -178,6 +192,62 @@ class WindowsSingBoxEngine implements VpnEngine {
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen(_appendLog);
+  }
+
+  Future<bool> _startNaiveProxy(
+    Directory runtimeDir,
+    Directory configDir,
+  ) async {
+    final exe = File('${runtimeDir.path}\\naive.exe');
+    if (!await exe.exists()) {
+      _appendLog('naive.exe не найден в ${runtimeDir.path}');
+      return false;
+    }
+
+    final configFile = File('${configDir.path}\\naive.json');
+    await configFile.writeAsString(_naiveProxyConfig!, encoding: utf8);
+    _appendLog('Starting NaiveProxy core ${exe.path}');
+    final process = await Process.start(
+      exe.path,
+      [configFile.path],
+      workingDirectory: runtimeDir.path,
+      runInShell: false,
+    );
+    _naiveProcess = process;
+    process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) => _appendLog('naive: $line'));
+    process.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) => _appendLog('naive: $line'));
+
+    unawaited(
+      process.exitCode.then((code) {
+        _appendLog('naive exited with code $code');
+        if (_naiveProcess == process) {
+          _naiveProcess = null;
+        }
+        if (_process != null && _status != AurumVpnStatus.stopping) {
+          _appendLog('NaiveProxy core stopped while VPN was running.');
+          _process?.kill();
+        }
+      }),
+    );
+
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    return _naiveProcess == process;
+  }
+
+  void _stopNaiveProxy() {
+    final process = _naiveProcess;
+    if (process == null) {
+      return;
+    }
+    _appendLog('Stopping NaiveProxy core...');
+    process.kill();
+    _naiveProcess = null;
   }
 
   void _setStatus(String status) {

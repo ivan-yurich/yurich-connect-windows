@@ -2,6 +2,76 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aurum_vpn_windows/src/services/windows_integration_service.dart';
 
 void main() {
+  group('WindowsIntegrationService auto-start task XML', () {
+    test('accepts elevated delayed task that can run on battery', () {
+      const xml = '''
+<Task>
+  <Principals>
+    <Principal>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <LogonTrigger>
+      <Delay>PT30S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+</Task>
+''';
+
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
+    });
+
+    test('rejects old elevated task without startup delay', () {
+      const xml = '''
+<Task>
+  <Principals>
+    <Principal>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+</Task>
+''';
+
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
+      expect(
+        WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
+        isTrue,
+      );
+    });
+
+    test('rejects tasks that stop on battery power', () {
+      const xml = '''
+<Task>
+  <Principals>
+    <Principal>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <LogonTrigger>
+      <Delay>PT30S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Settings>
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+  </Settings>
+</Task>
+''';
+
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
+    });
+  });
+
   group('WindowsIntegrationService.compareReleaseVersions', () {
     test('handles GitHub release tags with v prefix', () {
       expect(

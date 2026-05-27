@@ -25,7 +25,7 @@ abstract class VpnEngine {
   Future<String> getNotificationDescription();
   Future<bool> requestNotificationPermission();
   Future<String> getVPNStatus();
-  Future<bool> saveConfig(String config);
+  Future<bool> saveConfig(String config, {String? naiveProxyConfig});
   Future<String> getConfig();
   Future<bool> startVPN();
   Future<bool> stopVPN();

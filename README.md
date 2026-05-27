@@ -11,8 +11,8 @@ tunneling, GitHub Releases updates, and Windows TUN routing.
 
 - Windows 11 desktop client built with Flutter.
 - sing-box core with Wintun TUN mode.
-- VLESS Reality, VLESS TLS, NaiveProxy, Remnawave subscriptions, and raw
-  sing-box JSON import.
+- VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Remnawave
+  subscriptions, and raw sing-box JSON import.
 - System tray support with show, hide, connect/disconnect, and quit actions.
 - Autostart with Windows through Task Scheduler.
 - Auto-connect to the selected profile after app launch.
@@ -154,8 +154,8 @@ tunneling, обновления через GitHub Releases и Windows TUN-мар
 
 - Нативное Windows 11 приложение на Flutter.
 - VPN-ядро sing-box с Wintun TUN-режимом.
-- Импорт VLESS Reality, VLESS TLS, NaiveProxy, Remnawave подписок и raw
-  sing-box JSON.
+- Импорт VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Remnawave
+  подписок и raw sing-box JSON.
 - Иконка в трее: открыть, скрыть, подключить/отключить, выйти.
 - Автостарт вместе с Windows через планировщик задач.
 - Автоподключение выбранного профиля после запуска приложения.
@@ -247,4 +247,3 @@ GitHub **Releases**.
   конфиги.
 - Диагностические отчеты в приложении скрывают чувствительные данные.
 - Windows TUN-режим требует запуска с правами администратора.
-

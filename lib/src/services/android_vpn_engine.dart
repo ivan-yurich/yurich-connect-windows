@@ -49,7 +49,8 @@ class AndroidVpnEngine implements VpnEngine {
   Future<String> getVPNStatus() => _singBox.getVPNStatus();
 
   @override
-  Future<bool> saveConfig(String config) => _singBox.saveConfig(config);
+  Future<bool> saveConfig(String config, {String? naiveProxyConfig}) =>
+      _singBox.saveConfig(config);
 
   @override
   Future<String> getConfig() => _singBox.getConfig();

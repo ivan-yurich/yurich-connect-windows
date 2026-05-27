@@ -15,7 +15,7 @@ class ProfileImportException implements Exception {
 
 class ProfileImporter {
   static final _linkPattern = RegExp(
-    "(?:vless://|naive\\+https://|naive://)[^\\s<>\"']+",
+    "(?:vless://|naive\\+https://|naive://|hysteria2://|hy2://|hysteria://)[^\\s<>\"']+",
     caseSensitive: false,
   );
 
@@ -178,7 +178,7 @@ class ProfileImporter {
     }
 
     throw const ProfileImportException(
-      'Не нашёл VLESS/Naive ссылок. Поддерживаются vless://, naive+https:// и sing-box JSON.',
+      'Не нашёл поддерживаемых ссылок. Поддерживаются vless://, naive+https://, hysteria://, hysteria2://, hy2:// и sing-box JSON.',
     );
   }
 
@@ -349,6 +349,11 @@ class ProfileImporter {
         } else if (lower.startsWith('naive+https://') ||
             lower.startsWith('naive://')) {
           profiles.add(_parseNaive(link));
+        } else if (lower.startsWith('hysteria2://') ||
+            lower.startsWith('hy2://')) {
+          profiles.add(_parseHysteria2(link));
+        } else if (lower.startsWith('hysteria://')) {
+          profiles.add(_parseHysteria(link));
         }
       } on Object catch (error) {
         errors.add('$link: $error');
@@ -485,10 +490,138 @@ class ProfileImporter {
     );
   }
 
+  VpnProfile _parseHysteria(String link) {
+    final uri = Uri.parse(link);
+    if (uri.host.isEmpty || !uri.hasPort) {
+      throw const ProfileImportException('Hysteria ссылка без host или port.');
+    }
+
+    final query = _query(uri);
+    final upMbps = _asIntString(query['upmbps'] ?? query['up_mbps']);
+    final downMbps = _asIntString(query['downmbps'] ?? query['down_mbps']);
+    if (upMbps == null || downMbps == null) {
+      throw const ProfileImportException(
+        'Hysteria ссылка без upmbps/downmbps.',
+      );
+    }
+
+    final tls = _tlsFromQuery(
+      query,
+      fallbackServerName: query['peer'] ?? uri.host,
+    );
+    final auth = query['auth_str'] ?? query['auth'];
+    final obfsPassword = query['obfsParam'] ?? query['obfs-param'];
+    final obfs = obfsPassword?.isNotEmpty == true
+        ? obfsPassword
+        : switch ((query['obfs'] ?? '').toLowerCase()) {
+            '' || 'xplus' => null,
+            final value => value,
+          };
+
+    final outbound = <String, dynamic>{
+      'type': 'hysteria',
+      'tag': 'proxy',
+      'server': uri.host,
+      'server_port': uri.port,
+      'up_mbps': upMbps,
+      'down_mbps': downMbps,
+      if (auth != null && auth.isNotEmpty) 'auth_str': auth,
+      if ((query['auth_base64'] ?? '').isNotEmpty) 'auth': query['auth_base64'],
+      if (obfs != null && obfs.isNotEmpty) 'obfs': obfs,
+      'tls': tls,
+    };
+
+    return VpnProfile(
+      id: _stableId(link),
+      name: _displayName(uri.fragment, fallback: uri.host),
+      kind: VpnProfileKind.hysteria,
+      originalInput: link,
+      server: uri.host,
+      port: uri.port,
+      outbound: outbound,
+    );
+  }
+
+  VpnProfile _parseHysteria2(String link) {
+    final normalized = link.toLowerCase().startsWith('hy2://')
+        ? 'hysteria2://${link.substring('hy2://'.length)}'
+        : link;
+    final uri = Uri.parse(normalized);
+    if (uri.host.isEmpty) {
+      throw const ProfileImportException('Hysteria2 ссылка без host.');
+    }
+
+    final query = _query(uri);
+    final password = Uri.decodeComponent(uri.userInfo);
+    if (password.isEmpty) {
+      throw const ProfileImportException('Hysteria2 ссылка без auth/password.');
+    }
+
+    final upMbps = _asIntString(query['upmbps'] ?? query['up_mbps']);
+    final downMbps = _asIntString(query['downmbps'] ?? query['down_mbps']);
+    final outbound = <String, dynamic>{
+      'type': 'hysteria2',
+      'tag': 'proxy',
+      'server': uri.host,
+      'server_port': uri.hasPort ? uri.port : 443,
+      'password': password,
+      if ((query['obfs'] ?? '').toLowerCase() == 'salamander' &&
+          (query['obfs-password'] ?? query['obfsParam'] ?? '').isNotEmpty)
+        'obfs': {
+          'type': 'salamander',
+          'password': query['obfs-password'] ?? query['obfsParam'],
+        },
+      'tls': _tlsFromQuery(query, fallbackServerName: uri.host),
+    };
+    if (upMbps != null) {
+      outbound['up_mbps'] = upMbps;
+    }
+    if (downMbps != null) {
+      outbound['down_mbps'] = downMbps;
+    }
+
+    return VpnProfile(
+      id: _stableId(link),
+      name: _displayName(uri.fragment, fallback: uri.host),
+      kind: VpnProfileKind.hysteria2,
+      originalInput: link,
+      server: uri.host,
+      port: uri.hasPort ? uri.port : 443,
+      outbound: outbound,
+    );
+  }
+
+  Map<String, dynamic> _tlsFromQuery(
+    Map<String, String> query, {
+    required String fallbackServerName,
+  }) {
+    final tls = <String, dynamic>{
+      'enabled': true,
+      'server_name': query['sni'] ?? query['peer'] ?? fallbackServerName,
+    };
+    final alpn = _csv(query['alpn']);
+    if (alpn.isNotEmpty) {
+      tls['alpn'] = alpn;
+    }
+    if (_truthy(query['allowInsecure']) ||
+        _truthy(query['insecure']) ||
+        _truthy(query['skip-cert-verify'])) {
+      tls['insecure'] = true;
+    }
+    return tls;
+  }
+
   Map<String, String> _query(Uri uri) {
     return uri.queryParameters.map(
       (key, value) => MapEntry(key, Uri.decodeComponent(value)),
     );
+  }
+
+  int? _asIntString(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return null;
+    }
+    return int.tryParse(value.trim());
   }
 
   Map<String, dynamic>? _v2rayTransport(Map<String, String> query) {

@@ -29,7 +29,14 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.9';
+const _appVersion = '1.0.10';
+
+class _ConnectionConfigPlan {
+  const _ConnectionConfigPlan(this.naiveMode, this.label);
+
+  final NaiveOutboundMode naiveMode;
+  final String label;
+}
 
 enum _AppLanguage {
   ru('ru'),
@@ -67,7 +74,9 @@ class _HomeScreenState extends State<HomeScreen>
   StreamSubscription<Map<String, dynamic>>? _trafficSubscription;
   StreamSubscription<Map<String, dynamic>>? _logSubscription;
   Timer? _logFlushTimer;
+  Timer? _healthWatchdogTimer;
   DateTime? _ignoreStoppedUntil;
+  DateTime? _healthWatchdogWarmupUntil;
 
   List<VpnProfile> _profiles = const [];
   String? _selectedProfileId;
@@ -82,9 +91,12 @@ class _HomeScreenState extends State<HomeScreen>
   bool _stoppingByUser = false;
   bool _windowsSettingsBusy = false;
   bool _checkingUpdate = false;
+  bool _installingUpdate = false;
   bool _autoStart = false;
   bool _autoConnect = false;
   bool _autoConnectAttempted = false;
+  bool _healthWatchdogRestarting = false;
+  int _healthWatchdogFailures = 0;
   bool _quitFromTray = false;
   List<String> _splitTunnelExcludedProcesses = const [];
   WindowsUpdateInfo? _updateInfo;
@@ -199,6 +211,7 @@ class _HomeScreenState extends State<HomeScreen>
     _trafficSubscription?.cancel();
     _logSubscription?.cancel();
     _logFlushTimer?.cancel();
+    _stopHealthWatchdog();
     if (Platform.isWindows) {
       trayManager.removeListener(this);
       windowManager.removeListener(this);
@@ -252,6 +265,9 @@ class _HomeScreenState extends State<HomeScreen>
     final autoConnect = await _store.loadAutoConnect();
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
+    if (Platform.isWindows) {
+      await _windowsIntegration.repairAutoStartIfNeeded();
+    }
     final autoStart = Platform.isWindows
         ? await _windowsIntegration.isAutoStartEnabled()
         : false;
@@ -281,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen>
         !_autoConnectAttempted) {
       _autoConnectAttempted = true;
       unawaited(
-        Future<void>.delayed(const Duration(milliseconds: 1400), () async {
+        Future<void>.delayed(const Duration(seconds: 12), () async {
           if (mounted && !_connected && !_busy) {
             await _connect();
           }
@@ -310,6 +326,10 @@ class _HomeScreenState extends State<HomeScreen>
             _ignoreStoppedUntil = DateTime.now().add(
               const Duration(seconds: 4),
             );
+            _startHealthWatchdog(warmup: const Duration(seconds: 30));
+          } else if (status == AurumVpnStatus.stopped ||
+              status == AurumVpnStatus.stopping) {
+            _stopHealthWatchdog();
           }
           final ignoreStopped =
               _ignoreStoppedUntil != null &&
@@ -570,56 +590,94 @@ class _HomeScreenState extends State<HomeScreen>
     _lastError = null;
     await _vpnEngine.clearLogs();
 
-    final config = _configBuilder.build(
-      profile,
-      target: _vpnEngine.configTarget,
-      splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
-    );
-    final configSummary = _summarizeSingBoxConfig(
-      config,
-      target: _vpnEngine.configTarget,
-    );
-    final saved = await _vpnEngine.saveConfig(config);
-    if (!saved) {
-      throw StateError(s.configSaveFailed);
-    }
     await _vpnEngine.requestNotificationPermission();
 
     Object? lastStartError;
     var connected = false;
-    for (var attempt = 1; attempt <= 2; attempt += 1) {
-      if (mounted) {
-        setState(() {
-          _selectedProfileId = profile.id;
-          _lastError = null;
-          _message = s.connectingStatus(profile.name);
-          _uplink = '0 B/s';
-          _downlink = '0 B/s';
-          _sessionTotal = '0 B';
-          _lastConfigSummary = configSummary;
-        });
+    final plans = _connectionPlans(profile);
+
+    for (
+      var planIndex = 0;
+      planIndex < plans.length && !connected;
+      planIndex += 1
+    ) {
+      final plan = plans[planIndex];
+      final config = _configBuilder.build(
+        profile,
+        target: _vpnEngine.configTarget,
+        naiveMode: plan.naiveMode,
+        splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
+      );
+      final naiveProxyConfig =
+          _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
+              profile.kind == VpnProfileKind.naive &&
+              plan.naiveMode == NaiveOutboundMode.externalCore
+          ? _configBuilder.buildNaiveProxyConfig(profile)
+          : null;
+      final configSummary = _summarizeSingBoxConfig(
+        config,
+        target: _vpnEngine.configTarget,
+      );
+      final saved = await _vpnEngine.saveConfig(
+        config,
+        naiveProxyConfig: naiveProxyConfig,
+      );
+      if (!saved) {
+        throw StateError(s.configSaveFailed);
       }
 
-      final started = await _vpnEngine.startVPN();
-      if (started) {
-        final finalStatus = await _waitForVpnStatus({
-          AurumVpnStatus.started,
-        }, timeout: const Duration(seconds: 14));
-        if (finalStatus == AurumVpnStatus.started) {
-          connected = true;
-          break;
+      for (var attempt = 1; attempt <= 2 && !connected; attempt += 1) {
+        if (mounted) {
+          setState(() {
+            _selectedProfileId = profile.id;
+            _lastError = null;
+            _message = plans.length > 1
+                ? '${s.connectingStatus(profile.name)} · ${plan.label}'
+                : s.connectingStatus(profile.name);
+            _uplink = '0 B/s';
+            _downlink = '0 B/s';
+            _sessionTotal = '0 B';
+            _lastConfigSummary = configSummary;
+          });
         }
-        lastStartError = s.vpnNotConnected(finalStatus);
-      } else {
-        lastStartError = s.vpnStartFailed;
+
+        final started = await _vpnEngine.startVPN();
+        if (started) {
+          final finalStatus = await _waitForVpnStatus({
+            AurumVpnStatus.started,
+          }, timeout: const Duration(seconds: 14));
+          if (finalStatus == AurumVpnStatus.started) {
+            if (profile.kind != VpnProfileKind.naive ||
+                await _probeLocalMixedProxy()) {
+              connected = true;
+              break;
+            }
+            lastStartError = s.connectionProbeFailed;
+          } else {
+            lastStartError = s.vpnNotConnected(finalStatus);
+          }
+        } else {
+          lastStartError = s.vpnStartFailed;
+        }
+
+        if (!connected) {
+          _queueLog(
+            'VPN start retry [$attempt/${plan.label}]: '
+            '${_redactSensitive('$lastStartError')}',
+          );
+          await _stopVpnCore(updateMessage: false);
+          await Future<void>.delayed(const Duration(milliseconds: 1600));
+          await _vpnEngine.saveConfig(
+            config,
+            naiveProxyConfig: naiveProxyConfig,
+          );
+          _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 14));
+        }
       }
 
-      if (attempt == 1) {
-        _queueLog('VPN start retry: ${_redactSensitive('$lastStartError')}');
-        await _stopVpnCore(updateMessage: false);
-        await Future<void>.delayed(const Duration(milliseconds: 1600));
-        await _vpnEngine.saveConfig(config);
-        _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 14));
+      if (!connected && planIndex < plans.length - 1) {
+        _queueLog('Naive mode fallback: ${plan.label} did not pass probe.');
+        await Future<void>.delayed(const Duration(milliseconds: 800));
       }
     }
 
@@ -635,6 +693,148 @@ class _HomeScreenState extends State<HomeScreen>
         _lastError = null;
         _message = s.connectionProfile(profile.name);
       });
+    }
+  }
+
+  List<_ConnectionConfigPlan> _connectionPlans(VpnProfile profile) {
+    if (profile.kind != VpnProfileKind.naive) {
+      return const [_ConnectionConfigPlan(NaiveOutboundMode.auto, 'auto')];
+    }
+
+    final outboundType = (profile.outbound?['type'] as String?)?.toLowerCase();
+    if (outboundType == 'http') {
+      return const [
+        _ConnectionConfigPlan(NaiveOutboundMode.httpConnect, 'https-connect'),
+        _ConnectionConfigPlan(NaiveOutboundMode.native, 'native-naive'),
+      ];
+    }
+
+    return const [
+      _ConnectionConfigPlan(NaiveOutboundMode.native, 'native-naive'),
+      _ConnectionConfigPlan(NaiveOutboundMode.httpConnect, 'https-connect'),
+    ];
+  }
+
+  Future<bool> _probeLocalMixedProxy({bool logFailures = true}) async {
+    final endpoints = <({Uri uri, bool allowCertificateMismatch})>[
+      (
+        uri: Uri.https('cp.cloudflare.com', '/generate_204'),
+        allowCertificateMismatch: false,
+      ),
+    ];
+
+    for (final endpoint in endpoints) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 3)
+        ..badCertificateCallback = endpoint.allowCertificateMismatch
+            ? (_, host, _) => host == endpoint.uri.host
+            : null
+        ..findProxy = (_) =>
+            'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+      try {
+        final request = await client
+            .getUrl(endpoint.uri)
+            .timeout(const Duration(seconds: 3));
+        request.headers.set(
+          HttpHeaders.userAgentHeader,
+          'AurumVPN/$_appVersion',
+        );
+        request.followRedirects = false;
+        final response = await request.close().timeout(
+          const Duration(seconds: 4),
+        );
+        await response.drain<void>().timeout(
+          const Duration(seconds: 2),
+          onTimeout: () {},
+        );
+        if (response.statusCode >= 200 && response.statusCode < 400) {
+          return true;
+        }
+        if (logFailures) {
+          _queueLog(
+            'VPN health probe HTTP ${response.statusCode}: ${endpoint.uri}',
+          );
+        }
+      } on Object catch (error) {
+        if (logFailures) {
+          _queueLog('VPN health probe failed: ${_redactSensitive('$error')}');
+        }
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    return false;
+  }
+
+  void _startHealthWatchdog({Duration warmup = Duration.zero}) {
+    if (!Platform.isWindows) {
+      return;
+    }
+    _healthWatchdogTimer?.cancel();
+    _healthWatchdogFailures = 0;
+    _healthWatchdogWarmupUntil = DateTime.now().add(warmup);
+    _healthWatchdogTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      unawaited(_runHealthWatchdogTick());
+    });
+  }
+
+  void _stopHealthWatchdog() {
+    _healthWatchdogTimer?.cancel();
+    _healthWatchdogTimer = null;
+    _healthWatchdogWarmupUntil = null;
+    _healthWatchdogFailures = 0;
+  }
+
+  Future<void> _runHealthWatchdogTick() async {
+    if (!mounted ||
+        !Platform.isWindows ||
+        _busy ||
+        _healthWatchdogRestarting ||
+        _status != AurumVpnStatus.started) {
+      return;
+    }
+
+    final warmupUntil = _healthWatchdogWarmupUntil;
+    if (warmupUntil != null && DateTime.now().isBefore(warmupUntil)) {
+      return;
+    }
+
+    final healthy = await _probeLocalMixedProxy(logFailures: false);
+    if (healthy) {
+      if (_healthWatchdogFailures > 0) {
+        _queueLog('VPN health watchdog recovered.');
+      }
+      _healthWatchdogFailures = 0;
+      return;
+    }
+
+    _healthWatchdogFailures += 1;
+    _queueLog('VPN health watchdog failed $_healthWatchdogFailures/3.');
+    if (_healthWatchdogFailures < 3) {
+      return;
+    }
+
+    final profile = _selectedProfile;
+    if (profile == null) {
+      _healthWatchdogFailures = 0;
+      return;
+    }
+
+    _healthWatchdogRestarting = true;
+    _queueLog('VPN health watchdog restarting tunnel.');
+    await _runBusy(() async {
+      await _stopVpnCore(updateMessage: false);
+      await Future<void>.delayed(const Duration(seconds: 2));
+      if (mounted && _autoConnect) {
+        await _startVpnCore(profile);
+      }
+    }, message: 'Проверка сети провалилась, перезапускаю VPN...');
+
+    _healthWatchdogRestarting = false;
+    _healthWatchdogFailures = 0;
+    if (mounted && _status == AurumVpnStatus.started) {
+      _startHealthWatchdog(warmup: const Duration(seconds: 45));
     }
   }
 
@@ -770,7 +970,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _checkForUpdates() async {
-    if (_checkingUpdate) {
+    if (_checkingUpdate || _installingUpdate) {
       return;
     }
     setState(() {
@@ -778,23 +978,61 @@ class _HomeScreenState extends State<HomeScreen>
       _updateInfo = null;
       _message = s.checkingUpdates;
     });
-    final info = await _windowsIntegration.checkForUpdate(_appVersion);
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _checkingUpdate = false;
-      _updateInfo = info;
-      _message = s.updateMessage(info);
-    });
-    if (info.available && info.releaseUrl != null) {
-      _showSnack(
-        s.updateMessage(info),
-        action: SnackBarAction(
-          label: s.openRelease,
-          onPressed: () => unawaited(_openUrl(info.releaseUrl.toString())),
-        ),
-      );
+    try {
+      final info = await _windowsIntegration.checkForUpdate(_appVersion);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _checkingUpdate = false;
+        _updateInfo = info;
+        _message = s.updateMessage(info);
+      });
+
+      if (!info.available) {
+        return;
+      }
+
+      if (!info.canInstall) {
+        if (info.releaseUrl != null) {
+          _showSnack(
+            s.updateInstallerMissing,
+            action: SnackBarAction(
+              label: s.openRelease,
+              onPressed: () => unawaited(_openUrl(info.releaseUrl.toString())),
+            ),
+          );
+        } else {
+          _showSnack(s.updateInstallerMissing);
+        }
+        return;
+      }
+
+      setState(() {
+        _installingUpdate = true;
+        _message = s.downloadingUpdate(info.latestVersion ?? '');
+      });
+      final installer = await _windowsIntegration.downloadInstaller(info);
+      if (!mounted) {
+        return;
+      }
+      setState(() => _message = s.startingUpdater);
+      await _stopVpnCore(updateMessage: false);
+      await _windowsIntegration.runInstallerAsAdmin(installer);
+      exit(0);
+    } on Object catch (error) {
+      if (mounted) {
+        final message = '${s.updateFailed}: ${_redactSensitive('$error')}';
+        setState(() => _message = message);
+        _showSnack(message);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _checkingUpdate = false;
+          _installingUpdate = false;
+        });
+      }
     }
   }
 
@@ -905,6 +1143,8 @@ class _HomeScreenState extends State<HomeScreen>
       VpnProfileKind.vlessReality => 'VLESS Reality',
       VpnProfileKind.vlessTls => 'VLESS TLS',
       VpnProfileKind.naive => 'NaiveProxy',
+      VpnProfileKind.hysteria => 'Hysteria',
+      VpnProfileKind.hysteria2 => 'Hysteria2',
       VpnProfileKind.singBoxConfig => 'Sing-box',
     };
   }
@@ -1122,6 +1362,7 @@ class _HomeScreenState extends State<HomeScreen>
         'stack=${tun['stack'] ?? 'unknown'}',
         'network=${proxy['network_strategy'] ?? 'default'}',
         if (proxy['type'] == 'http') 'mode=https-connect',
+        if (proxy['type'] == 'socks') 'mode=naive-core',
         if (proxy['type'] != 'http') 'quic=${proxy['quic'] ?? 'auto'}',
         'mixed_proxy=$hasMixedProxy',
       ].join('; ');
@@ -1270,6 +1511,7 @@ class _HomeScreenState extends State<HomeScreen>
                 autoConnect: _autoConnect,
                 busy: _windowsSettingsBusy,
                 checkingUpdate: _checkingUpdate,
+                installingUpdate: _installingUpdate,
                 excludedProcessCount: _splitTunnelExcludedProcesses.length,
                 updateInfo: _updateInfo,
                 onAutoStartChanged: (value) => unawaited(_setAutoStart(value)),
@@ -1655,6 +1897,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.autoConnect,
     required this.busy,
     required this.checkingUpdate,
+    required this.installingUpdate,
     required this.excludedProcessCount,
     required this.updateInfo,
     required this.onAutoStartChanged,
@@ -1669,6 +1912,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool autoConnect;
   final bool busy;
   final bool checkingUpdate;
+  final bool installingUpdate;
   final int excludedProcessCount;
   final WindowsUpdateInfo? updateInfo;
   final ValueChanged<bool> onAutoStartChanged;
@@ -1729,15 +1973,21 @@ class _WindowsToolsPanel extends StatelessWidget {
                   label: Text(strings.splitTunnelButton(excludedProcessCount)),
                 ),
                 OutlinedButton.icon(
-                  onPressed: checkingUpdate ? null : onCheckUpdate,
-                  icon: checkingUpdate
+                  onPressed: checkingUpdate || installingUpdate
+                      ? null
+                      : onCheckUpdate,
+                  icon: checkingUpdate || installingUpdate
                       ? const SizedBox.square(
                           dimension: 16,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.system_update_alt),
                   label: Text(
-                    checkingUpdate ? strings.checkingUpdates : strings.updates,
+                    installingUpdate
+                        ? strings.installingUpdate
+                        : checkingUpdate
+                        ? strings.checkingUpdates
+                        : strings.updates,
                   ),
                 ),
                 TextButton.icon(
@@ -2130,6 +2380,11 @@ class _Strings {
     _ => 'VPN не вышел в статус "Подключено". Последний статус: $status.',
   };
 
+  String get connectionProbeFailed => switch (this) {
+    _Strings.en => 'VPN started, but the proxy health check failed.',
+    _ => 'VPN стартовал, но проверка прокси не прошла.',
+  };
+
   String vpnStopTimeout(String status) => switch (this) {
     _Strings.en => 'VPN did not fully stop in time. Last status: $status.',
     _ => 'VPN не успел полностью остановиться. Последний статус: $status.',
@@ -2148,6 +2403,33 @@ class _Strings {
     _Strings.en => 'App exclusions: $count',
     _ when count == 0 => 'Исключения приложений',
     _ => 'Исключения: $count',
+  };
+
+  String get installingUpdate => switch (this) {
+    _Strings.en => 'Installing...',
+    _ => 'Устанавливаю...',
+  };
+
+  String downloadingUpdate(String version) => switch (this) {
+    _Strings.en when version.isNotEmpty => 'Downloading update $version...',
+    _Strings.en => 'Downloading update...',
+    _ when version.isNotEmpty => 'Скачиваю обновление $version...',
+    _ => 'Скачиваю обновление...',
+  };
+
+  String get startingUpdater => switch (this) {
+    _Strings.en => 'Starting installer as administrator...',
+    _ => 'Запускаю установщик от имени администратора...',
+  };
+
+  String get updateInstallerMissing => switch (this) {
+    _Strings.en => 'Release found, but Windows installer is missing.',
+    _ => 'Релиз найден, но Windows-установщик не прикреплён.',
+  };
+
+  String get updateFailed => switch (this) {
+    _Strings.en => 'Update failed',
+    _ => 'Обновление не удалось',
   };
 
   String updateMessage(WindowsUpdateInfo info) => switch (this) {
@@ -2188,7 +2470,7 @@ class _Strings {
     languageChanged: 'Язык переключён',
     windowsEdition: 'Windows 11',
     addProfile: 'Добавить профиль',
-    importHint: 'https://sub... или vless://... или naive+https://...',
+    importHint: 'https://sub... или vless://... или hysteria2://...',
     importAction: 'Импорт',
     clipboard: 'Буфер',
     scanQr: 'Сканировать QR',
@@ -2233,7 +2515,7 @@ class _Strings {
       _FaqItem(
         question: 'Какие протоколы поддерживаются?',
         answer:
-            'Поддерживаются VLESS Reality, VLESS TLS, Remnawave подписки, naive+https и sing-box JSON.',
+            'Поддерживаются VLESS Reality, VLESS TLS, Hysteria 1/2, Remnawave подписки, naive+https и sing-box JSON.',
       ),
       _FaqItem(
         question: 'Что делать, если после смены профиля пропал интернет?',
@@ -2261,7 +2543,7 @@ class _Strings {
     windowsTools: 'Windows',
     autoStart: 'Автостарт с Windows',
     autoStartHint:
-        'Запускает Aurum VPN при входе в Windows через планировщик задач.',
+        'Запускает Aurum VPN при входе в Windows через планировщик задач с высшими правами.',
     autoStartEnabled: 'Автостарт включён',
     autoStartDisabled: 'Автостарт выключен',
     autoStartFailed: 'Не удалось изменить автостарт',
@@ -2311,7 +2593,7 @@ class _Strings {
     languageChanged: 'Language changed',
     windowsEdition: 'Windows 11',
     addProfile: 'Add profile',
-    importHint: 'https://sub... or vless://... or naive+https://...',
+    importHint: 'https://sub... or vless://... or hysteria2://...',
     importAction: 'Import',
     clipboard: 'Clipboard',
     scanQr: 'Scan QR',
@@ -2355,7 +2637,7 @@ class _Strings {
       _FaqItem(
         question: 'Which protocols are supported?',
         answer:
-            'VLESS Reality, VLESS TLS, Remnawave subscriptions, naive+https, and sing-box JSON are supported.',
+            'VLESS Reality, VLESS TLS, Hysteria 1/2, Remnawave subscriptions, naive+https, and sing-box JSON are supported.',
       ),
       _FaqItem(
         question: 'What if internet stops after switching profiles?',
@@ -2382,7 +2664,8 @@ class _Strings {
     noLogs: 'No logs yet.',
     windowsTools: 'Windows',
     autoStart: 'Start with Windows',
-    autoStartHint: 'Starts Aurum VPN on Windows sign-in via Task Scheduler.',
+    autoStartHint:
+        'Starts Aurum VPN on Windows sign-in via Task Scheduler with highest privileges.',
     autoStartEnabled: 'Startup enabled',
     autoStartDisabled: 'Startup disabled',
     autoStartFailed: 'Could not change startup',

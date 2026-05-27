@@ -129,7 +129,7 @@ void main() {
       (rejectRule['rules'] as List).whereType<Map>().any(
         (nested) => nested['network'] == 'udp' && nested.length == 1,
       ),
-      isTrue,
+      isFalse,
     );
     expect(
       (rejectRule['rules'] as List).whereType<Map>().any(
@@ -161,6 +161,78 @@ void main() {
     expect(proxy['udp_over_tcp'], isNull);
   });
 
+  test('imports Hysteria v1 link', () async {
+    const link =
+        'hysteria://hy.example.com:443?auth=secret&peer=cdn.example.com&insecure=1&upmbps=50&downmbps=120&alpn=hysteria&obfs=xplus&obfsParam=mask#Hy1';
+
+    final profiles = await ProfileImporter().importFromText(link);
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profiles.first,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profiles, hasLength(1));
+    expect(profiles.first.kind, VpnProfileKind.hysteria);
+    expect(profiles.first.name, 'Hy1');
+    expect(proxy['type'], 'hysteria');
+    expect(proxy['server'], 'hy.example.com');
+    expect(proxy['server_port'], 443);
+    expect(proxy['auth_str'], 'secret');
+    expect(proxy['up_mbps'], 50);
+    expect(proxy['down_mbps'], 120);
+    expect(proxy['obfs'], 'mask');
+    expect(proxy['tls'], {
+      'enabled': true,
+      'server_name': 'cdn.example.com',
+      'alpn': ['hysteria'],
+      'insecure': true,
+    });
+  });
+
+  test('imports Hysteria2 link', () async {
+    const link =
+        'hy2://pa%3Ass@hy2.example.com:8443/?sni=cdn.example.com&obfs=salamander&obfs-password=mask#Hy2';
+
+    final profiles = await ProfileImporter().importFromText(link);
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profiles.first,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final routeRules =
+        ((config['route'] as Map<String, dynamic>)['rules'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+    final rejectRule = routeRules.firstWhere(
+      (rule) => rule['action'] == 'reject',
+    );
+
+    expect(profiles, hasLength(1));
+    expect(profiles.first.kind, VpnProfileKind.hysteria2);
+    expect(profiles.first.name, 'Hy2');
+    expect(proxy['type'], 'hysteria2');
+    expect(proxy['server'], 'hy2.example.com');
+    expect(proxy['server_port'], 8443);
+    expect(proxy['password'], 'pa:ss');
+    expect(proxy['obfs'], {'type': 'salamander', 'password': 'mask'});
+    expect(proxy['tls'], {'enabled': true, 'server_name': 'cdn.example.com'});
+    expect(
+      (rejectRule['rules'] as List).whereType<Map>().any(
+        (nested) => nested['network'] == 'udp' && nested['port'] == 443,
+      ),
+      isFalse,
+    );
+  });
+
   test('can use HTTPS CONNECT fallback for Naive profiles', () async {
     const link = 'naive+https://example.com:pass@example.com:443#Naive';
 
@@ -180,6 +252,83 @@ void main() {
     expect(proxy['quic'], isNull);
     expect(proxy['quic_congestion_control'], isNull);
     expect(proxy['udp_over_tcp'], isNull);
+    final routeRules =
+        ((config['route'] as Map<String, dynamic>)['rules'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+    final rejectRule = routeRules.firstWhere(
+      (rule) => rule['action'] == 'reject',
+    );
+    expect(
+      (rejectRule['rules'] as List).whereType<Map>().any(
+        (nested) => nested['network'] == 'udp' && nested.length == 1,
+      ),
+      isTrue,
+    );
+    expect(
+      (rejectRule['rules'] as List).whereType<Map>().any(
+        (nested) => nested['network'] == 'udp' && nested['port'] == 443,
+      ),
+      isTrue,
+    );
+  });
+
+  test('can route Naive through bundled NaiveProxy core on Windows', () async {
+    const link = 'naive+https://user:pass@example.com:443?quic=true#NaiveCore';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final builder = SingBoxConfigBuilder();
+    final config =
+        jsonDecode(
+              builder.build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                naiveMode: NaiveOutboundMode.externalCore,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final route = config['route'] as Map<String, dynamic>;
+    final routeRules = (route['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final naiveConfig =
+        jsonDecode(builder.buildNaiveProxyConfig(profile))
+            as Map<String, dynamic>;
+
+    expect(proxy['type'], 'socks');
+    expect(proxy['server'], '127.0.0.1');
+    expect(proxy['server_port'], SingBoxConfigBuilder.naiveProxySocksPort);
+    expect(proxy['network'], 'tcp');
+    expect(route['find_process'], isTrue);
+    expect(
+      routeRules.any(
+        (rule) =>
+            (rule['process_name'] as List?)?.contains('naive.exe') == true &&
+            rule['outbound'] == 'direct',
+      ),
+      isTrue,
+    );
+    final rejectRule = routeRules.firstWhere(
+      (rule) => rule['action'] == 'reject',
+    );
+    expect(
+      (rejectRule['rules'] as List).whereType<Map>().any(
+        (nested) => nested['network'] == 'udp' && nested['port'] == 443,
+      ),
+      isTrue,
+    );
+    expect(
+      (rejectRule['rules'] as List).whereType<Map>().any(
+        (nested) => nested['network'] == 'udp' && nested.length == 1,
+      ),
+      isFalse,
+    );
+    expect(
+      naiveConfig['listen'],
+      'socks://127.0.0.1:${SingBoxConfigBuilder.naiveProxySocksPort}',
+    );
+    expect(naiveConfig['proxy'], 'quic://user:pass@example.com:443');
   });
 
   test('normalizes legacy Naive TLS fields from saved profiles', () {
@@ -282,7 +431,8 @@ void main() {
 
     expect(tunInbound['interface_name'], 'AurumVPN');
     expect(tunInbound['exclude_package'], isNull);
-    expect(tunInbound['mtu'], 1380);
+    expect(tunInbound['mtu'], 9000);
+    expect(tunInbound['stack'], 'system');
     expect(route['find_process'], isTrue);
     expect(
       routeRules.any((rule) {
@@ -329,7 +479,8 @@ void main() {
             rule['outbound'] == 'direct' &&
             rule['domain_suffix'] is List &&
             (rule['domain_suffix'] as List).contains('.ru') &&
-            (rule['domain_suffix'] as List).contains('.рф'),
+            (rule['domain_suffix'] as List).contains('.рф') &&
+            (rule['domain_suffix'] as List).contains('timeweb.cloud'),
       ),
       isTrue,
     );

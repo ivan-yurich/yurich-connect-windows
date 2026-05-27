@@ -54,6 +54,14 @@ Invoke-Step 'Windows runtime files' {
     $item = Get-Item -LiteralPath $path
     Write-Host ("{0}  {1} bytes  {2}" -f $item.Name, $item.Length, $item.LastWriteTime)
   }
+  foreach ($name in @('naive.exe', 'NAIVE_LICENSE.txt', 'NAIVE_USAGE.txt')) {
+    $path = Join-Path $runtimeDir $name
+    if (-not (Test-Path -LiteralPath $path)) {
+      throw "Missing NaiveProxy runtime file: $path"
+    }
+    $item = Get-Item -LiteralPath $path
+    Write-Host ("{0}  {1} bytes  {2}" -f $item.Name, $item.Length, $item.LastWriteTime)
+  }
   & (Join-Path $runtimeDir 'sing-box.exe') version
 }
 
@@ -78,6 +86,8 @@ Invoke-Step 'Portable archive contents' {
     'tray_manager_plugin.dll',
     'window_manager_plugin.dll',
     'runtime/sing-box.exe',
+    'runtime/naive.exe',
+    'runtime/NAIVE_LICENSE.txt',
     'runtime/wintun.dll',
     'runtime/libcronet.dll',
     'data/flutter_assets/windows/runner/resources/app_icon.ico',

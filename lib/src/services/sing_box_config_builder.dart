@@ -4,14 +4,36 @@ import '../models/vpn_profile.dart';
 
 enum SingBoxConfigTarget { android, windows }
 
-enum NaiveOutboundMode { auto, native, httpConnect }
+enum NaiveOutboundMode { auto, externalCore, native, httpConnect }
 
 class SingBoxConfigBuilder {
   static const windowsClashApiPort = 19090;
   static const localMixedProxyPort = 20808;
+  static const naiveProxySocksPort = 20809;
   static const russianGeoIpRuleSet = 'geoip-ru';
   static const russianGeoIpRuleSetUrl =
       'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs';
+  static const russianDirectDomains = [
+    '.ru',
+    '.рф',
+    '.su',
+    'timeweb.cloud',
+    'timeweb.com',
+    'yandex.net',
+    'yandex.com',
+    'vk.com',
+    'vk.ru',
+    'ok.ru',
+    'mail.ru',
+    'mycdn.me',
+    'gosuslugi.ru',
+    'sberbank.ru',
+    'tbank.ru',
+    'alfabank.ru',
+    'avito.ru',
+    'ozon.ru',
+    'wildberries.ru',
+  ];
 
   String build(
     VpnProfile profile, {
@@ -37,7 +59,12 @@ class SingBoxConfigBuilder {
     proxyOutbound['tag'] = 'proxy';
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
     _applyDialStability(proxyOutbound, target);
-    final rejectUnsupportedUdp = profile.kind == VpnProfileKind.naive;
+    final usesNaiveProxyCore =
+        target == SingBoxConfigTarget.windows &&
+        proxyOutbound['type'] == 'socks';
+    final rejectQuicUdp = profile.kind == VpnProfileKind.naive;
+    final rejectAllUdp =
+        profile.kind == VpnProfileKind.naive && proxyOutbound['type'] == 'http';
     final excludedProcesses = _normalizeProcessNames(
       splitTunnelExcludedProcesses,
     );
@@ -65,14 +92,19 @@ class SingBoxConfigBuilder {
           if (target == SingBoxConfigTarget.windows &&
               excludedProcesses.isNotEmpty)
             {'process_name': excludedProcesses, 'outbound': 'direct'},
-          if (target == SingBoxConfigTarget.windows) ...[
+          if (usesNaiveProxyCore)
             {
-              'domain_suffix': ['.ru', '.рф', '.su'],
+              'process_name': ['naive.exe'],
               'outbound': 'direct',
             },
+          if (target == SingBoxConfigTarget.windows) ...[
+            {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
             {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
           ],
-          _unsupportedUdpRule(rejectUnsupportedUdp),
+          _unsupportedUdpRule(
+            rejectQuicUdp: rejectQuicUdp,
+            rejectAllUdp: rejectAllUdp,
+          ),
           {'ip_is_private': true, 'outbound': 'direct'},
         ],
         if (target == SingBoxConfigTarget.windows)
@@ -88,7 +120,7 @@ class SingBoxConfigBuilder {
         'auto_detect_interface': true,
         'find_process':
             target == SingBoxConfigTarget.windows &&
-            excludedProcesses.isNotEmpty,
+            (excludedProcesses.isNotEmpty || usesNaiveProxyCore),
         'final': 'proxy',
       },
     };
@@ -113,10 +145,10 @@ class SingBoxConfigBuilder {
       'address': target == SingBoxConfigTarget.android
           ? ['172.19.0.1/30']
           : ['172.19.0.1/30'],
-      'mtu': 1380,
+      'mtu': target == SingBoxConfigTarget.android ? 1380 : 9000,
       'auto_route': true,
       'strict_route': true,
-      'stack': target == SingBoxConfigTarget.android ? 'gvisor' : 'mixed',
+      'stack': target == SingBoxConfigTarget.android ? 'gvisor' : 'system',
       if (target == SingBoxConfigTarget.android)
         'endpoint_independent_nat': false,
     };
@@ -192,7 +224,10 @@ class SingBoxConfigBuilder {
     };
   }
 
-  Map<String, dynamic> _unsupportedUdpRule(bool rejectAllUdp) {
+  Map<String, dynamic> _unsupportedUdpRule({
+    required bool rejectQuicUdp,
+    required bool rejectAllUdp,
+  }) {
     return {
       'type': 'logical',
       'mode': 'or',
@@ -200,7 +235,7 @@ class SingBoxConfigBuilder {
         {'port': 853},
         {'protocol': 'stun'},
         {'protocol': 'icmp'},
-        if (rejectAllUdp) {'network': 'udp', 'port': 443},
+        if (rejectQuicUdp) {'network': 'udp', 'port': 443},
         if (rejectAllUdp) {'network': 'udp'},
       ],
       'action': 'reject',
@@ -252,6 +287,20 @@ class SingBoxConfigBuilder {
 
     final originalTls = (proxyOutbound['tls'] as Map?)?.cast<String, dynamic>();
     final outboundType = (proxyOutbound['type'] as String?)?.toLowerCase();
+    if (naiveMode == NaiveOutboundMode.externalCore) {
+      proxyOutbound
+        ..clear()
+        ..addAll({
+          'type': 'socks',
+          'tag': 'proxy',
+          'server': '127.0.0.1',
+          'server_port': naiveProxySocksPort,
+          'version': '5',
+          'network': 'tcp',
+        });
+      return;
+    }
+
     final useHttpConnect =
         naiveMode == NaiveOutboundMode.httpConnect ||
         (naiveMode == NaiveOutboundMode.auto && outboundType == 'http');
@@ -286,5 +335,33 @@ class SingBoxConfigBuilder {
       () => profile.server ?? proxyOutbound['server'],
     );
     proxyOutbound['tls'] = normalizedTls;
+  }
+
+  String buildNaiveProxyConfig(VpnProfile profile) {
+    if (profile.kind != VpnProfileKind.naive || profile.outbound == null) {
+      throw StateError('NaiveProxy config requires a Naive profile.');
+    }
+
+    final outbound = profile.outbound!;
+    final server = profile.server ?? outbound['server'];
+    final port = profile.port ?? outbound['server_port'] ?? 443;
+    if (server == null || '$server'.isEmpty) {
+      throw StateError('Naive profile has no server.');
+    }
+
+    final username = Uri.encodeComponent('${outbound['username'] ?? ''}');
+    final password = Uri.encodeComponent('${outbound['password'] ?? ''}');
+    final userInfo = username.isEmpty
+        ? ''
+        : password.isEmpty
+        ? '$username@'
+        : '$username:$password@';
+    final scheme = outbound['quic'] == true ? 'quic' : 'https';
+
+    return const JsonEncoder.withIndent('  ').convert({
+      'listen': 'socks://127.0.0.1:$naiveProxySocksPort',
+      'proxy': '$scheme://$userInfo$server:$port',
+      'log': '',
+    });
   }
 }

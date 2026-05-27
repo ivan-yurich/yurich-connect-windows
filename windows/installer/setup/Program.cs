@@ -9,6 +9,7 @@ namespace AurumVpnSetup;
 internal static class Program
 {
     private const string AppName = "Aurum VPN";
+    private const string StartupTaskName = "Aurum VPN";
 
     [STAThread]
     private static int Main()
@@ -91,6 +92,7 @@ internal static class Program
                 exePath,
                 installDir);
             RegisterUninstall(installDir, exePath);
+            RepairStartupTaskIfEnabled(exePath);
             return exePath;
         }
         finally
@@ -163,12 +165,77 @@ internal static class Program
 
         var uninstallScript = Path.Combine(installDir, "uninstall_aurum_vpn.ps1");
         key.SetValue("DisplayName", "Aurum VPN");
-        key.SetValue("DisplayVersion", "1.0.0");
+        key.SetValue("DisplayVersion", "1.0.10");
         key.SetValue("Publisher", "ivan-it.net");
         key.SetValue("InstallLocation", installDir);
         key.SetValue("DisplayIcon", exePath);
         key.SetValue(
             "UninstallString",
             $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{uninstallScript}\"");
+    }
+
+    private static void RepairStartupTaskIfEnabled(string exePath)
+    {
+        try
+        {
+            using var query = Process.Start(new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                Arguments = $"/Query /TN \"{StartupTaskName}\" /XML",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            });
+            if (query is null)
+            {
+                return;
+            }
+
+            var xml = query.StandardOutput.ReadToEnd();
+            query.WaitForExit(5000);
+            if (query.ExitCode != 0 ||
+                !xml.Contains("<RunLevel>HighestAvailable</RunLevel>", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var script = $"""
+                $ErrorActionPreference = 'Stop'
+                $action = New-ScheduledTaskAction -Execute {PowerShellQuote(exePath)}
+                $trigger = New-ScheduledTaskTrigger -AtLogOn
+                $trigger.Delay = 'PT30S'
+                $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
+                $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+                Register-ScheduledTask -TaskName {PowerShellQuote(StartupTaskName)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+                """;
+
+            using var repair = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                ArgumentList =
+                {
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                },
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            });
+            repair?.WaitForExit(10000);
+        }
+        catch
+        {
+            // Startup repair is best-effort. Install should still complete.
+        }
+    }
+
+    private static string PowerShellQuote(string value)
+    {
+        return "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
     }
 }
