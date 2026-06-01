@@ -29,7 +29,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.11';
+const _appVersion = '1.0.12';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -826,7 +826,7 @@ class _HomeScreenState extends State<HomeScreen>
     await _runBusy(() async {
       await _stopVpnCore(updateMessage: false);
       await Future<void>.delayed(const Duration(seconds: 2));
-      if (mounted && _autoConnect) {
+      if (mounted) {
         await _startVpnCore(profile);
       }
     }, message: 'Проверка сети провалилась, перезапускаю VPN...');

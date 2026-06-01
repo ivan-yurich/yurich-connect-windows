@@ -86,6 +86,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     try {
       final runtimeDir = await _runtimeDir();
       final configDir = await _configDir();
+      await _stopStaleRuntimeProcesses(runtimeDir);
 
       final configFile = File('${configDir.path}\\config.json');
       await configFile.writeAsString(_config, encoding: utf8);
@@ -101,6 +102,10 @@ class WindowsSingBoxEngine implements VpnEngine {
       final exe = File('${runtimeDir.path}\\sing-box.exe');
       if (!await exe.exists()) {
         _appendLog('sing-box.exe не найден в ${runtimeDir.path}');
+        _setStatus(AurumVpnStatus.stopped);
+        return false;
+      }
+      if (!await _checkConfig(exe, configFile, runtimeDir)) {
         _setStatus(AurumVpnStatus.stopped);
         return false;
       }
@@ -147,6 +152,11 @@ class WindowsSingBoxEngine implements VpnEngine {
   Future<bool> stopVPN() async {
     final process = _process;
     if (process == null) {
+      try {
+        await _stopStaleRuntimeProcesses(await _runtimeDir());
+      } on Object {
+        // Best-effort cleanup for untracked processes after app restarts.
+      }
       _setStatus(AurumVpnStatus.stopped);
       return true;
     }
@@ -164,6 +174,75 @@ class WindowsSingBoxEngine implements VpnEngine {
     _stopTrafficTicker();
     _setStatus(AurumVpnStatus.stopped);
     return true;
+  }
+
+  Future<bool> _checkConfig(
+    File exe,
+    File configFile,
+    Directory runtimeDir,
+  ) async {
+    try {
+      final result = await Process.run(
+        exe.path,
+        ['check', '-c', configFile.path],
+        workingDirectory: runtimeDir.path,
+        runInShell: false,
+      ).timeout(const Duration(seconds: 12));
+      final output = '${result.stdout}${result.stderr}'.trim();
+      if (result.exitCode == 0) {
+        return true;
+      }
+      _appendLog(
+        output.isEmpty
+            ? 'sing-box config check failed with code ${result.exitCode}'
+            : 'sing-box config check failed: $output',
+      );
+    } on Object catch (e) {
+      _appendLog('sing-box config check failed: $e');
+    }
+    return false;
+  }
+
+  Future<void> _stopStaleRuntimeProcesses(Directory runtimeDir) async {
+    final runtimePrefix = runtimeDir.absolute.path.endsWith('\\')
+        ? runtimeDir.absolute.path
+        : '${runtimeDir.absolute.path}\\';
+    final script =
+        '''
+\$runtimePrefix = ${_quotePowerShell(runtimePrefix)}
+\$names = @('sing-box.exe', 'naive.exe')
+\$stopped = 0
+Get-CimInstance Win32_Process |
+  Where-Object {
+    \$names -contains \$_.Name -and (
+      (\$_.ExecutablePath -and \$_.ExecutablePath.StartsWith(\$runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase)) -or
+      (\$_.CommandLine -and \$_.CommandLine.IndexOf(\$runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+    )
+  } |
+  ForEach-Object {
+    try {
+      Stop-Process -Id \$_.ProcessId -Force -ErrorAction Stop
+      \$stopped += 1
+    } catch {}
+  }
+Write-Output \$stopped
+''';
+    try {
+      final result = await Process.run('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ]).timeout(const Duration(seconds: 8));
+      final stopped = int.tryParse('${result.stdout}'.trim()) ?? 0;
+      if (stopped > 0) {
+        _appendLog('Stopped stale Aurum runtime processes: $stopped');
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+      }
+    } on Object catch (e) {
+      _appendLog('Stale process cleanup skipped: $e');
+    }
   }
 
   @override
@@ -387,6 +466,10 @@ class WindowsSingBoxEngine implements VpnEngine {
         ? value.toStringAsFixed(1)
         : value.toStringAsFixed(2);
     return '${text.replaceAll('.', ',')} ${units[unit]}';
+  }
+
+  String _quotePowerShell(String value) {
+    return "'${value.replaceAll("'", "''")}'";
   }
 
   Future<Directory> _runtimeDir() async {
