@@ -145,7 +145,7 @@ class SingBoxConfigBuilder {
       'address': target == SingBoxConfigTarget.android
           ? ['172.19.0.1/30']
           : ['172.19.0.1/30'],
-      'mtu': target == SingBoxConfigTarget.android ? 1380 : 9000,
+      'mtu': target == SingBoxConfigTarget.android ? 1380 : 1500,
       'auto_route': true,
       'strict_route': true,
       'stack': target == SingBoxConfigTarget.android ? 'gvisor' : 'system',

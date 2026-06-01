@@ -29,7 +29,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.12';
+const _appVersion = '1.0.13';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -77,6 +77,7 @@ class _HomeScreenState extends State<HomeScreen>
   Timer? _healthWatchdogTimer;
   DateTime? _ignoreStoppedUntil;
   DateTime? _healthWatchdogWarmupUntil;
+  DateTime? _lastTrafficUpdateAt;
 
   List<VpnProfile> _profiles = const [];
   String? _selectedProfileId;
@@ -85,6 +86,8 @@ class _HomeScreenState extends State<HomeScreen>
   String _uplink = '0 B/s';
   String _downlink = '0 B/s';
   String _sessionTotal = '0 B';
+  int _uplinkBytesPerSecond = 0;
+  int _downlinkBytesPerSecond = 0;
   String _message = 'Готов к импорту подписки';
   String? _lastError;
   bool _busy = false;
@@ -350,6 +353,12 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
       setState(() {
+        _lastTrafficUpdateAt = DateTime.now();
+        _uplinkBytesPerSecond =
+            (event['uplinkSpeed'] as num?)?.round() ?? _uplinkBytesPerSecond;
+        _downlinkBytesPerSecond =
+            (event['downlinkSpeed'] as num?)?.round() ??
+            _downlinkBytesPerSecond;
         _uplink = event['formattedUplinkSpeed'] as String? ?? _uplink;
         _downlink = event['formattedDownlinkSpeed'] as String? ?? _downlink;
         _sessionTotal =
@@ -636,6 +645,8 @@ class _HomeScreenState extends State<HomeScreen>
                 : s.connectingStatus(profile.name);
             _uplink = '0 B/s';
             _downlink = '0 B/s';
+            _uplinkBytesPerSecond = 0;
+            _downlinkBytesPerSecond = 0;
             _sessionTotal = '0 B';
             _lastConfigSummary = configSummary;
           });
@@ -647,7 +658,7 @@ class _HomeScreenState extends State<HomeScreen>
             AurumVpnStatus.started,
           }, timeout: const Duration(seconds: 14));
           if (finalStatus == AurumVpnStatus.started) {
-            if (profile.kind != VpnProfileKind.naive ||
+            if (_vpnEngine.configTarget != SingBoxConfigTarget.windows ||
                 await _probeLocalMixedProxy()) {
               connected = true;
               break;
@@ -809,6 +820,12 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    if (_hasActiveTraffic()) {
+      _queueLog('VPN health watchdog probe failed during active traffic.');
+      _healthWatchdogFailures = 0;
+      return;
+    }
+
     _healthWatchdogFailures += 1;
     _queueLog('VPN health watchdog failed $_healthWatchdogFailures/3.');
     if (_healthWatchdogFailures < 3) {
@@ -836,6 +853,15 @@ class _HomeScreenState extends State<HomeScreen>
     if (mounted && _status == AurumVpnStatus.started) {
       _startHealthWatchdog(warmup: const Duration(seconds: 45));
     }
+  }
+
+  bool _hasActiveTraffic() {
+    final lastUpdateAt = _lastTrafficUpdateAt;
+    if (lastUpdateAt == null ||
+        DateTime.now().difference(lastUpdateAt) > const Duration(seconds: 6)) {
+      return false;
+    }
+    return _uplinkBytesPerSecond + _downlinkBytesPerSecond > 16 * 1024;
   }
 
   Future<void> _disconnect() async {

@@ -439,7 +439,7 @@ void main() {
 
     expect(tunInbound['interface_name'], 'AurumVPN');
     expect(tunInbound['exclude_package'], isNull);
-    expect(tunInbound['mtu'], 9000);
+    expect(tunInbound['mtu'], 1500);
     expect(tunInbound['stack'], 'system');
     expect((config['dns'] as Map<String, dynamic>)['strategy'], 'ipv4_only');
     expect(route['default_domain_resolver'], {
