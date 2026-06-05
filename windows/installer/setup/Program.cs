@@ -10,7 +10,7 @@ internal static class Program
 {
     private const string AppName = "Aurum VPN";
     private const string Publisher = "Ivan Yurievich / Aurum VPN";
-    private const string AppVersion = "1.0.15";
+    private const string AppVersion = "1.0.16";
     private const string StartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN";
     private static readonly string[] AppProcessNames = ["AurumVPN", "sing-box", "naive"];

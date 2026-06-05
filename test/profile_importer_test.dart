@@ -533,6 +533,28 @@ void main() {
     expect(profiles, hasLength(2));
   });
 
+  test('imports supported links from HTML subscription page', () async {
+    const html = '''
+<!doctype html>
+<html>
+  <body>
+    <a href="naive+https://user:pass@naive.example.com:443?quic=true&amp;quic_congestion_control=bbr#Naive">Naive</a>
+    <a href="hy2://secret@hy2.example.com:8443?sni=cdn.example.com&amp;obfs=salamander&amp;obfs-password=mask#Hy2">Hysteria2</a>
+  </body>
+</html>
+''';
+
+    final profiles = await ProfileImporter().importFromText(html);
+
+    expect(profiles, hasLength(2));
+    expect(
+      profiles.map((profile) => profile.kind),
+      containsAll([VpnProfileKind.naive, VpnProfileKind.hysteria2]),
+    );
+    expect(profiles.first.endpoint, 'naive.example.com:443');
+    expect(profiles.last.endpoint, 'hy2.example.com:8443');
+  });
+
   test('imports Remnawave Xray JSON subscription', () async {
     final payload = jsonEncode([
       {

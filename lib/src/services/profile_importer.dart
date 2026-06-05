@@ -36,7 +36,7 @@ class ProfileImporter {
 
   Future<String> _fetchSubscription(Uri uri) async {
     final clients = [
-      'AurumVPN-Windows/1.0.15 sing-box/1.13.11',
+      'AurumVPN-Windows/1.0.16 sing-box/1.13.11',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',
@@ -52,16 +52,18 @@ class ProfileImporter {
             userAgent: userAgent,
             viaLocalProxy: viaLocalProxy,
           );
-          if (_looksLikeHtml(body)) {
+          final normalizedBody = _decodeHtmlEntities(body);
+          if (_canParsePayload(normalizedBody)) {
+            return normalizedBody;
+          }
+          if (_looksLikeHtml(normalizedBody)) {
+            candidates.add(normalizedBody);
             lastError = ProfileImportException(
-              '${_fetchModeLabel(viaLocalProxy)}: сервер вернул HTML-страницу вместо подписки.',
+              '${_fetchModeLabel(viaLocalProxy)}: сервер вернул HTML-страницу без поддерживаемых raw-ссылок.',
             );
             continue;
           }
-          if (_canParsePayload(body)) {
-            return body;
-          }
-          candidates.add(body);
+          candidates.add(normalizedBody);
         } on Object catch (error) {
           lastError = ProfileImportException(
             '${_fetchModeLabel(viaLocalProxy)}: $error',
@@ -329,8 +331,9 @@ class ProfileImporter {
   }
 
   List<String> _extractLinks(String text) {
+    final normalized = _decodeHtmlEntities(text);
     return _linkPattern
-        .allMatches(text)
+        .allMatches(normalized)
         .map((match) => match.group(0)!)
         .map(_cleanLink)
         .toSet()
@@ -691,6 +694,18 @@ class ProfileImporter {
 
   String _cleanLink(String link) {
     return link.replaceAll(RegExp(r'[)\],;]+$'), '');
+  }
+
+  String _decodeHtmlEntities(String value) {
+    return value
+        .replaceAll('&amp;', '&')
+        .replaceAll('&#38;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#34;', '"')
+        .replaceAll('&#39;', "'")
+        .replaceAll('&apos;', "'");
   }
 
   String _displayName(String fragment, {required String fallback}) {
