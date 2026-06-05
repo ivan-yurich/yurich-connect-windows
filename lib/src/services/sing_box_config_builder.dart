@@ -34,6 +34,7 @@ class SingBoxConfigBuilder {
     'ozon.ru',
     'wildberries.ru',
   ];
+  static const windowsLocalDnsQueryTypes = ['PTR', 'SRV', 'HTTPS', 'SVCB'];
 
   String build(
     VpnProfile profile, {
@@ -193,16 +194,6 @@ class SingBoxConfigBuilder {
           'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
           'detour': 'proxy',
         },
-      if (target == SingBoxConfigTarget.windows)
-        {
-          'type': 'https',
-          'tag': 'global-dns',
-          'server': '1.1.1.1',
-          'server_port': 443,
-          'path': '/dns-query',
-          'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
-          'detour': 'proxy',
-        },
     ];
 
     return {
@@ -215,10 +206,25 @@ class SingBoxConfigBuilder {
             'server': 'fakeip',
           },
         ],
+      if (target == SingBoxConfigTarget.windows)
+        'rules': [
+          {
+            'query_type': windowsLocalDnsQueryTypes,
+            'action': 'route',
+            'server': 'local-dns',
+          },
+          {
+            'domain_suffix': russianDirectDomains,
+            'action': 'route',
+            'server': 'local-dns',
+          },
+        ],
       'strategy': 'ipv4_only',
-      'cache_capacity': 8192,
+      'cache_capacity': target == SingBoxConfigTarget.windows ? 32768 : 8192,
       'reverse_mapping': true,
-      'final': 'global-dns',
+      'final': target == SingBoxConfigTarget.windows
+          ? 'local-dns'
+          : 'global-dns',
     };
   }
 

@@ -23,6 +23,11 @@ class WindowsSingBoxEngine implements VpnEngine {
   bool _trafficSocketConnecting = false;
   bool _reportedAdminIssue = false;
   int _sessionTotalBytes = 0;
+  static const _visualRuntimeDlls = [
+    'MSVCP140.dll',
+    'VCRUNTIME140.dll',
+    'VCRUNTIME140_1.dll',
+  ];
 
   @override
   SingBoxConfigTarget get configTarget => SingBoxConfigTarget.windows;
@@ -89,9 +94,25 @@ class WindowsSingBoxEngine implements VpnEngine {
       await _stopStaleRuntimeProcesses(runtimeDir);
 
       final configFile = File('${configDir.path}\\config.json');
-      await configFile.writeAsString(_config, encoding: utf8);
+      final effectiveConfig = await _prepareConfigWithGeoIpFallback(
+        runtimeDir,
+        configDir,
+        _config,
+      );
+      await configFile.writeAsString(effectiveConfig, encoding: utf8);
 
-      if (_naiveProxyConfig != null) {
+      final needsNaiveProxy = _naiveProxyConfig != null;
+      final preflightOk = await _runPreflight(
+        runtimeDir,
+        configFile,
+        needsNaiveProxy: needsNaiveProxy,
+      );
+      if (!preflightOk) {
+        _setStatus(AurumVpnStatus.stopped);
+        return false;
+      }
+
+      if (needsNaiveProxy) {
         final started = await _startNaiveProxy(runtimeDir, configDir);
         if (!started) {
           _setStatus(AurumVpnStatus.stopped);
@@ -102,10 +123,6 @@ class WindowsSingBoxEngine implements VpnEngine {
       final exe = File('${runtimeDir.path}\\sing-box.exe');
       if (!await exe.exists()) {
         _appendLog('sing-box.exe не найден в ${runtimeDir.path}');
-        _setStatus(AurumVpnStatus.stopped);
-        return false;
-      }
-      if (!await _checkConfig(exe, configFile, runtimeDir)) {
         _setStatus(AurumVpnStatus.stopped);
         return false;
       }
@@ -174,6 +191,283 @@ class WindowsSingBoxEngine implements VpnEngine {
     _stopTrafficTicker();
     _setStatus(AurumVpnStatus.stopped);
     return true;
+  }
+
+  Future<bool> _runPreflight(
+    Directory runtimeDir,
+    File configFile, {
+    required bool needsNaiveProxy,
+  }) async {
+    _appendLog('Windows preflight check started.');
+
+    if (!await _isAdministrator()) {
+      _appendLog(
+        'Preflight failed: Aurum VPN запущен без прав администратора.',
+      );
+      if (!_statusController.isClosed) {
+        _statusController.add({
+          'type': 'alert',
+          'message':
+              'Aurum VPN нужны права администратора для Windows TUN/Wintun. Запусти приложение через START_AURUM_VPN.cmd или ярлык установщика.',
+        });
+      }
+      return false;
+    }
+
+    final missingRuntime = await _missingRuntimeFiles(
+      runtimeDir,
+      needsNaiveProxy: needsNaiveProxy,
+    );
+    if (missingRuntime.isNotEmpty) {
+      _appendLog(
+        'Preflight failed: отсутствуют runtime-файлы: ${missingRuntime.join(', ')}.',
+      );
+      return false;
+    }
+
+    final missingVisualRuntime = await _missingVisualRuntimeDlls();
+    if (missingVisualRuntime.isNotEmpty) {
+      _appendLog(
+        'Preflight failed: отсутствуют Microsoft Visual C++ Runtime DLL: ${missingVisualRuntime.join(', ')}. Установи Microsoft Visual C++ Redistributable 2015-2022 x64: https://aka.ms/vs/17/release/vc_redist.x64.exe',
+      );
+      return false;
+    }
+
+    final busyPorts = await _busyLocalPorts(needsNaiveProxy: needsNaiveProxy);
+    if (busyPorts.isNotEmpty) {
+      _appendLog(
+        'Preflight failed: заняты локальные порты ${busyPorts.join(', ')}. Закрой другой прокси/VPN или перезапусти Windows.',
+      );
+      return false;
+    }
+
+    final exe = File('${runtimeDir.path}\\sing-box.exe');
+    if (!await _checkConfig(exe, configFile, runtimeDir)) {
+      return false;
+    }
+
+    _appendLog('Windows preflight check passed.');
+    return true;
+  }
+
+  Future<bool> _isAdministrator() async {
+    if (!Platform.isWindows) {
+      return true;
+    }
+    const script =
+        r"([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)";
+    try {
+      final result = await Process.run('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ]).timeout(const Duration(seconds: 5));
+      return '${result.stdout}'.trim().toLowerCase() == 'true';
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<List<String>> _missingRuntimeFiles(
+    Directory runtimeDir, {
+    required bool needsNaiveProxy,
+  }) async {
+    final names = [
+      'sing-box.exe',
+      'wintun.dll',
+      'libcronet.dll',
+      if (needsNaiveProxy) 'naive.exe',
+    ];
+    final missing = <String>[];
+    for (final name in names) {
+      if (!await File('${runtimeDir.path}\\$name').exists()) {
+        missing.add(name);
+      }
+    }
+    return missing;
+  }
+
+  Future<List<String>> _missingVisualRuntimeDlls() async {
+    final executableDir = File(Platform.resolvedExecutable).parent;
+    final systemRoot = Platform.environment['SystemRoot'] ?? r'C:\Windows';
+    final system32 = Directory('$systemRoot\\System32');
+    final missing = <String>[];
+    for (final name in _visualRuntimeDlls) {
+      final bundled = File('${executableDir.path}\\$name');
+      final installed = File('${system32.path}\\$name');
+      if (!await bundled.exists() && !await installed.exists()) {
+        missing.add(name);
+      }
+    }
+    return missing;
+  }
+
+  Future<List<int>> _busyLocalPorts({required bool needsNaiveProxy}) async {
+    final ports = <int>[
+      SingBoxConfigBuilder.localMixedProxyPort,
+      SingBoxConfigBuilder.windowsClashApiPort,
+      if (needsNaiveProxy) SingBoxConfigBuilder.naiveProxySocksPort,
+    ];
+    final busy = <int>[];
+    for (final port in ports) {
+      ServerSocket? socket;
+      try {
+        socket = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          port,
+          shared: false,
+        ).timeout(const Duration(seconds: 2));
+      } on Object {
+        busy.add(port);
+      } finally {
+        await socket?.close();
+      }
+    }
+    return busy;
+  }
+
+  Future<String> _prepareConfigWithGeoIpFallback(
+    Directory runtimeDir,
+    Directory configDir,
+    String config,
+  ) async {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(config);
+    } on Object {
+      return config;
+    }
+    if (decoded is! Map) {
+      return config;
+    }
+
+    final map = decoded.cast<String, dynamic>();
+    final route = (map['route'] as Map?)?.cast<String, dynamic>();
+    if (route == null) {
+      return config;
+    }
+
+    final ruleSets = (route['rule_set'] as List?)?.whereType<Map>().toList();
+    if (ruleSets == null ||
+        !ruleSets.any(
+          (item) => item['tag'] == SingBoxConfigBuilder.russianGeoIpRuleSet,
+        )) {
+      return config;
+    }
+
+    final rulesDir = Directory('${configDir.path}\\rules');
+    final cacheFile = File('${rulesDir.path}\\geoip-ru.srs');
+    final hasGeoIp = await _ensureGeoIpRuleSet(runtimeDir, cacheFile);
+
+    if (hasGeoIp) {
+      route['rule_set'] = ruleSets.map((item) {
+        final normalized = item.cast<String, dynamic>();
+        if (normalized['tag'] == SingBoxConfigBuilder.russianGeoIpRuleSet) {
+          return {
+            'type': 'local',
+            'tag': SingBoxConfigBuilder.russianGeoIpRuleSet,
+            'format': 'binary',
+            'path': cacheFile.path,
+          };
+        }
+        return normalized;
+      }).toList();
+      return const JsonEncoder.withIndent('  ').convert(map);
+    }
+
+    _appendLog(
+      'Warning: geoip-ru.srs недоступен. VPN запускается без RU-IP rule-set; домены .ru/.рф/.su всё равно идут напрямую.',
+    );
+    route['rule_set'] = ruleSets
+        .where(
+          (item) => item['tag'] != SingBoxConfigBuilder.russianGeoIpRuleSet,
+        )
+        .map((item) => item.cast<String, dynamic>())
+        .toList();
+    final rules = (route['rules'] as List?)?.whereType<Map>().toList();
+    if (rules != null) {
+      route['rules'] = rules
+          .where(
+            (rule) =>
+                rule['rule_set'] != SingBoxConfigBuilder.russianGeoIpRuleSet,
+          )
+          .map((item) => item.cast<String, dynamic>())
+          .toList();
+    }
+    return const JsonEncoder.withIndent('  ').convert(map);
+  }
+
+  Future<bool> _ensureGeoIpRuleSet(Directory runtimeDir, File cacheFile) async {
+    final bundled = File('${runtimeDir.path}\\geoip-ru.srs');
+    try {
+      if (await cacheFile.exists() && await cacheFile.length() > 0) {
+        final age = DateTime.now().difference(await cacheFile.lastModified());
+        if (age > const Duration(days: 7)) {
+          unawaited(_refreshGeoIpRuleSet(cacheFile));
+        }
+        return true;
+      }
+
+      if (await bundled.exists() && await bundled.length() > 0) {
+        await cacheFile.parent.create(recursive: true);
+        await bundled.copy(cacheFile.path);
+        unawaited(_refreshGeoIpRuleSet(cacheFile));
+        _appendLog('geoip-ru.srs loaded from bundled fallback.');
+        return true;
+      }
+
+      return await _refreshGeoIpRuleSet(cacheFile);
+    } on Object catch (e) {
+      _appendLog('Warning: geoip-ru.srs fallback failed: $e');
+      return await cacheFile.exists() && await cacheFile.length() > 0;
+    }
+  }
+
+  Future<bool> _refreshGeoIpRuleSet(File cacheFile) async {
+    final tempFile = File('${cacheFile.path}.download');
+    try {
+      await cacheFile.parent.create(recursive: true);
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 8);
+      try {
+        final request = await client
+            .getUrl(Uri.parse(SingBoxConfigBuilder.russianGeoIpRuleSetUrl))
+            .timeout(const Duration(seconds: 8));
+        final response = await request.close().timeout(
+          const Duration(seconds: 8),
+        );
+        if (response.statusCode != 200) {
+          throw HttpException('HTTP ${response.statusCode}');
+        }
+        final bytes = await response
+            .fold<List<int>>(<int>[], (buffer, data) => buffer..addAll(data))
+            .timeout(const Duration(seconds: 8));
+        if (bytes.length < 1024) {
+          throw const FormatException('geoip-ru.srs is too small');
+        }
+        await tempFile.writeAsBytes(bytes, flush: true);
+        if (await cacheFile.exists()) {
+          await cacheFile.delete();
+        }
+        await tempFile.rename(cacheFile.path);
+        _appendLog('geoip-ru.srs cache refreshed.');
+        return true;
+      } finally {
+        client.close(force: true);
+      }
+    } on Object catch (e) {
+      _appendLog('Warning: geoip-ru.srs download skipped: $e');
+      try {
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+      } on Object {
+        // Ignore partial download cleanup errors.
+      }
+      return await cacheFile.exists() && await cacheFile.length() > 0;
+    }
   }
 
   Future<bool> _checkConfig(
@@ -266,11 +560,11 @@ Write-Output \$stopped
     process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen(_appendLog);
+        .listen((line) => _appendLog(line, fileName: 'sing-box.log'));
     process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen(_appendLog);
+        .listen((line) => _appendLog(line, fileName: 'sing-box.log'));
   }
 
   Future<bool> _startNaiveProxy(
@@ -296,11 +590,11 @@ Write-Output \$stopped
     process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) => _appendLog('naive: $line'));
+        .listen((line) => _appendLog('naive: $line', fileName: 'naive.log'));
     process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) => _appendLog('naive: $line'));
+        .listen((line) => _appendLog('naive: $line', fileName: 'naive.log'));
 
     unawaited(
       process.exitCode.then((code) {
@@ -336,8 +630,8 @@ Write-Output \$stopped
     }
   }
 
-  void _appendLog(String message) {
-    final trimmed = message.trim();
+  void _appendLog(String message, {String fileName = 'aurum.log'}) {
+    final trimmed = _redactSensitive(message.trim());
     if (trimmed.isEmpty) {
       return;
     }
@@ -359,6 +653,64 @@ Write-Output \$stopped
     if (!_logController.isClosed) {
       _logController.add({'type': 'log', 'message': trimmed});
     }
+    unawaited(_writeLogFile('aurum.log', trimmed));
+    if (fileName != 'aurum.log') {
+      unawaited(_writeLogFile(fileName, trimmed));
+    }
+  }
+
+  Future<void> _writeLogFile(String fileName, String message) async {
+    try {
+      final base = await _configDir();
+      final dir = Directory('${base.path}\\logs');
+      await dir.create(recursive: true);
+      final file = File('${dir.path}\\$fileName');
+      final timestamp = DateTime.now().toIso8601String();
+      await file.writeAsString(
+        '[$timestamp] $message${Platform.lineTerminator}',
+        mode: FileMode.append,
+        encoding: utf8,
+        flush: false,
+      );
+    } on Object {
+      // File logging must never break the VPN control flow.
+    }
+  }
+
+  String _redactSensitive(String value) {
+    return value
+        .replaceAll(
+          RegExp(
+            r'\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b',
+            caseSensitive: false,
+          ),
+          '***uuid***',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'(vless://|naive\+https://|hysteria2://|hy2://|hysteria://)[^\s]+',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]}***',
+        )
+        .replaceAllMapped(
+          RegExp(r'(https?://)[^:@/\s]+:[^@/\s]+@', caseSensitive: false),
+          (match) => '${match[1]}***:***@',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'("(?:password|passwd|token|access_token|refresh_token|uuid|auth|auth_str|public_key|short_id|subscription)"\s*:\s*")[^"]+',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]}***',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'((?:password|passwd|token|access_token|refresh_token|auth|key)=)[^&\s]+',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]}***',
+        );
   }
 
   void _startTrafficTicker() {

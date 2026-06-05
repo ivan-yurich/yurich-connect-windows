@@ -36,7 +36,7 @@ class ProfileImporter {
 
   Future<String> _fetchSubscription(Uri uri) async {
     final clients = [
-      'sing-box/1.13.11 (Android; IvanVPN)',
+      'AurumVPN-Windows/1.0.15 sing-box/1.13.11',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',

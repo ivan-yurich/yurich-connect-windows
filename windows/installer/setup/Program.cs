@@ -9,7 +9,17 @@ namespace AurumVpnSetup;
 internal static class Program
 {
     private const string AppName = "Aurum VPN";
+    private const string Publisher = "Ivan Yurievich / Aurum VPN";
+    private const string AppVersion = "1.0.15";
     private const string StartupTaskName = "Aurum VPN";
+    private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN";
+    private static readonly string[] AppProcessNames = ["AurumVPN", "sing-box", "naive"];
+    private static readonly string[] VisualRuntimeDlls =
+    [
+        "MSVCP140.dll",
+        "VCRUNTIME140.dll",
+        "VCRUNTIME140_1.dll",
+    ];
 
     [STAThread]
     private static int Main()
@@ -19,12 +29,16 @@ internal static class Program
         try
         {
             var exePath = Install();
-            MessageBox.Show(
-                $"{AppName} установлен. Сейчас откроется приложение.",
+            var answer = MessageBox.Show(
+                $"{AppName} установлен.\n\nЗапустить приложение сейчас?",
                 $"{AppName} Setup",
-                MessageBoxButtons.OK,
+                MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information);
-            LaunchApp(exePath);
+            if (answer == DialogResult.Yes)
+            {
+                LaunchApp(exePath);
+            }
+
             return 0;
         }
         catch (Exception ex)
@@ -40,9 +54,7 @@ internal static class Program
 
     private static string Install()
     {
-        var installDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            AppName);
+        var installDir = InstallDir();
         var tempDir = Path.Combine(Path.GetTempPath(), "AurumVPNInstall_" + Guid.NewGuid().ToString("N"));
         var payloadPath = Path.Combine(tempDir, "AurumVPN_payload.zip");
 
@@ -51,33 +63,21 @@ internal static class Program
         {
             ExtractPayload(payloadPath);
 
-            foreach (var process in Process.GetProcessesByName("AurumVPN"))
+            var oldVersion = GetExistingVersion();
+            if (Directory.Exists(installDir) || !string.IsNullOrWhiteSpace(oldVersion))
             {
-                try
-                {
-                    process.Kill(true);
-                    process.WaitForExit(5000);
-                }
-                catch
-                {
-                    // Best-effort shutdown before replacing files.
-                }
+                StopAppProcessesFromInstallDir(installDir);
             }
 
-            if (Directory.Exists(installDir))
-            {
-                Directory.Delete(installDir, recursive: true);
-            }
-
-            Directory.CreateDirectory(installDir);
-            ZipFile.ExtractToDirectory(payloadPath, installDir, overwriteFiles: true);
+            ReplaceInstallDirectory(installDir, payloadPath);
 
             var exePath = Path.Combine(installDir, "AurumVPN.exe");
             if (!File.Exists(exePath))
             {
-                throw new FileNotFoundException("AurumVPN.exe was not installed.", exePath);
+                throw new FileNotFoundException("AurumVPN.exe не был установлен.", exePath);
             }
 
+            EnsureVisualRuntimePayload(installDir);
             CreateShortcut(
                 Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
@@ -106,6 +106,82 @@ internal static class Program
                 // Temp cleanup should never fail the install.
             }
         }
+    }
+
+    private static string InstallDir()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            AppName);
+    }
+
+    private static string? GetExistingVersion()
+    {
+        using var key = Registry.LocalMachine.OpenSubKey(UninstallKeyPath);
+        return key?.GetValue("DisplayVersion") as string;
+    }
+
+    private static void ReplaceInstallDirectory(string installDir, string payloadPath)
+    {
+        var expected = Path.GetFullPath(InstallDir()).TrimEnd('\\');
+        var actual = Path.GetFullPath(installDir).TrimEnd('\\');
+        if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Небезопасный путь установки: {actual}");
+        }
+
+        if (Directory.Exists(installDir))
+        {
+            Directory.Delete(installDir, recursive: true);
+        }
+
+        Directory.CreateDirectory(installDir);
+        ZipFile.ExtractToDirectory(payloadPath, installDir, overwriteFiles: true);
+    }
+
+    private static void StopAppProcessesFromInstallDir(string installDir)
+    {
+        var installPrefix = Path.GetFullPath(installDir).TrimEnd('\\') + "\\";
+        foreach (var processName in AppProcessNames)
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    var modulePath = process.MainModule?.FileName;
+                    if (modulePath != null &&
+                        modulePath.StartsWith(installPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        process.Kill(true);
+                        process.WaitForExit(5000);
+                    }
+                }
+                catch
+                {
+                    // Best-effort shutdown before replacing files.
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+    }
+
+    private static void EnsureVisualRuntimePayload(string installDir)
+    {
+        var missing = VisualRuntimeDlls
+            .Where(name => !File.Exists(Path.Combine(installDir, name)))
+            .ToArray();
+        if (missing.Length == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "В установочном пакете отсутствуют DLL Microsoft Visual C++ Runtime: " +
+            string.Join(", ", missing) +
+            "\n\nПереустанови свежий AurumVPN_Setup.exe или установи Microsoft Visual C++ Redistributable 2015-2022 x64: https://aka.ms/vs/17/release/vc_redist.x64.exe");
     }
 
     private static void LaunchApp(string exePath)
@@ -156,22 +232,25 @@ internal static class Program
 
     private static void RegisterUninstall(string installDir, string exePath)
     {
-        using var key = Registry.LocalMachine.CreateSubKey(
-            @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN");
+        using var key = Registry.LocalMachine.CreateSubKey(UninstallKeyPath);
         if (key is null)
         {
             return;
         }
 
         var uninstallScript = Path.Combine(installDir, "uninstall_aurum_vpn.ps1");
-        key.SetValue("DisplayName", "Aurum VPN");
-        key.SetValue("DisplayVersion", "1.0.13");
-        key.SetValue("Publisher", "ivan-it.net");
+        var uninstallCommand =
+            $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{uninstallScript}\"";
+        key.SetValue("DisplayName", AppName);
+        key.SetValue("DisplayVersion", AppVersion);
+        key.SetValue("Publisher", Publisher);
         key.SetValue("InstallLocation", installDir);
         key.SetValue("DisplayIcon", exePath);
-        key.SetValue(
-            "UninstallString",
-            $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{uninstallScript}\"");
+        key.SetValue("UninstallString", uninstallCommand);
+        key.SetValue("QuietUninstallString", uninstallCommand);
+        key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"));
+        key.SetValue("NoModify", 1, RegistryValueKind.DWord);
+        key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
     }
 
     private static void RepairStartupTaskIfEnabled(string exePath)

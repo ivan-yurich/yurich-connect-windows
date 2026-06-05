@@ -68,11 +68,12 @@ $desktopShortcut.Save()
 $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN'
 New-Item -Path $uninstallKey -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'DisplayName' -Value 'Aurum VPN' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $uninstallKey -Name 'DisplayVersion' -Value '1.0.0' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $uninstallKey -Name 'Publisher' -Value 'ivan-it.net' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name 'DisplayVersion' -Value '1.0.15' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name 'Publisher' -Value 'Ivan Yurievich / Aurum VPN' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'InstallLocation' -Value $installDir -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'DisplayIcon' -Value $exePath -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'UninstallString' -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installDir\uninstall_aurum_vpn.ps1`"" -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name 'QuietUninstallString' -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installDir\uninstall_aurum_vpn.ps1`"" -PropertyType String -Force | Out-Null
 
 Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 

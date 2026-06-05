@@ -1,78 +1,124 @@
 # Aurum VPN for Windows 11
 
 **Aurum VPN** is a Windows 11 VPN client built with Flutter Desktop, sing-box,
-and Wintun. The Windows version is developed separately from Android and focuses
-on a native desktop workflow: tray mode, autostart, auto-connect, split
-tunneling, GitHub Releases updates, and Windows TUN routing.
+NaiveProxy and Wintun. The Windows version is developed separately from Android
+and focuses on a native desktop workflow: tray mode, autostart, auto-connect,
+split tunneling, GitHub Releases updates, diagnostics and Windows TUN routing.
 
 > Русская версия ниже.
 
-## Highlights
+## Features
 
-- Windows 11 desktop client built with Flutter.
-- sing-box core with Wintun TUN mode.
-- VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Remnawave
-  subscriptions, and raw sing-box JSON import.
-- System tray support with show, hide, connect/disconnect, and quit actions.
-- Autostart with Windows through Task Scheduler.
-- Auto-connect to the selected profile after app launch.
-- Split tunneling by excluded `.exe` process names, including selection through
-  the Windows file picker.
-- Russian routes bypass mode: `.ru`, `.рф`, `.su`, and Russian IP ranges go
+- Windows 10/11 x64 desktop client.
+- sing-box TUN mode with Wintun.
+- VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Remnawave subscriptions
+  and raw sing-box JSON import.
+- Autostart through Windows Task Scheduler with elevated run level.
+- Auto-connect to the selected profile after launch.
+- Split tunneling by excluded `.exe` process names.
+- Russian routes bypass mode: `.ru`, `.рф`, `.su` and Russian IP ranges go
   directly, while foreign traffic goes through the VPN.
+- Fast Windows DNS mode for browser bursts with many tabs and mixed
+  Russian/foreign sites.
 - Traffic counters through the sing-box Clash API.
-- Update checks through GitHub Releases.
-- Portable archive and one-file Windows installer.
+- Update checks and installer downloads through GitHub Releases.
+- Local logs and diagnostics archive.
 
-## Screens And UX
+## Install
 
-The app is designed as a compact desktop control panel:
+1. Download `AurumVPN_Setup.exe` from GitHub Releases.
+2. Run the installer and allow the Windows UAC prompt.
+3. The installer creates Desktop and Start Menu shortcuts.
+4. After installation, choose whether to launch Aurum VPN immediately.
 
-- profile import and selection;
-- connection status and live traffic;
-- Windows tools panel;
-- logs and diagnostics for sing-box;
-- tray-first background usage.
+Portable users should extract `AurumVPN_Windows_Portable.zip` first and run
+`START_AURUM_VPN.cmd`. Do not run the app directly from inside the ZIP viewer.
 
-## Routing Model
+## Why Administrator Rights Are Required
 
-Aurum VPN uses sing-box TUN routing on Windows:
+Aurum VPN uses Windows TUN routing through Wintun. Creating the network
+interface and routes requires administrator privileges. Without elevation,
+sing-box cannot start TUN mode and Windows may show `Access is denied`.
 
-- `auto_route: true`
-- `strict_route: true`
-- MTU `1380`
-- `mixed` stack for Windows stability
-- local mixed proxy on `127.0.0.1:20808`
-- Clash API on `127.0.0.1:19090`
-- private IP ranges routed directly
-- Russian domains and Russian IP rule set routed directly
-- all other traffic routed through the selected VPN profile
+## Visual C++ Runtime
 
-The Russian IP bypass is implemented through a remote sing-box rule set:
+The Windows payload includes these Microsoft Visual C++ Runtime DLL files next
+to `AurumVPN.exe`:
+
+- `MSVCP140.dll`
+- `VCRUNTIME140.dll`
+- `VCRUNTIME140_1.dll`
+
+If Windows still reports a missing runtime, install Microsoft Visual C++
+Redistributable 2015-2022 x64:
 
 ```text
-https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs
+https://aka.ms/vs/17/release/vc_redist.x64.exe
 ```
 
-## DNS
+## If The App Does Not Start
 
-Windows DNS is configured to use Cloudflare DoH through the VPN:
+- Start it from the installed folder or with `START_AURUM_VPN.cmd`.
+- Check that `runtime/sing-box.exe`, `runtime/naive.exe`,
+  `runtime/wintun.dll` and `runtime/libcronet.dll` exist.
+- Check that no other local proxy is using `127.0.0.1:20808`,
+  `127.0.0.1:20809` or `127.0.0.1:19090`.
+- Open the logs listed below and send diagnostics if the problem repeats.
 
-- server: `1.1.1.1`
-- port: `443`
-- path: `/dns-query`
-- TLS SNI: `cloudflare-dns.com`
-- detour: `proxy`
+## DNS And Many Browser Tabs
 
-This avoids relying on plain DNS for remote lookups while keeping local resolver
-fallbacks for bootstrap and system compatibility.
+Windows builds use local system DNS for fast resolution, then route traffic
+through sing-box rules:
 
-## Requirements
+- Russian domains and Russian GeoIP ranges go directly.
+- Foreign traffic goes through the selected VPN profile.
+- PTR, SRV, HTTPS and SVCB DNS bursts are resolved locally to avoid 10-second
+  DNS queues when Chrome opens many tabs across multiple profiles.
 
-- Windows 11 x64.
-- Administrator permissions for TUN/Wintun.
-- Flutter SDK for development builds.
-- .NET 9 SDK for rebuilding the installer.
+This avoids making DNS depend on a saturated VPN tunnel while preserving VPN
+routing for foreign connections.
+
+## Logs And Diagnostics
+
+Runtime logs are stored under:
+
+```text
+%APPDATA%\Aurum VPN\logs\aurum.log
+%APPDATA%\Aurum VPN\logs\sing-box.log
+%APPDATA%\Aurum VPN\logs\naive.log
+```
+
+Diagnostic reports are written to:
+
+```text
+%APPDATA%\Aurum VPN\diagnostics\report.zip
+```
+
+Sensitive values are redacted before they are shown or written: UUIDs,
+passwords, tokens, VLESS links, NaiveProxy links, Hysteria links and
+subscription URLs.
+
+## Uninstall
+
+Use Windows "Apps & features" or run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\Aurum VPN\uninstall_aurum_vpn.ps1"
+```
+
+The uninstall script asks for confirmation, removes only the `Aurum VPN`
+installation folder, removes shortcuts and deletes the uninstall registry entry.
+It stops only `AurumVPN.exe`, `sing-box.exe` and `naive.exe` processes launched
+from the Aurum VPN application folder.
+
+## Windows Defender
+
+If Windows Defender warns about the installer:
+
+- download only from the official GitHub Releases page;
+- compare the SHA256 hash published with the release;
+- unblock the file from Windows file properties if SmartScreen marked it as
+  downloaded from the internet.
 
 ## Build From Source
 
@@ -80,132 +126,150 @@ fallbacks for bootstrap and system compatibility.
 flutter pub get
 flutter analyze
 flutter test
-flutter build windows --release
+flutter build windows --release --split-debug-info=build\symbols\windows
 ```
 
-The Windows app output is created at:
+The Windows output is created at:
 
 ```text
 build\windows\x64\runner\Release
 ```
 
-## Windows Smoke Test
-
-The repository includes a Windows QA script:
+## Smoke Test
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File windows\qa\smoke_windows.ps1
 ```
 
-It checks:
+The smoke-test checks Flutter analysis, tests, release build, installer payload,
+Visual C++ DLLs, runtime files, README, uninstall script, absence of debug files,
+absence of local developer paths and absence of obvious secrets.
 
-- Flutter analysis;
-- unit tests;
-- Windows release build;
-- required runtime files;
-- sing-box version;
-- active sing-box config validation;
-- portable archive contents;
-- installer publishing;
-- SHA256 hashes for release artifacts.
+## Release Files
 
-## Release Artifacts
-
-Do not commit generated `.exe` and `.zip` artifacts into git. Publish them on
-the GitHub **Releases** page instead.
-
-Recommended release files:
+Publish generated files on GitHub Releases instead of committing them:
 
 - `AurumVPN_Setup.exe`
 - `AurumVPN_Windows_Portable.zip`
-
-## Project Structure
-
-```text
-lib/                         Flutter app and VPN logic
-windows/                     Windows runner, installer, and QA scripts
-assets/windows/sing-box/     sing-box, Wintun, Cronet runtime files
-test/                        Unit tests
-plugins/flutter_singbox_vpn/ Local plugin code used by the app
-```
-
-## Security Notes
-
-- Do not commit real VPN profile links, UUIDs, passwords, private keys, or
-  production configs.
-- The app redacts sensitive values in diagnostic reports.
-- Windows TUN mode requires administrator privileges.
-
-## License
-
-No project license has been selected yet. Runtime components keep their own
-licenses inside `assets/windows/sing-box`.
 
 ---
 
 # Aurum VPN для Windows 11
 
-**Aurum VPN** - это VPN-клиент для Windows 11 на Flutter Desktop, sing-box и
-Wintun. Windows-версия разрабатывается отдельно от Android и заточена под
-нормальный desktop-сценарий: трей, автозапуск, автоподключение, split
-tunneling, обновления через GitHub Releases и Windows TUN-маршрутизацию.
+**Aurum VPN** - это VPN-клиент для Windows 11 на Flutter Desktop, sing-box,
+NaiveProxy и Wintun. Windows-версия разрабатывается отдельно от Android и
+заточена под desktop-сценарий: трей, автозапуск, автоподключение, split
+tunneling, обновления через GitHub Releases, диагностика и Windows TUN.
 
 ## Возможности
 
-- Нативное Windows 11 приложение на Flutter.
-- VPN-ядро sing-box с Wintun TUN-режимом.
+- Клиент для Windows 10/11 x64.
+- VPN-ядро sing-box в TUN-режиме через Wintun.
 - Импорт VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Remnawave
   подписок и raw sing-box JSON.
-- Иконка в трее: открыть, скрыть, подключить/отключить, выйти.
-- Автостарт вместе с Windows через планировщик задач.
-- Автоподключение выбранного профиля после запуска приложения.
-- Split tunneling по `.exe` процессам, включая выбор приложения через
-  проводник Windows.
+- Автостарт через планировщик задач Windows с повышенными правами.
+- Автоподключение выбранного профиля после запуска.
+- Split tunneling по исключенным `.exe` процессам.
 - Режим обхода российских адресов: `.ru`, `.рф`, `.su` и российские IP идут
   напрямую, иностранный трафик идет через VPN.
+- Быстрый Windows DNS для старта браузера с большим количеством вкладок и
+  смесью российских/зарубежных сайтов.
 - Счетчики трафика через sing-box Clash API.
-- Проверка обновлений через GitHub Releases.
-- Portable-архив и Windows-установщик одним `.exe` файлом.
+- Проверка и скачивание обновлений через GitHub Releases.
+- Локальные логи и диагностический архив.
 
-## Как работает маршрутизация
+## Как установить
 
-На Windows Aurum VPN использует sing-box TUN:
+1. Скачай `AurumVPN_Setup.exe` из GitHub Releases.
+2. Запусти установщик и подтверди запрос UAC.
+3. Установщик создаст ярлык на рабочем столе и в меню Пуск.
+4. После установки можно сразу запустить Aurum VPN.
 
-- `auto_route: true`
-- `strict_route: true`
-- MTU `1380`
-- Windows stack `mixed`
-- локальный mixed proxy `127.0.0.1:20808`
-- Clash API `127.0.0.1:19090`
-- приватные IP идут напрямую
-- российские домены и российский IP rule set идут напрямую
-- весь остальной трафик идет через выбранный VPN-профиль
+Portable-версию сначала распакуй из `AurumVPN_Windows_Portable.zip`, затем
+запусти `START_AURUM_VPN.cmd`. Не запускай приложение прямо из ZIP.
 
-Российские IP определяются через удаленный rule set sing-box:
+## Почему нужны права администратора
+
+Aurum VPN использует Windows TUN через Wintun. Для создания сетевого интерфейса
+и маршрутов нужны права администратора. Без них sing-box не сможет запустить TUN
+и Windows может показать `Access is denied`.
+
+## Visual C++ Runtime
+
+В Windows payload рядом с `AurumVPN.exe` добавлены:
+
+- `MSVCP140.dll`
+- `VCRUNTIME140.dll`
+- `VCRUNTIME140_1.dll`
+
+Если Windows всё равно пишет, что runtime отсутствует, установи Microsoft
+Visual C++ Redistributable 2015-2022 x64:
 
 ```text
-https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs
+https://aka.ms/vs/17/release/vc_redist.x64.exe
 ```
 
-## DNS
+## Если приложение не запускается
 
-На Windows DNS настроен через Cloudflare DoH внутри VPN:
+- Запускай из установленной папки или через `START_AURUM_VPN.cmd`.
+- Проверь наличие `runtime/sing-box.exe`, `runtime/naive.exe`,
+  `runtime/wintun.dll` и `runtime/libcronet.dll`.
+- Проверь, что другие прокси/VPN не заняли `127.0.0.1:20808`,
+  `127.0.0.1:20809` или `127.0.0.1:19090`.
+- Открой логи ниже и отправь диагностику разработчику, если проблема
+  повторяется.
 
-- сервер: `1.1.1.1`
-- порт: `443`
-- путь: `/dns-query`
-- TLS SNI: `cloudflare-dns.com`
-- detour: `proxy`
+## DNS и много вкладок браузера
 
-Так DNS-запросы уходят через туннель, а локальный DNS остается только для
-bootstrap/совместимости системы.
+Windows-сборка использует локальный системный DNS для быстрого резолва, а
+потом маршрутизирует трафик правилами sing-box:
 
-## Требования
+- российские домены и GeoIP RU идут напрямую;
+- иностранный трафик идет через выбранный VPN-профиль;
+- PTR, SRV, HTTPS и SVCB DNS-залпы обрабатываются локально, чтобы Chrome с
+  двумя профилями и большим числом вкладок не создавал очередь DNS timeout по
+  10 секунд.
 
-- Windows 11 x64.
-- Права администратора для TUN/Wintun.
-- Flutter SDK для сборки из исходников.
-- .NET 9 SDK для пересборки установщика.
+Так DNS не зависит от загруженного VPN-туннеля, но маршрутизация иностранного
+трафика остаётся через VPN.
+
+## Логи и диагностика
+
+Логи лежат здесь:
+
+```text
+%APPDATA%\Aurum VPN\logs\aurum.log
+%APPDATA%\Aurum VPN\logs\sing-box.log
+%APPDATA%\Aurum VPN\logs\naive.log
+```
+
+Диагностический архив:
+
+```text
+%APPDATA%\Aurum VPN\diagnostics\report.zip
+```
+
+Перед записью и отправкой маскируются UUID, пароли, токены, VLESS-ссылки,
+NaiveProxy-ссылки, Hysteria-ссылки и URL подписок.
+
+## Как удалить
+
+Через "Приложения и возможности" Windows или командой:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\Aurum VPN\uninstall_aurum_vpn.ps1"
+```
+
+Скрипт удаления просит подтверждение, удаляет только папку установки
+`Aurum VPN`, удаляет ярлыки и запись uninstall. Он останавливает только процессы
+`AurumVPN.exe`, `sing-box.exe` и `naive.exe`, запущенные из папки приложения.
+
+## Если ругается Windows Defender
+
+- Скачивай установщик только из официальных GitHub Releases.
+- Сверяй SHA256 с хэшем в релизе.
+- Если SmartScreen заблокировал файл, открой свойства файла и нажми
+  "Разблокировать".
 
 ## Сборка
 
@@ -213,37 +277,15 @@ bootstrap/совместимости системы.
 flutter pub get
 flutter analyze
 flutter test
-flutter build windows --release
+flutter build windows --release --split-debug-info=build\symbols\windows
 ```
 
-Готовая Windows-сборка появляется здесь:
-
-```text
-build\windows\x64\runner\Release
-```
-
-## Smoke-тест Windows
+## Smoke-test
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File windows\qa\smoke_windows.ps1
 ```
 
-Скрипт проверяет анализ, тесты, Windows build, runtime-файлы, sing-box,
-portable-архив, публикацию установщика и SHA256 хэши.
-
-## Релизы
-
-Готовые `.exe` и `.zip` файлы лучше не коммитить в git. Загружай их на страницу
-GitHub **Releases**.
-
-Рекомендуемые файлы релиза:
-
-- `AurumVPN_Setup.exe`
-- `AurumVPN_Windows_Portable.zip`
-
-## Безопасность
-
-- Не коммить реальные VPN-ссылки, UUID, пароли, приватные ключи и рабочие
-  конфиги.
-- Диагностические отчеты в приложении скрывают чувствительные данные.
-- Windows TUN-режим требует запуска с правами администратора.
+Скрипт проверяет анализ, тесты, release build, installer payload, Visual C++
+DLL, runtime-файлы, README, uninstall script, отсутствие debug-файлов,
+локальных dev path и явных секретов.

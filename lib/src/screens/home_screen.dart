@@ -29,7 +29,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.13';
+const _appVersion = '1.0.15';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -858,10 +858,10 @@ class _HomeScreenState extends State<HomeScreen>
   bool _hasActiveTraffic() {
     final lastUpdateAt = _lastTrafficUpdateAt;
     if (lastUpdateAt == null ||
-        DateTime.now().difference(lastUpdateAt) > const Duration(seconds: 6)) {
+        DateTime.now().difference(lastUpdateAt) > const Duration(seconds: 12)) {
       return false;
     }
-    return _uplinkBytesPerSecond + _downlinkBytesPerSecond > 16 * 1024;
+    return _uplinkBytesPerSecond + _downlinkBytesPerSecond > 1024;
   }
 
   Future<void> _disconnect() async {
@@ -1291,6 +1291,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _emailDeveloper() async {
     final report = _buildDiagnosticReport();
+    await _writeDiagnosticArchive(report);
     final uri = Uri.parse(
       'mailto:$_supportEmail?subject=${Uri.encodeComponent(s.mailSubject)}&body=${Uri.encodeComponent(report)}',
     );
@@ -1299,6 +1300,50 @@ class _HomeScreenState extends State<HomeScreen>
       await Clipboard.setData(ClipboardData(text: report));
       _showSnack(s.mailFallback);
     }
+  }
+
+  Future<void> _writeDiagnosticArchive(String report) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    try {
+      final appData = Platform.environment['APPDATA'];
+      final base = appData == null || appData.isEmpty
+          ? Directory('${Platform.environment['USERPROFILE']}\\.aurum_vpn')
+          : Directory('$appData\\Aurum VPN');
+      final diagnosticsDir = Directory('${base.path}\\diagnostics');
+      final logsDir = Directory('${base.path}\\logs');
+      await diagnosticsDir.create(recursive: true);
+      final reportFile = File('${diagnosticsDir.path}\\report.txt');
+      final zipFile = File('${diagnosticsDir.path}\\report.zip');
+      await reportFile.writeAsString(report, encoding: utf8, flush: true);
+
+      final paths = <String>[reportFile.path];
+      if (await logsDir.exists()) {
+        await for (final entry in logsDir.list()) {
+          if (entry is File && entry.path.toLowerCase().endsWith('.log')) {
+            paths.add(entry.path);
+          }
+        }
+      }
+
+      final pathLiteral = paths.map(_powerShellQuote).join(',');
+      final script =
+          'Compress-Archive -Path @($pathLiteral) -DestinationPath ${_powerShellQuote(zipFile.path)} -Force';
+      await Process.run('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ]).timeout(const Duration(seconds: 10));
+    } on Object {
+      // Diagnostics archive is best-effort; email fallback still contains text.
+    }
+  }
+
+  String _powerShellQuote(String value) {
+    return "'${value.replaceAll("'", "''")}'";
   }
 
   String _buildDiagnosticReport() {
@@ -1405,9 +1450,23 @@ class _HomeScreenState extends State<HomeScreen>
 
   String _redactSensitive(String value) {
     return value
+        .replaceAll(
+          RegExp(
+            r'\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b',
+            caseSensitive: false,
+          ),
+          '***uuid***',
+        )
         .replaceAllMapped(
           RegExp(r'(naive\+https://)[^:@\s]+:[^@\s]+@', caseSensitive: false),
           (match) => '${match[1]}***:***@',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'(vless://|hysteria2://|hy2://|hysteria://)[^\s]+',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]}***',
         )
         .replaceAllMapped(
           RegExp(r'(vless://)[^@\s]+@', caseSensitive: false),
@@ -1419,7 +1478,14 @@ class _HomeScreenState extends State<HomeScreen>
         )
         .replaceAllMapped(
           RegExp(
-            r'("(?:password|uuid|public_key|short_id)"\s*:\s*")[^"]+',
+            r'("(?:password|passwd|token|access_token|refresh_token|uuid|auth|auth_str|public_key|short_id|subscription)"\s*:\s*")[^"]+',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]}***',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'((?:password|passwd|token|access_token|refresh_token|auth|key)=)[^&\s]+',
             caseSensitive: false,
           ),
           (match) => '${match[1]}***',
@@ -2520,10 +2586,10 @@ class _Strings {
     protocolLabel: 'Протокол',
     networkLabel: 'Сеть',
     dnsLabel: 'DNS',
-    dnsCountryValue: 'RU напрямую, остальное VPN',
+    dnsCountryValue: 'Быстрый DNS + split',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Windows-режим: российские домены и GeoIP RU идут напрямую, остальное через VPN. Naive работает нативно и сохраняет QUIC/H3 из профиля; HTTPS CONNECT используется только для совместимых http-профилей.',
+        'Windows-режим: DNS обрабатывается локально для быстрого старта вкладок, российские домены и GeoIP RU идут напрямую, остальное через VPN.',
     endpointLabel: 'Сервер',
     connect: 'Подключить',
     disconnect: 'Отключить',
@@ -2642,10 +2708,10 @@ class _Strings {
     protocolLabel: 'Protocol',
     networkLabel: 'Network',
     dnsLabel: 'DNS',
-    dnsCountryValue: 'RU direct, foreign via VPN',
+    dnsCountryValue: 'Fast DNS + split',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Windows mode: Russian domains and GeoIP RU go direct, everything else uses the VPN. Naive runs natively and keeps QUIC/H3 from the profile; HTTPS CONNECT is only used for compatible http profiles.',
+        'Windows mode: DNS is resolved locally for fast tab startup, Russian domains and GeoIP RU go direct, and everything else uses the VPN.',
     endpointLabel: 'Server',
     connect: 'Connect',
     disconnect: 'Disconnect',
