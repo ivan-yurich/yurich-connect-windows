@@ -22,16 +22,17 @@ $projectRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
 Set-Location $projectRoot
 
 $runtimeDir = Join-Path $projectRoot 'assets\windows\sing-box'
+$windowsBuildDir = Join-Path $projectRoot 'build\windows'
 $buildOutputDir = Join-Path $projectRoot 'build\windows\x64\runner\Release'
 $releaseDir = Join-Path $projectRoot 'release\windows'
-$portableDir = Join-Path $releaseDir 'AurumVPN_Windows_Portable'
-$portableZip = Join-Path $releaseDir 'AurumVPN_Windows_Portable.zip'
-$setupExe = Join-Path $releaseDir 'AurumVPN_Setup.exe'
+$portableDir = Join-Path $releaseDir 'YurichConnect_Windows_Portable'
+$portableZip = Join-Path $releaseDir 'YurichConnect_Windows_Portable.zip'
+$setupExe = Join-Path $releaseDir 'YurichConnect_Setup.exe'
 $setupDir = Join-Path $projectRoot 'windows\installer\setup'
-$setupPayload = Join-Path $setupDir 'AurumVPN_payload.zip'
+$setupPayload = Join-Path $setupDir 'YurichConnect_payload.zip'
 $setupIcon = Join-Path $setupDir 'app_icon.ico'
 $runnerIcon = Join-Path $projectRoot 'windows\runner\resources\app_icon.ico'
-$appDataConfig = Join-Path $env:APPDATA 'Aurum VPN\config.json'
+$appDataConfig = Join-Path $env:APPDATA 'Yurich Connect\config.json'
 
 Invoke-Step 'Flutter analyze' {
   flutter analyze
@@ -43,6 +44,7 @@ Invoke-Step 'Flutter tests' {
 
 if (-not $SkipBuild) {
   Invoke-Step 'Windows release build' {
+    Remove-Item -LiteralPath $windowsBuildDir -Recurse -Force -ErrorAction SilentlyContinue
     flutter build windows --release --split-debug-info=build\symbols\windows
   }
 }
@@ -101,7 +103,7 @@ Invoke-Step 'Portable archive contents' {
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $requiredEntries = @(
-    'AurumVPN.exe',
+    'YurichConnect.exe',
     'flutter_windows.dll',
     'screen_retriever_windows_plugin.dll',
     'tray_manager_plugin.dll',
@@ -115,8 +117,8 @@ Invoke-Step 'Portable archive contents' {
     'VCRUNTIME140.dll',
     'VCRUNTIME140_1.dll',
     'data/flutter_assets/windows/runner/resources/app_icon.ico',
-    'START_AURUM_VPN.cmd',
-    'uninstall_aurum_vpn.ps1',
+    'START_YURICH_CONNECT.cmd',
+    'uninstall_yurich_connect.ps1',
     'README_PORTABLE_RU.txt'
   )
 
@@ -136,7 +138,7 @@ Invoke-Step 'Portable archive contents' {
 
 Invoke-Step 'Installer payload safety scan' {
   foreach ($name in @(
-    'AurumVPN.exe',
+    'YurichConnect.exe',
     'flutter_windows.dll',
     'runtime/sing-box.exe',
     'runtime/naive.exe',
@@ -146,8 +148,8 @@ Invoke-Step 'Installer payload safety scan' {
     'VCRUNTIME140.dll',
     'VCRUNTIME140_1.dll',
     'README_PORTABLE_RU.txt',
-    'START_AURUM_VPN.cmd',
-    'uninstall_aurum_vpn.ps1'
+    'START_YURICH_CONNECT.cmd',
+    'uninstall_yurich_connect.ps1'
   )) {
     $path = Join-Path $portableDir $name
     if (-not (Test-Path -LiteralPath $path)) {
@@ -172,7 +174,7 @@ Invoke-Step 'Installer payload safety scan' {
     'hy2://[^@\s]+@',
     'access_token["=:\s]+[A-Za-z0-9._-]{20,}',
     'refresh_token["=:\s]+[A-Za-z0-9._-]{20,}',
-    'Remnawave[^\r\n]+https?://'
+    '(?:Remnawave|Yurich ID)[^\r\n]+https?://'
   )
   $pattern = ($patterns -join '|')
   $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' $pattern $portableDir 2>$null)
@@ -188,8 +190,8 @@ if (-not $SkipInstallerPublish) {
     Copy-Item -LiteralPath $runnerIcon -Destination $setupIcon -Force
     try {
       Remove-Item -LiteralPath (Join-Path $setupDir 'bin'), (Join-Path $setupDir 'obj') -Recurse -Force -ErrorAction SilentlyContinue
-      dotnet publish (Join-Path $setupDir 'AurumVpnSetup.csproj') -c Release
-      $publishedSetup = Join-Path $setupDir 'bin\Release\net9.0-windows\win-x64\publish\AurumVPN_Setup.exe'
+      dotnet publish (Join-Path $setupDir 'YurichConnectSetup.csproj') -c Release
+      $publishedSetup = Join-Path $setupDir 'bin\Release\net9.0-windows\win-x64\publish\YurichConnect_Setup.exe'
       if (-not (Test-Path -LiteralPath $publishedSetup)) {
         throw "Installer publish did not produce $publishedSetup"
       }
@@ -204,7 +206,7 @@ Invoke-Step 'Installer safety scan' {
   if (-not (Test-Path -LiteralPath $setupExe)) {
     throw "Missing installer: $setupExe"
   }
-  $pattern = 'C:\\Users\\ivan-|AndroidStudioProjects\\aurum_vpn_windows_repo|-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|vless://[0-9a-fA-F-]{32,}@|naive\+https://[^:\s]+:[^@\s]+@|hysteria2://[^@\s]+@|hy2://[^@\s]+@|access_token["=:\s]+[A-Za-z0-9._-]{20,}|refresh_token["=:\s]+[A-Za-z0-9._-]{20,}|Remnawave[^\r\n]+https?://'
+  $pattern = 'C:\\Users\\ivan-|AndroidStudioProjects\\aurum_vpn_windows_repo|-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|vless://[0-9a-fA-F-]{32,}@|naive\+https://[^:\s]+:[^@\s]+@|hysteria2://[^@\s]+@|hy2://[^@\s]+@|access_token["=:\s]+[A-Za-z0-9._-]{20,}|refresh_token["=:\s]+[A-Za-z0-9._-]{20,}|(?:Remnawave|Yurich ID)[^\r\n]+https?://'
   $matches = @(rg -a -n $pattern $setupExe 2>$null)
   if ($matches.Count -gt 0) {
     throw "Installer safety scan found sensitive/dev data:`n$($matches -join [Environment]::NewLine)"

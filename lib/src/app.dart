@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
+import 'branding.dart';
 import 'screens/home_screen.dart';
 
-class IvanVpnApp extends StatelessWidget {
-  const IvanVpnApp({super.key});
+class YurichConnectApp extends StatelessWidget {
+  const YurichConnectApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -13,7 +14,7 @@ class IvanVpnApp extends StatelessWidget {
     );
 
     return MaterialApp(
-      title: 'Aurum VPN',
+      title: YurichBranding.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: colorScheme,

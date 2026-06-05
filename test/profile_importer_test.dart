@@ -1,9 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:aurum_vpn_windows/src/models/vpn_profile.dart';
-import 'package:aurum_vpn_windows/src/services/profile_importer.dart';
-import 'package:aurum_vpn_windows/src/services/sing_box_config_builder.dart';
+import 'package:yurich_connect_windows/src/models/vpn_profile.dart';
+import 'package:yurich_connect_windows/src/services/profile_importer.dart';
+import 'package:yurich_connect_windows/src/services/sing_box_config_builder.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -437,7 +437,7 @@ void main() {
         .whereType<Map<String, dynamic>>()
         .toList();
 
-    expect(tunInbound['interface_name'], 'AurumVPN');
+    expect(tunInbound['interface_name'], 'YurichConnect');
     expect(tunInbound['exclude_package'], isNull);
     expect(tunInbound['mtu'], 1500);
     expect(tunInbound['stack'], 'system');
@@ -555,7 +555,7 @@ void main() {
     expect(profiles.last.endpoint, 'hy2.example.com:8443');
   });
 
-  test('imports Remnawave Xray JSON subscription', () async {
+  test('imports Yurich Panel Xray JSON subscription', () async {
     final payload = jsonEncode([
       {
         'remarks': 'Russia',

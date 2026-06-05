@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../branding.dart';
 import 'sing_box_config_builder.dart';
 import 'vpn_engine.dart';
 
@@ -13,10 +14,10 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   Process? _process;
   Process? _naiveProcess;
-  String _status = AurumVpnStatus.stopped;
+  String _status = YurichConnectStatus.stopped;
   String _config = '{}';
   String? _naiveProxyConfig;
-  String _notificationTitle = 'Aurum VPN';
+  String _notificationTitle = YurichBranding.appName;
   String _notificationDescription = 'VPN connection is active';
   Timer? _trafficTimer;
   WebSocket? _trafficSocket;
@@ -64,8 +65,8 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   @override
   Future<String> getVPNStatus() async {
-    if (_process == null && _status != AurumVpnStatus.stopped) {
-      _setStatus(AurumVpnStatus.stopped);
+    if (_process == null && _status != YurichConnectStatus.stopped) {
+      _setStatus(YurichConnectStatus.stopped);
     }
     return _status;
   }
@@ -86,7 +87,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       return true;
     }
 
-    _setStatus(AurumVpnStatus.starting);
+    _setStatus(YurichConnectStatus.starting);
     _reportedAdminIssue = false;
     try {
       final runtimeDir = await _runtimeDir();
@@ -108,14 +109,14 @@ class WindowsSingBoxEngine implements VpnEngine {
         needsNaiveProxy: needsNaiveProxy,
       );
       if (!preflightOk) {
-        _setStatus(AurumVpnStatus.stopped);
+        _setStatus(YurichConnectStatus.stopped);
         return false;
       }
 
       if (needsNaiveProxy) {
         final started = await _startNaiveProxy(runtimeDir, configDir);
         if (!started) {
-          _setStatus(AurumVpnStatus.stopped);
+          _setStatus(YurichConnectStatus.stopped);
           return false;
         }
       }
@@ -123,7 +124,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       final exe = File('${runtimeDir.path}\\sing-box.exe');
       if (!await exe.exists()) {
         _appendLog('sing-box.exe не найден в ${runtimeDir.path}');
-        _setStatus(AurumVpnStatus.stopped);
+        _setStatus(YurichConnectStatus.stopped);
         return false;
       }
 
@@ -145,15 +146,15 @@ class WindowsSingBoxEngine implements VpnEngine {
           _process = null;
           _stopNaiveProxy();
           _stopTrafficTicker();
-          if (_status != AurumVpnStatus.stopping) {
-            _setStatus(AurumVpnStatus.stopped);
+          if (_status != YurichConnectStatus.stopping) {
+            _setStatus(YurichConnectStatus.stopped);
           }
         }),
       );
 
       await Future<void>.delayed(const Duration(milliseconds: 900));
       if (_process == process) {
-        _setStatus(AurumVpnStatus.started);
+        _setStatus(YurichConnectStatus.started);
         return true;
       }
     } on Object catch (e) {
@@ -161,7 +162,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
 
     _stopNaiveProxy();
-    _setStatus(AurumVpnStatus.stopped);
+    _setStatus(YurichConnectStatus.stopped);
     return false;
   }
 
@@ -174,11 +175,11 @@ class WindowsSingBoxEngine implements VpnEngine {
       } on Object {
         // Best-effort cleanup for untracked processes after app restarts.
       }
-      _setStatus(AurumVpnStatus.stopped);
+      _setStatus(YurichConnectStatus.stopped);
       return true;
     }
 
-    _setStatus(AurumVpnStatus.stopping);
+    _setStatus(YurichConnectStatus.stopping);
     _appendLog('Stopping sing-box...');
     process.kill();
     try {
@@ -189,7 +190,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     _process = null;
     _stopNaiveProxy();
     _stopTrafficTicker();
-    _setStatus(AurumVpnStatus.stopped);
+    _setStatus(YurichConnectStatus.stopped);
     return true;
   }
 
@@ -202,13 +203,13 @@ class WindowsSingBoxEngine implements VpnEngine {
 
     if (!await _isAdministrator()) {
       _appendLog(
-        'Preflight failed: Aurum VPN запущен без прав администратора.',
+        'Preflight failed: Yurich Connect запущен без прав администратора.',
       );
       if (!_statusController.isClosed) {
         _statusController.add({
           'type': 'alert',
           'message':
-              'Aurum VPN нужны права администратора для Windows TUN/Wintun. Запусти приложение через START_AURUM_VPN.cmd или ярлык установщика.',
+              'Yurich Connect нужны права администратора для Windows TUN/Wintun. Запусти приложение через START_YURICH_CONNECT.cmd или ярлык установщика.',
         });
       }
       return false;
@@ -531,7 +532,7 @@ Write-Output \$stopped
       ]).timeout(const Duration(seconds: 8));
       final stopped = int.tryParse('${result.stdout}'.trim()) ?? 0;
       if (stopped > 0) {
-        _appendLog('Stopped stale Aurum runtime processes: $stopped');
+        _appendLog('Stopped stale Yurich Core runtime processes: $stopped');
         await Future<void>.delayed(const Duration(milliseconds: 600));
       }
     } on Object catch (e) {
@@ -602,7 +603,7 @@ Write-Output \$stopped
         if (_naiveProcess == process) {
           _naiveProcess = null;
         }
-        if (_process != null && _status != AurumVpnStatus.stopping) {
+        if (_process != null && _status != YurichConnectStatus.stopping) {
           _appendLog('NaiveProxy core stopped while VPN was running.');
           _process?.kill();
         }
@@ -630,7 +631,7 @@ Write-Output \$stopped
     }
   }
 
-  void _appendLog(String message, {String fileName = 'aurum.log'}) {
+  void _appendLog(String message, {String fileName = 'yurich.log'}) {
     final trimmed = _redactSensitive(message.trim());
     if (trimmed.isEmpty) {
       return;
@@ -642,7 +643,7 @@ Write-Output \$stopped
         _statusController.add({
           'type': 'alert',
           'message':
-              'Windows не дал доступ к TUN. Запусти Aurum VPN от имени администратора или переустанови свежий установщик.',
+              'Windows не дал доступ к TUN. Запусти Yurich Connect от имени администратора или переустанови свежий установщик.',
         });
       }
     }
@@ -653,8 +654,8 @@ Write-Output \$stopped
     if (!_logController.isClosed) {
       _logController.add({'type': 'log', 'message': trimmed});
     }
-    unawaited(_writeLogFile('aurum.log', trimmed));
-    if (fileName != 'aurum.log') {
+    unawaited(_writeLogFile('yurich.log', trimmed));
+    if (fileName != 'yurich.log') {
       unawaited(_writeLogFile(fileName, trimmed));
     }
   }
@@ -844,11 +845,36 @@ Write-Output \$stopped
   Future<Directory> _configDir() async {
     final appData = Platform.environment['APPDATA'];
     final base = appData == null || appData.isEmpty
-        ? Directory('${Platform.environment['USERPROFILE']}\\.aurum_vpn')
-        : Directory('$appData\\Aurum VPN');
+        ? Directory('${Platform.environment['USERPROFILE']}\\.yurich_connect')
+        : Directory('$appData\\Yurich Connect');
+    await _migrateLegacyConfigDir(base);
     if (!await base.exists()) {
       await base.create(recursive: true);
     }
     return base;
+  }
+
+  Future<void> _migrateLegacyConfigDir(Directory target) async {
+    if (await target.exists()) {
+      return;
+    }
+    final appData = Platform.environment['APPDATA'];
+    final legacy = appData == null || appData.isEmpty
+        ? Directory('${Platform.environment['USERPROFILE']}\\.aurum_vpn')
+        : Directory('$appData\\Aurum VPN');
+    if (!await legacy.exists()) {
+      return;
+    }
+
+    await for (final entity in legacy.list(recursive: true)) {
+      final relative = entity.path.substring(legacy.path.length);
+      final destination = '${target.path}$relative';
+      if (entity is Directory) {
+        await Directory(destination).create(recursive: true);
+      } else if (entity is File) {
+        await File(destination).parent.create(recursive: true);
+        await entity.copy(destination);
+      }
+    }
   }
 }

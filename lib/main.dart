@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'src/app.dart';
+import 'src/branding.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,7 +15,7 @@ Future<void> main() async {
         size: Size(430, 760),
         minimumSize: Size(390, 620),
         center: true,
-        title: 'Aurum VPN',
+        title: YurichBranding.appName,
       ),
       () async {
         await windowManager.show();
@@ -23,5 +24,5 @@ Future<void> main() async {
     );
     await windowManager.setPreventClose(true);
   }
-  runApp(const IvanVpnApp());
+  runApp(const YurichConnectApp());
 }

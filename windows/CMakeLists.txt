@@ -1,10 +1,10 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
-project(aurum_vpn LANGUAGES CXX)
+project(yurich_connect LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "AurumVPN")
+set(BINARY_NAME "YurichConnect")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -90,8 +90,8 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../assets/windows/vcredist/"
   COMPONENT Runtime)
 
 install(FILES
-  "${CMAKE_CURRENT_SOURCE_DIR}/installer/START_AURUM_VPN.cmd"
-  "${CMAKE_CURRENT_SOURCE_DIR}/installer/uninstall_aurum_vpn.ps1"
+  "${CMAKE_CURRENT_SOURCE_DIR}/installer/START_YURICH_CONNECT.cmd"
+  "${CMAKE_CURRENT_SOURCE_DIR}/installer/uninstall_yurich_connect.ps1"
   "${CMAKE_CURRENT_SOURCE_DIR}/installer/README_PORTABLE_RU.txt"
   DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)

@@ -5,7 +5,7 @@ import 'android_vpn_engine.dart';
 import 'sing_box_config_builder.dart';
 import 'windows_sing_box_engine.dart';
 
-class AurumVpnStatus {
+class YurichConnectStatus {
   static const stopped = 'Stopped';
   static const starting = 'Starting';
   static const started = 'Started';

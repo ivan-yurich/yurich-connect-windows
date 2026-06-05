@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:aurum_vpn_windows/src/services/windows_integration_service.dart';
+import 'package:yurich_connect_windows/src/services/windows_integration_service.dart';
 
 void main() {
   group('WindowsIntegrationService auto-start task XML', () {

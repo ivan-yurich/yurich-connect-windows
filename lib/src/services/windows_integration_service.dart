@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../branding.dart';
+
 class WindowsUpdateInfo {
   const WindowsUpdateInfo({
     required this.message,
@@ -33,47 +35,42 @@ class WindowsIntegrationService {
     '/repos/$githubOwner/$githubRepo/releases/latest',
   );
 
-  static const _taskName = 'Aurum VPN';
+  static const _taskName = YurichBranding.appName;
+  static const _legacyTaskName = 'Aurum VPN';
   static const _startupDelayIso8601 = 'PT30S';
 
   Future<bool> isAutoStartEnabled() async {
     if (!Platform.isWindows) {
       return false;
     }
-    final result = await Process.run('schtasks', [
-      '/Query',
-      '/TN',
-      _taskName,
-      '/XML',
-    ]);
-    if (result.exitCode != 0) {
-      return false;
-    }
-
-    return isAutoStartTaskHealthyXml('${result.stdout}${result.stderr}');
+    final xml =
+        await _queryTaskXml(_taskName) ?? await _queryTaskXml(_legacyTaskName);
+    return xml != null && isAutoStartTaskHealthyXml(xml);
   }
 
   Future<void> repairAutoStartIfNeeded() async {
     if (!Platform.isWindows) {
       return;
     }
-    final result = await Process.run('schtasks', [
-      '/Query',
-      '/TN',
-      _taskName,
-      '/XML',
-    ]);
-    if (result.exitCode != 0) {
-      return;
-    }
 
-    final xml = '${result.stdout}${result.stderr}';
-    if (isAutoStartTaskInstalledXml(xml) && !isAutoStartTaskHealthyXml(xml)) {
+    final currentXml = await _queryTaskXml(_taskName);
+    if (currentXml != null &&
+        isAutoStartTaskInstalledXml(currentXml) &&
+        !isAutoStartTaskHealthyXml(currentXml)) {
       try {
         await setAutoStart(true);
       } on Object {
         // The app may be opened without elevation. In that case the UI should
         // keep working and let the user reinstall or toggle startup later.
+      }
+    }
+
+    final legacyXml = await _queryTaskXml(_legacyTaskName);
+    if (legacyXml != null && isAutoStartTaskInstalledXml(legacyXml)) {
+      try {
+        await setAutoStart(true);
+      } on Object {
+        // Same best-effort behavior as the regular startup repair.
       }
     }
   }
@@ -84,12 +81,8 @@ class WindowsIntegrationService {
     }
 
     if (!enabled) {
-      final result = await Process.run('schtasks', [
-        '/Delete',
-        '/TN',
-        _taskName,
-        '/F',
-      ]);
+      final result = await _deleteTask(_taskName);
+      await _deleteTask(_legacyTaskName);
       if (result.exitCode != 0 && !await isAutoStartEnabled()) {
         return;
       }
@@ -110,6 +103,7 @@ class WindowsIntegrationService {
         error.isEmpty ? 'Could not create startup task.' : error,
       );
     }
+    await _deleteTask(_legacyTaskName);
   }
 
   Future<WindowsUpdateInfo> checkForUpdate(String currentVersion) async {
@@ -118,7 +112,7 @@ class WindowsIntegrationService {
       final request = await client.getUrl(latestReleaseApi);
       request.headers.set(
         HttpHeaders.userAgentHeader,
-        'AurumVPN/$currentVersion',
+        'YurichConnect/$currentVersion',
       );
       request.headers.set(
         HttpHeaders.acceptHeader,
@@ -179,9 +173,9 @@ class WindowsIntegrationService {
       RegExp(r'[^A-Za-z0-9._-]+'),
       '_',
     );
-    final fileName = update.installerName ?? 'AurumVPN_Setup.exe';
+    final fileName = update.installerName ?? 'YurichConnect_Setup.exe';
     final target = File(
-      '${Directory.systemTemp.path}\\AurumVPN_Update_$safeVersion\\$fileName',
+      '${Directory.systemTemp.path}\\YurichConnect_Update_$safeVersion\\$fileName',
     );
     if (!await target.parent.exists()) {
       await target.parent.create(recursive: true);
@@ -191,7 +185,7 @@ class WindowsIntegrationService {
       ..connectionTimeout = const Duration(seconds: 15);
     try {
       final request = await client.getUrl(url);
-      request.headers.set(HttpHeaders.userAgentHeader, 'AurumVPN updater');
+      request.headers.set(HttpHeaders.userAgentHeader, 'YurichConnect updater');
       final response = await request.close().timeout(
         const Duration(seconds: 30),
       );
@@ -241,6 +235,11 @@ class WindowsIntegrationService {
         .whereType<_ReleaseAsset>()
         .toList();
     for (final asset in parsed) {
+      if (asset.name.toLowerCase() == 'yurichconnect_setup.exe') {
+        return asset;
+      }
+    }
+    for (final asset in parsed) {
       if (asset.name.toLowerCase() == 'aurumvpn_setup.exe') {
         return asset;
       }
@@ -256,6 +255,23 @@ class WindowsIntegrationService {
 
   static String _quotePowerShell(String value) {
     return "'${value.replaceAll("'", "''")}'";
+  }
+
+  Future<String?> _queryTaskXml(String taskName) async {
+    final result = await Process.run('schtasks', [
+      '/Query',
+      '/TN',
+      taskName,
+      '/XML',
+    ]);
+    if (result.exitCode != 0) {
+      return null;
+    }
+    return '${result.stdout}${result.stderr}';
+  }
+
+  Future<ProcessResult> _deleteTask(String taskName) {
+    return Process.run('schtasks', ['/Delete', '/TN', taskName, '/F']);
   }
 
   static String _createStartupTaskScript(String executable) {

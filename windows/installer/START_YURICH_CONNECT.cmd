@@ -3,19 +3,19 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
-set "APP_EXE=%APP_DIR%\AurumVPN.exe"
+set "APP_EXE=%APP_DIR%\YurichConnect.exe"
 
 echo "%APP_DIR%" | findstr /i /c:"\\Temp\\" /c:"\\Temporary Internet Files\\" /c:"\\Compressed\\" >nul
 if not errorlevel 1 (
-  echo Aurum VPN нельзя запускать прямо из ZIP-архива.
-  echo Сначала распакуй папку приложения или установи Aurum VPN через установщик.
+  echo Yurich Connect нельзя запускать прямо из ZIP-архива.
+  echo Сначала распакуй папку приложения или установи Yurich Connect через установщик.
   pause
   exit /b 1
 )
 
 if not exist "%APP_EXE%" (
-  echo AurumVPN.exe не найден рядом с START_AURUM_VPN.cmd.
-  echo Запускай этот файл только из папки Aurum VPN.
+  echo YurichConnect.exe не найден рядом с START_YURICH_CONNECT.cmd.
+  echo Запускай этот файл только из папки Yurich Connect.
   pause
   exit /b 1
 )
@@ -33,7 +33,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
 
 if errorlevel 1 (
   echo.
-  echo Aurum VPN не запущен: нужны права администратора для Windows TUN/Wintun.
+  echo Yurich Connect не запущен: нужны права администратора для Windows TUN/Wintun.
   pause
   exit /b 1
 )

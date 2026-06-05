@@ -12,9 +12,9 @@ function Get-FullPathSafe([string]$Path) {
 
 function Test-SafeInstallPath([string]$Path) {
   $full = Get-FullPathSafe $Path
-  $expectedProgramFiles = Get-FullPathSafe (Join-Path $env:ProgramFiles 'Aurum VPN')
+  $expectedProgramFiles = Get-FullPathSafe (Join-Path $env:ProgramFiles 'Yurich Connect')
   $expectedLocalAppData = if ($env:LOCALAPPDATA) {
-    Get-FullPathSafe (Join-Path $env:LOCALAPPDATA 'Aurum VPN')
+    Get-FullPathSafe (Join-Path $env:LOCALAPPDATA 'Yurich Connect')
   } else {
     $null
   }
@@ -39,12 +39,12 @@ function Test-SafeInstallPath([string]$Path) {
     return $true
   }
 
-  return (Split-Path -Leaf $full) -ieq 'Aurum VPN'
+  return (Split-Path -Leaf $full) -ieq 'Yurich Connect'
 }
 
-function Stop-AurumProcessFromPath([string]$InstallDir) {
+function Stop-YurichProcessFromPath([string]$InstallDir) {
   $prefix = (Get-FullPathSafe $InstallDir) + '\'
-  $names = @('AurumVPN.exe', 'sing-box.exe', 'naive.exe')
+  $names = @('YurichConnect.exe', 'AurumVPN.exe', 'sing-box.exe', 'naive.exe')
 
   Get-CimInstance Win32_Process |
     Where-Object {
@@ -74,24 +74,29 @@ if (-not (Test-IsAdmin)) {
 
 $installDir = Get-FullPathSafe (Split-Path -Parent $PSCommandPath)
 if (-not (Test-SafeInstallPath $installDir)) {
-  throw "Небезопасный путь удаления: $installDir. Скрипт удаляет только папку Aurum VPN."
+  throw "Небезопасный путь удаления: $installDir. Скрипт удаляет только папку Yurich Connect."
 }
 
-$answer = Read-Host "Удалить Aurum VPN из '$installDir'? Введите YES для подтверждения"
+$answer = Read-Host "Удалить Yurich Connect из '$installDir'? Введите YES для подтверждения"
 if ($answer -cne 'YES') {
   Write-Host 'Удаление отменено.'
   exit 0
 }
 
-$startShortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Aurum VPN.lnk'
-$desktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Aurum VPN.lnk'
+$startShortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Yurich Connect.lnk'
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Yurich Connect.lnk'
+$legacyStartShortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Aurum VPN.lnk'
+$legacyDesktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Aurum VPN.lnk'
 
-Stop-AurumProcessFromPath $installDir
+Stop-YurichProcessFromPath $installDir
 Remove-Item -LiteralPath $startShortcut -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $legacyStartShortcut -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $legacyDesktopShortcut -Force -ErrorAction SilentlyContinue
+Remove-Item -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect' -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN' -Recurse -Force -ErrorAction SilentlyContinue
 
-$cleanup = Join-Path $env:TEMP ('AurumVPN_uninstall_cleanup_' + [guid]::NewGuid().ToString('N') + '.cmd')
+$cleanup = Join-Path $env:TEMP ('YurichConnect_uninstall_cleanup_' + [guid]::NewGuid().ToString('N') + '.cmd')
 $command = '@echo off' + [Environment]::NewLine +
   'timeout /t 2 /nobreak >nul' + [Environment]::NewLine +
   'rmdir /s /q "' + $installDir + '"' + [Environment]::NewLine +
@@ -99,4 +104,4 @@ $command = '@echo off' + [Environment]::NewLine +
 Set-Content -LiteralPath $cleanup -Value $command -Encoding ASCII
 Start-Process -FilePath 'cmd.exe' -ArgumentList "/c `"$cleanup`"" -WindowStyle Hidden
 
-Write-Host 'Aurum VPN удаляется. Окно можно закрыть.'
+Write-Host 'Yurich Connect удаляется. Окно можно закрыть.'

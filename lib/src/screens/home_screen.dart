@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../models/vpn_profile.dart';
+import '../branding.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_store.dart';
 import '../services/sing_box_config_builder.dart';
@@ -24,12 +25,12 @@ const _ink = Color(0xFF0E0B07);
 const _surface = Color(0xFF18130B);
 const _surfaceMetric = Color(0xFF2D2110);
 const _mutedGold = Color(0xFFB9AA86);
-const _appName = 'Aurum VPN';
+const _appName = YurichBranding.appName;
 const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.16';
+const _appVersion = '1.0.17';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -82,7 +83,7 @@ class _HomeScreenState extends State<HomeScreen>
   List<VpnProfile> _profiles = const [];
   String? _selectedProfileId;
   _AppLanguage _language = _AppLanguage.ru;
-  String _status = AurumVpnStatus.stopped;
+  String _status = YurichConnectStatus.stopped;
   String _uplink = '0 B/s';
   String _downlink = '0 B/s';
   String _sessionTotal = '0 B';
@@ -121,7 +122,8 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   bool get _connected =>
-      _status == AurumVpnStatus.started || _status == AurumVpnStatus.starting;
+      _status == YurichConnectStatus.started ||
+      _status == YurichConnectStatus.starting;
 
   Future<void> _setupTray() async {
     if (!Platform.isWindows) {
@@ -153,9 +155,9 @@ class _HomeScreenState extends State<HomeScreen>
     if (!Platform.isWindows) {
       return;
     }
-    final connected = _status == AurumVpnStatus.started;
-    final connecting = _status == AurumVpnStatus.starting;
-    final stopping = _status == AurumVpnStatus.stopping;
+    final connected = _status == YurichConnectStatus.started;
+    final connecting = _status == YurichConnectStatus.starting;
+    final stopping = _status == YurichConnectStatus.stopping;
     await trayManager.setContextMenu(
       Menu(
         items: [
@@ -329,20 +331,20 @@ class _HomeScreenState extends State<HomeScreen>
       if (status != null && mounted) {
         setState(() {
           _status = status;
-          if (status == AurumVpnStatus.started) {
+          if (status == YurichConnectStatus.started) {
             _lastError = null;
             _ignoreStoppedUntil = DateTime.now().add(
               const Duration(seconds: 4),
             );
             _startHealthWatchdog(warmup: const Duration(seconds: 30));
-          } else if (status == AurumVpnStatus.stopped ||
-              status == AurumVpnStatus.stopping) {
+          } else if (status == YurichConnectStatus.stopped ||
+              status == YurichConnectStatus.stopping) {
             _stopHealthWatchdog();
           }
           final ignoreStopped =
               _ignoreStoppedUntil != null &&
               DateTime.now().isBefore(_ignoreStoppedUntil!);
-          if (status == AurumVpnStatus.stopped &&
+          if (status == YurichConnectStatus.stopped &&
               !_stoppingByUser &&
               !ignoreStopped) {
             _lastError = s.vpnStoppedUnexpectedly;
@@ -644,7 +646,7 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _startVpnCore(VpnProfile profile) async {
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
     final status = await _refreshVpnStatus();
-    if (status != AurumVpnStatus.stopped) {
+    if (status != YurichConnectStatus.stopped) {
       await _stopVpnCore(updateMessage: false);
     }
 
@@ -711,9 +713,9 @@ class _HomeScreenState extends State<HomeScreen>
         final started = await _vpnEngine.startVPN();
         if (started) {
           final finalStatus = await _waitForVpnStatus({
-            AurumVpnStatus.started,
+            YurichConnectStatus.started,
           }, timeout: const Duration(seconds: 14));
-          if (finalStatus == AurumVpnStatus.started) {
+          if (finalStatus == YurichConnectStatus.started) {
             if (_vpnEngine.configTarget != SingBoxConfigTarget.windows ||
                 await _probeLocalMixedProxy()) {
               connected = true;
@@ -804,7 +806,7 @@ class _HomeScreenState extends State<HomeScreen>
             .timeout(const Duration(seconds: 3));
         request.headers.set(
           HttpHeaders.userAgentHeader,
-          'AurumVPN/$_appVersion',
+          'YurichConnect/$_appVersion',
         );
         request.followRedirects = false;
         final response = await request.close().timeout(
@@ -858,7 +860,7 @@ class _HomeScreenState extends State<HomeScreen>
         !Platform.isWindows ||
         _busy ||
         _healthWatchdogRestarting ||
-        _status != AurumVpnStatus.started) {
+        _status != YurichConnectStatus.started) {
       return;
     }
 
@@ -906,7 +908,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     _healthWatchdogRestarting = false;
     _healthWatchdogFailures = 0;
-    if (mounted && _status == AurumVpnStatus.started) {
+    if (mounted && _status == YurichConnectStatus.started) {
       _startHealthWatchdog(warmup: const Duration(seconds: 45));
     }
   }
@@ -932,15 +934,15 @@ class _HomeScreenState extends State<HomeScreen>
     }
     try {
       final status = await _refreshVpnStatus();
-      if (status != AurumVpnStatus.stopped) {
+      if (status != YurichConnectStatus.stopped) {
         await _vpnEngine.stopVPN().timeout(
           const Duration(seconds: 5),
           onTimeout: () => true,
         );
         final stoppedStatus = await _waitForVpnStatus({
-          AurumVpnStatus.stopped,
+          YurichConnectStatus.stopped,
         }, timeout: const Duration(seconds: 8));
-        if (stoppedStatus != AurumVpnStatus.stopped) {
+        if (stoppedStatus != YurichConnectStatus.stopped) {
           _queueLog('VPN stop cleanup is still finishing: $stoppedStatus');
         }
         await Future<void>.delayed(const Duration(milliseconds: 700));
@@ -949,7 +951,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (mounted) {
         _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
         setState(() {
-          _status = AurumVpnStatus.stopped;
+          _status = YurichConnectStatus.stopped;
           _uplink = '0 B/s';
           _downlink = '0 B/s';
           _lastError = null;
@@ -1365,8 +1367,8 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final appData = Platform.environment['APPDATA'];
       final base = appData == null || appData.isEmpty
-          ? Directory('${Platform.environment['USERPROFILE']}\\.aurum_vpn')
-          : Directory('$appData\\Aurum VPN');
+          ? Directory('${Platform.environment['USERPROFILE']}\\.yurich_connect')
+          : Directory('$appData\\Yurich Connect');
       final diagnosticsDir = Directory('${base.path}\\diagnostics');
       final logsDir = Directory('${base.path}\\logs');
       await diagnosticsDir.create(recursive: true);
@@ -1722,11 +1724,11 @@ class _StatusPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final connected = status == AurumVpnStatus.started;
+    final connected = status == YurichConnectStatus.started;
     final statusLabel = switch (status) {
-      AurumVpnStatus.started => strings.connected,
-      AurumVpnStatus.starting => strings.connecting,
-      AurumVpnStatus.stopping => strings.disconnecting,
+      YurichConnectStatus.started => strings.connected,
+      YurichConnectStatus.starting => strings.connecting,
+      YurichConnectStatus.stopping => strings.disconnecting,
       _ => strings.stopped,
     };
 
@@ -2730,11 +2732,11 @@ class _Strings {
   };
 
   static const ru = _Strings._(
-    addProfileHint: 'Добавь подписку Remnawave, QR или отдельный ключ',
+    addProfileHint: 'Добавь Yurich ID, QR или отдельный ключ',
     nothingToImport: 'Нечего импортировать.',
     switchingProfile: 'Переключаю профиль...',
     importFirst: 'Сначала импортируй профиль.',
-    configSaveFailed: 'sing-box не сохранил config.',
+    configSaveFailed: 'Yurich Core не сохранил config.',
     vpnStartFailed: 'VPN не стартовал. Открой логи ниже.',
     disconnectingVpn: 'Отключаю VPN...',
     vpnStopServiceFailed: 'VPN-сервис не смог полностью остановиться.',
@@ -2745,12 +2747,12 @@ class _Strings {
     working: 'Работаю...',
     report: 'Отчёт',
     cannotOpenLink: 'Не смог открыть ссылку.',
-    mailSubject: 'Aurum VPN: диагностика VPN',
+    mailSubject: 'Yurich Connect: диагностика VPN',
     mailFallback: 'Почта не открылась. Отчёт скопирован в буфер.',
     vpnStoppedUnexpectedly: 'VPN остановлен неожиданно',
-    openLogsMessage: 'VPN остановлен. Открой логи sing-box.',
+    openLogsMessage: 'VPN остановлен. Открой логи Yurich Core.',
     languageChanged: 'Язык переключён',
-    windowsEdition: 'Windows 11',
+    windowsEdition: 'Yurich Desktop',
     addProfile: 'Добавить профиль',
     importHint: 'https://sub... или vless://... или hysteria2://...',
     importAction: 'Импорт',
@@ -2779,11 +2781,11 @@ class _Strings {
     pingUnavailable: 'нет адреса',
     protocolLabel: 'Протокол',
     networkLabel: 'Сеть',
-    dnsLabel: 'DNS',
-    dnsCountryValue: 'Быстрый DNS + split',
+    dnsLabel: 'Yurich DNS',
+    dnsCountryValue: 'Yurich DNS + split',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Windows-режим: DNS обрабатывается локально для быстрого старта вкладок, российские домены и GeoIP RU идут напрямую, остальное через VPN.',
+        'Yurich Desktop: Yurich DNS обрабатывается локально для быстрого старта вкладок, российские домены и GeoIP RU идут напрямую, остальное через VPN.',
     endpointLabel: 'Сервер',
     connect: 'Подключить',
     disconnect: 'Отключить',
@@ -2801,7 +2803,7 @@ class _Strings {
       _FaqItem(
         question: 'Какие протоколы поддерживаются?',
         answer:
-            'Поддерживаются VLESS Reality, VLESS TLS, Hysteria 1/2, Remnawave подписки, naive+https и sing-box JSON.',
+            'Поддерживаются VLESS Reality, VLESS TLS, Hysteria 1/2, Yurich ID, naive+https и sing-box JSON.',
       ),
       _FaqItem(
         question: 'Что делать, если после смены профиля пропал интернет?',
@@ -2816,7 +2818,7 @@ class _Strings {
       _FaqItem(
         question: 'Почему NaiveProxy может быть быстрее?',
         answer:
-            'Aurum VPN не переводит naive+https в HTTPS CONNECT без необходимости. Если профиль содержит QUIC, sing-box сможет использовать H3/QUIC вместо более медленного совместимого режима.',
+            'Yurich Connect не переводит naive+https в HTTPS CONNECT без необходимости. Если профиль содержит QUIC, Yurich Core сможет использовать H3/QUIC вместо более медленного совместимого режима.',
       ),
       _FaqItem(
         question: 'Безопасно ли отправлять отчёт?',
@@ -2824,12 +2826,12 @@ class _Strings {
             'Отчёт открывается в твоей почте перед отправкой. Пароли, UUID и ключи скрываются автоматически.',
       ),
     ],
-    logs: 'Логи sing-box',
+    logs: 'Логи Yurich Core',
     noLogs: 'Логов пока нет.',
-    windowsTools: 'Windows',
+    windowsTools: 'Yurich Desktop',
     autoStart: 'Автостарт с Windows',
     autoStartHint:
-        'Запускает Aurum VPN при входе в Windows через планировщик задач с высшими правами.',
+        'Запускает Yurich Connect при входе в Windows через планировщик задач с высшими правами.',
     autoStartEnabled: 'Автостарт включён',
     autoStartDisabled: 'Автостарт выключен',
     autoStartFailed: 'Не удалось изменить автостарт',
@@ -2850,18 +2852,18 @@ class _Strings {
     openRelease: 'Открыть',
     save: 'Сохранить',
     cancel: 'Отмена',
-    trayShow: 'Открыть Aurum VPN',
+    trayShow: 'Открыть Yurich Connect',
     trayHide: 'Свернуть в трей',
     trayQuit: 'Выход',
     notificationDescription: 'VPN подключение активно',
   );
 
   static const en = _Strings._(
-    addProfileHint: 'Add a Remnawave subscription, QR code, or single key',
+    addProfileHint: 'Add a Yurich ID, QR code, or single key',
     nothingToImport: 'Nothing to import.',
     switchingProfile: 'Switching profile...',
     importFirst: 'Import a profile first.',
-    configSaveFailed: 'sing-box did not save the config.',
+    configSaveFailed: 'Yurich Core did not save the config.',
     vpnStartFailed: 'VPN did not start. Check the logs below.',
     disconnectingVpn: 'Disconnecting VPN...',
     vpnStopServiceFailed: 'VPN service could not fully stop.',
@@ -2872,12 +2874,12 @@ class _Strings {
     working: 'Working...',
     report: 'Report',
     cannotOpenLink: 'Could not open the link.',
-    mailSubject: 'Aurum VPN: VPN diagnostics',
+    mailSubject: 'Yurich Connect: VPN diagnostics',
     mailFallback: 'Mail did not open. Report copied to clipboard.',
     vpnStoppedUnexpectedly: 'VPN stopped unexpectedly',
-    openLogsMessage: 'VPN stopped. Open sing-box logs.',
+    openLogsMessage: 'VPN stopped. Open Yurich Core logs.',
     languageChanged: 'Language changed',
-    windowsEdition: 'Windows 11',
+    windowsEdition: 'Yurich Desktop',
     addProfile: 'Add profile',
     importHint: 'https://sub... or vless://... or hysteria2://...',
     importAction: 'Import',
@@ -2905,11 +2907,11 @@ class _Strings {
     pingUnavailable: 'no endpoint',
     protocolLabel: 'Protocol',
     networkLabel: 'Network',
-    dnsLabel: 'DNS',
-    dnsCountryValue: 'Fast DNS + split',
+    dnsLabel: 'Yurich DNS',
+    dnsCountryValue: 'Yurich DNS + split',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Windows mode: DNS is resolved locally for fast tab startup, Russian domains and GeoIP RU go direct, and everything else uses the VPN.',
+        'Yurich Desktop: Yurich DNS is resolved locally for fast tab startup, Russian domains and GeoIP RU go direct, and everything else uses the VPN.',
     endpointLabel: 'Server',
     connect: 'Connect',
     disconnect: 'Disconnect',
@@ -2927,7 +2929,7 @@ class _Strings {
       _FaqItem(
         question: 'Which protocols are supported?',
         answer:
-            'VLESS Reality, VLESS TLS, Hysteria 1/2, Remnawave subscriptions, naive+https, and sing-box JSON are supported.',
+            'VLESS Reality, VLESS TLS, Hysteria 1/2, Yurich ID, naive+https, and sing-box JSON are supported.',
       ),
       _FaqItem(
         question: 'What if internet stops after switching profiles?',
@@ -2942,7 +2944,7 @@ class _Strings {
       _FaqItem(
         question: 'Why can NaiveProxy be faster now?',
         answer:
-            'Aurum VPN no longer converts naive+https to HTTPS CONNECT unless needed. If the profile contains QUIC, sing-box can use H3/QUIC instead of the slower compatibility mode.',
+            'Yurich Connect no longer converts naive+https to HTTPS CONNECT unless needed. If the profile contains QUIC, Yurich Core can use H3/QUIC instead of the slower compatibility mode.',
       ),
       _FaqItem(
         question: 'Is sending a report safe?',
@@ -2950,12 +2952,12 @@ class _Strings {
             'The report opens in your email before sending. Passwords, UUIDs, and keys are hidden automatically.',
       ),
     ],
-    logs: 'sing-box logs',
+    logs: 'Yurich Core logs',
     noLogs: 'No logs yet.',
-    windowsTools: 'Windows',
+    windowsTools: 'Yurich Desktop',
     autoStart: 'Start with Windows',
     autoStartHint:
-        'Starts Aurum VPN on Windows sign-in via Task Scheduler with highest privileges.',
+        'Starts Yurich Connect on Windows sign-in via Task Scheduler with highest privileges.',
     autoStartEnabled: 'Startup enabled',
     autoStartDisabled: 'Startup disabled',
     autoStartFailed: 'Could not change startup',
@@ -2976,7 +2978,7 @@ class _Strings {
     openRelease: 'Open',
     save: 'Save',
     cancel: 'Cancel',
-    trayShow: 'Open Aurum VPN',
+    trayShow: 'Open Yurich Connect',
     trayHide: 'Hide to tray',
     trayQuit: 'Quit',
     notificationDescription: 'VPN connection is active',

@@ -4,16 +4,19 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
-namespace AurumVpnSetup;
+namespace YurichConnectSetup;
 
 internal static class Program
 {
-    private const string AppName = "Aurum VPN";
-    private const string Publisher = "Ivan Yurievich / Aurum VPN";
-    private const string AppVersion = "1.0.16";
-    private const string StartupTaskName = "Aurum VPN";
-    private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN";
-    private static readonly string[] AppProcessNames = ["AurumVPN", "sing-box", "naive"];
+    private const string AppName = "Yurich Connect";
+    private const string LegacyAppName = "Aurum VPN";
+    private const string Publisher = "Yurich";
+    private const string AppVersion = "1.0.17";
+    private const string StartupTaskName = "Yurich Connect";
+    private const string LegacyStartupTaskName = "Aurum VPN";
+    private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
+    private const string LegacyUninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN";
+    private static readonly string[] AppProcessNames = ["YurichConnect", "AurumVPN", "sing-box", "naive"];
     private static readonly string[] VisualRuntimeDlls =
     [
         "MSVCP140.dll",
@@ -55,26 +58,29 @@ internal static class Program
     private static string Install()
     {
         var installDir = InstallDir();
-        var tempDir = Path.Combine(Path.GetTempPath(), "AurumVPNInstall_" + Guid.NewGuid().ToString("N"));
-        var payloadPath = Path.Combine(tempDir, "AurumVPN_payload.zip");
+        var legacyInstallDir = LegacyInstallDir();
+        var tempDir = Path.Combine(Path.GetTempPath(), "YurichConnectInstall_" + Guid.NewGuid().ToString("N"));
+        var payloadPath = Path.Combine(tempDir, "YurichConnect_payload.zip");
 
         Directory.CreateDirectory(tempDir);
         try
         {
             ExtractPayload(payloadPath);
 
-            var oldVersion = GetExistingVersion();
-            if (Directory.Exists(installDir) || !string.IsNullOrWhiteSpace(oldVersion))
+            var oldVersion = GetExistingVersion(UninstallKeyPath) ?? GetExistingVersion(LegacyUninstallKeyPath);
+            if (Directory.Exists(installDir) || Directory.Exists(legacyInstallDir) || !string.IsNullOrWhiteSpace(oldVersion))
             {
                 StopAppProcessesFromInstallDir(installDir);
+                StopAppProcessesFromInstallDir(legacyInstallDir);
             }
 
             ReplaceInstallDirectory(installDir, payloadPath);
+            CleanupLegacyInstall(legacyInstallDir);
 
-            var exePath = Path.Combine(installDir, "AurumVPN.exe");
+            var exePath = Path.Combine(installDir, "YurichConnect.exe");
             if (!File.Exists(exePath))
             {
-                throw new FileNotFoundException("AurumVPN.exe не был установлен.", exePath);
+                throw new FileNotFoundException("YurichConnect.exe не был установлен.", exePath);
             }
 
             EnsureVisualRuntimePayload(installDir);
@@ -82,13 +88,13 @@ internal static class Program
                 Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
                     "Programs",
-                    "Aurum VPN.lnk"),
+                    "Yurich Connect.lnk"),
                 exePath,
                 installDir);
             CreateShortcut(
                 Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
-                    "Aurum VPN.lnk"),
+                    "Yurich Connect.lnk"),
                 exePath,
                 installDir);
             RegisterUninstall(installDir, exePath);
@@ -115,9 +121,16 @@ internal static class Program
             AppName);
     }
 
-    private static string? GetExistingVersion()
+    private static string LegacyInstallDir()
     {
-        using var key = Registry.LocalMachine.OpenSubKey(UninstallKeyPath);
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            LegacyAppName);
+    }
+
+    private static string? GetExistingVersion(string keyPath)
+    {
+        using var key = Registry.LocalMachine.OpenSubKey(keyPath);
         return key?.GetValue("DisplayVersion") as string;
     }
 
@@ -141,6 +154,11 @@ internal static class Program
 
     private static void StopAppProcessesFromInstallDir(string installDir)
     {
+        if (!Directory.Exists(installDir))
+        {
+            return;
+        }
+
         var installPrefix = Path.GetFullPath(installDir).TrimEnd('\\') + "\\";
         foreach (var processName in AppProcessNames)
         {
@@ -168,6 +186,51 @@ internal static class Program
         }
     }
 
+    private static void CleanupLegacyInstall(string legacyInstallDir)
+    {
+        var expected = Path.GetFullPath(LegacyInstallDir()).TrimEnd('\\');
+        var actual = Path.GetFullPath(legacyInstallDir).TrimEnd('\\');
+        if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        TryDeleteFile(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
+            "Programs",
+            "Aurum VPN.lnk"));
+        TryDeleteFile(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
+            "Aurum VPN.lnk"));
+        try
+        {
+            Registry.LocalMachine.DeleteSubKeyTree(LegacyUninstallKeyPath, throwOnMissingSubKey: false);
+            if (Directory.Exists(legacyInstallDir))
+            {
+                Directory.Delete(legacyInstallDir, recursive: true);
+            }
+        }
+        catch
+        {
+            // Leaving the old folder behind should not block the new install.
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup for old shortcuts.
+        }
+    }
+
     private static void EnsureVisualRuntimePayload(string installDir)
     {
         var missing = VisualRuntimeDlls
@@ -181,7 +244,7 @@ internal static class Program
         throw new InvalidOperationException(
             "В установочном пакете отсутствуют DLL Microsoft Visual C++ Runtime: " +
             string.Join(", ", missing) +
-            "\n\nПереустанови свежий AurumVPN_Setup.exe или установи Microsoft Visual C++ Redistributable 2015-2022 x64: https://aka.ms/vs/17/release/vc_redist.x64.exe");
+            "\n\nПереустанови свежий YurichConnect_Setup.exe или установи Microsoft Visual C++ Redistributable 2015-2022 x64: https://aka.ms/vs/17/release/vc_redist.x64.exe");
     }
 
     private static void LaunchApp(string exePath)
@@ -199,7 +262,7 @@ internal static class Program
         var assembly = Assembly.GetExecutingAssembly();
         var resource = assembly
             .GetManifestResourceNames()
-            .FirstOrDefault(name => name.EndsWith("AurumVPN_payload.zip", StringComparison.Ordinal));
+            .FirstOrDefault(name => name.EndsWith("YurichConnect_payload.zip", StringComparison.Ordinal));
 
         if (resource is null)
         {
@@ -238,7 +301,7 @@ internal static class Program
             return;
         }
 
-        var uninstallScript = Path.Combine(installDir, "uninstall_aurum_vpn.ps1");
+        var uninstallScript = Path.Combine(installDir, "uninstall_yurich_connect.ps1");
         var uninstallCommand =
             $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{uninstallScript}\"";
         key.SetValue("DisplayName", AppName);
@@ -257,24 +320,11 @@ internal static class Program
     {
         try
         {
-            using var query = Process.Start(new ProcessStartInfo
-            {
-                FileName = "schtasks.exe",
-                Arguments = $"/Query /TN \"{StartupTaskName}\" /XML",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            });
-            if (query is null)
-            {
-                return;
-            }
-
-            var xml = query.StandardOutput.ReadToEnd();
-            query.WaitForExit(5000);
-            if (query.ExitCode != 0 ||
-                !xml.Contains("<RunLevel>HighestAvailable</RunLevel>", StringComparison.OrdinalIgnoreCase))
+            var currentXml = QueryTaskXml(StartupTaskName);
+            var legacyXml = QueryTaskXml(LegacyStartupTaskName);
+            var shouldRepair =
+                IsElevatedTask(currentXml) || IsElevatedTask(legacyXml);
+            if (!shouldRepair)
             {
                 return;
             }
@@ -306,11 +356,52 @@ internal static class Program
                 CreateNoWindow = true,
             });
             repair?.WaitForExit(10000);
+            DeleteTask(LegacyStartupTaskName);
         }
         catch
         {
             // Startup repair is best-effort. Install should still complete.
         }
+    }
+
+    private static string? QueryTaskXml(string taskName)
+    {
+        using var query = Process.Start(new ProcessStartInfo
+        {
+            FileName = "schtasks.exe",
+            Arguments = $"/Query /TN \"{taskName}\" /XML",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        });
+        if (query is null)
+        {
+            return null;
+        }
+
+        var xml = query.StandardOutput.ReadToEnd();
+        query.WaitForExit(5000);
+        return query.ExitCode == 0 ? xml : null;
+    }
+
+    private static bool IsElevatedTask(string? xml)
+    {
+        return xml?.Contains("<RunLevel>HighestAvailable</RunLevel>", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static void DeleteTask(string taskName)
+    {
+        using var delete = Process.Start(new ProcessStartInfo
+        {
+            FileName = "schtasks.exe",
+            Arguments = $"/Delete /TN \"{taskName}\" /F",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        });
+        delete?.WaitForExit(5000);
     }
 
     private static string PowerShellQuote(string value)

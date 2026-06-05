@@ -36,7 +36,7 @@ class ProfileImporter {
 
   Future<String> _fetchSubscription(Uri uri) async {
     final clients = [
-      'AurumVPN-Windows/1.0.16 sing-box/1.13.11',
+      'YurichConnect-Windows/1.0.17 YurichCore/sing-box/1.13.11',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',
@@ -77,7 +77,7 @@ class ProfileImporter {
     }
 
     throw ProfileImportException(
-      'Не смог получить raw-подписку. Проверь, что в Remnawave включён Base64/Xray-json/Sing-box template. Деталь: $lastError',
+      'Не смог получить Yurich ID. Проверь, что в Yurich Panel включён Base64/Xray-json/Sing-box template. Деталь: $lastError',
     );
   }
 
@@ -175,7 +175,7 @@ class ProfileImporter {
 
     if (_looksLikeHtml(text)) {
       throw const ProfileImportException(
-        'Это HTML-страница подписки. Нужна raw-подписка или включённые raw keys в Remnawave.',
+        'Это HTML-страница Yurich ID. Нужна raw-подписка или включённые raw keys в Yurich Panel.',
       );
     }
 

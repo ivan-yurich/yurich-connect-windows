@@ -154,7 +154,7 @@ class SingBoxConfigBuilder {
         'endpoint_independent_nat': false,
     };
     if (target == SingBoxConfigTarget.windows) {
-      inbound['interface_name'] = 'AurumVPN';
+      inbound['interface_name'] = 'YurichConnect';
     }
     if (target == SingBoxConfigTarget.android) {
       inbound['interface_name'] = 'tun0';
