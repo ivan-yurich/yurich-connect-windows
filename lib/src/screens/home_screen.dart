@@ -19,18 +19,18 @@ import '../services/vpn_engine.dart';
 import '../services/windows_integration_service.dart';
 import 'qr_scan_screen.dart';
 
-const _gold = Color(0xFFD9A441);
-const _goldSoft = Color(0xFFFFE6A3);
-const _ink = Color(0xFF0E0B07);
-const _surface = Color(0xFF18130B);
-const _surfaceMetric = Color(0xFF2D2110);
-const _mutedGold = Color(0xFFB9AA86);
+const _gold = Color(0xFF15B8FF);
+const _goldSoft = Color(0xFFEAF7FF);
+const _ink = Color(0xFF07101C);
+const _surface = Color(0xFF0D1A2B);
+const _surfaceMetric = Color(0xFF112B45);
+const _mutedGold = Color(0xFF8BAEC7);
 const _appName = YurichBranding.appName;
 const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.18';
+const _appVersion = '1.0.19';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -2303,7 +2303,7 @@ class _WindowsToolsPanel extends StatelessWidget {
                 strings.updateMessage(updateInfo!),
                 style: TextStyle(
                   color: updateInfo!.available
-                      ? const Color(0xFFFFD1A8)
+                      ? const Color(0xFF7DEBFF)
                       : _mutedGold,
                 ),
               ),
