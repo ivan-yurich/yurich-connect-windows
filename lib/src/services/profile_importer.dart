@@ -36,7 +36,7 @@ class ProfileImporter {
 
   Future<String> _fetchSubscription(Uri uri) async {
     final clients = [
-      'YurichConnect-Windows/1.0.17 YurichCore/sing-box/1.13.11',
+      'YurichConnect-Windows/1.0.18 YurichCore/sing-box/1.13.12',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',

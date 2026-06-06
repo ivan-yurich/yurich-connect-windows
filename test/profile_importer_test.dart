@@ -123,7 +123,7 @@ void main() {
       isTrue,
     );
     final rejectRule = routeRules.firstWhere(
-      (rule) => rule['action'] == 'reject',
+      (rule) => rule['action'] == 'reject' && rule['rules'] is List,
     );
     expect(
       (rejectRule['rules'] as List).whereType<Map>().any(
@@ -217,7 +217,7 @@ void main() {
             .whereType<Map<String, dynamic>>()
             .toList();
     final rejectRule = routeRules.firstWhere(
-      (rule) => rule['action'] == 'reject',
+      (rule) => rule['action'] == 'reject' && rule['rules'] is List,
     );
 
     expect(profiles, hasLength(1));
@@ -233,6 +233,12 @@ void main() {
     });
     expect(proxy['obfs'], {'type': 'salamander', 'password': 'mask'});
     expect(proxy['tls'], {'enabled': true, 'server_name': 'cdn.example.com'});
+    expect(
+      routeRules.any(
+        (rule) => rule['ip_version'] == 6 && rule['action'] == 'reject',
+      ),
+      isTrue,
+    );
     expect(
       (rejectRule['rules'] as List).whereType<Map>().any(
         (nested) => nested['network'] == 'udp' && nested['port'] == 443,
@@ -265,7 +271,7 @@ void main() {
             .whereType<Map<String, dynamic>>()
             .toList();
     final rejectRule = routeRules.firstWhere(
-      (rule) => rule['action'] == 'reject',
+      (rule) => rule['action'] == 'reject' && rule['rules'] is List,
     );
     expect(
       (rejectRule['rules'] as List).whereType<Map>().any(
@@ -318,7 +324,7 @@ void main() {
       isTrue,
     );
     final rejectRule = routeRules.firstWhere(
-      (rule) => rule['action'] == 'reject',
+      (rule) => rule['action'] == 'reject' && rule['rules'] is List,
     );
     expect(
       (rejectRule['rules'] as List).whereType<Map>().any(
@@ -510,6 +516,21 @@ void main() {
             (rule['domain_suffix'] as List).contains('.ru') &&
             (rule['domain_suffix'] as List).contains('.рф') &&
             (rule['domain_suffix'] as List).contains('timeweb.cloud'),
+      ),
+      isTrue,
+    );
+    expect(
+      routeRules.any(
+        (rule) => rule['ip_version'] == 6 && rule['action'] == 'reject',
+      ),
+      isTrue,
+    );
+    final rejectRule = routeRules.firstWhere(
+      (rule) => rule['action'] == 'reject' && rule['rules'] is List,
+    );
+    expect(
+      (rejectRule['rules'] as List).whereType<Map>().any(
+        (nested) => nested['network'] == 'udp' && nested['port'] == 443,
       ),
       isTrue,
     );

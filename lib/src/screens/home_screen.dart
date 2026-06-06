@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.17';
+const _appVersion = '1.0.18';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -771,6 +771,22 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final outboundType = (profile.outbound?['type'] as String?)?.toLowerCase();
+    if (_vpnEngine.configTarget == SingBoxConfigTarget.windows) {
+      if (outboundType == 'http') {
+        return const [
+          _ConnectionConfigPlan(NaiveOutboundMode.externalCore, 'naive-core'),
+          _ConnectionConfigPlan(NaiveOutboundMode.httpConnect, 'https-connect'),
+          _ConnectionConfigPlan(NaiveOutboundMode.native, 'native-naive'),
+        ];
+      }
+
+      return const [
+        _ConnectionConfigPlan(NaiveOutboundMode.externalCore, 'naive-core'),
+        _ConnectionConfigPlan(NaiveOutboundMode.native, 'native-naive'),
+        _ConnectionConfigPlan(NaiveOutboundMode.httpConnect, 'https-connect'),
+      ];
+    }
+
     if (outboundType == 'http') {
       return const [
         _ConnectionConfigPlan(NaiveOutboundMode.httpConnect, 'https-connect'),
@@ -1629,77 +1645,92 @@ class _HomeScreenState extends State<HomeScreen>
         ),
       ),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        child: Column(
           children: [
-            _StatusPanel(
-              strings: s,
-              status: _status,
-              message: _message,
-              uplink: _uplink,
-              downlink: _downlink,
-              sessionTotal: _sessionTotal,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+              child: _buildConnectButton(context, selected),
             ),
-            const SizedBox(height: 16),
-            _ProfilePanel(
-              strings: s,
-              profiles: _profiles,
-              selectedId: selected?.id,
-              serverLatencies: _serverLatencies,
-              checkingServerLatency: _checkingServerLatency,
-              onSelect: _selectProfile,
-              onAdd: _showImportSheet,
-              onCopy: selected == null ? null : _copySelected,
-              onQr: selected == null ? null : _showQr,
-              onDelete: selected == null ? null : _deleteSelected,
-              onRefreshLatency: () => unawaited(_refreshServerLatencies()),
-              kindLabel: _profileKindLabel,
-            ),
-            if (Platform.isWindows) ...[
-              const SizedBox(height: 14),
-              _WindowsToolsPanel(
-                strings: s,
-                autoStart: _autoStart,
-                autoConnect: _autoConnect,
-                busy: _windowsSettingsBusy,
-                checkingUpdate: _checkingUpdate,
-                installingUpdate: _installingUpdate,
-                excludedProcessCount: _splitTunnelExcludedProcesses.length,
-                updateInfo: _updateInfo,
-                onAutoStartChanged: (value) => unawaited(_setAutoStart(value)),
-                onAutoConnectChanged: (value) =>
-                    unawaited(_setAutoConnect(value)),
-                onEditSplitTunnel: _showSplitTunnelSheet,
-                onCheckUpdate: _checkForUpdates,
-                onOpenReleases: () =>
-                    _openUrl(WindowsIntegrationService.releasesUrl),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+                children: [
+                  _StatusPanel(
+                    strings: s,
+                    status: _status,
+                    message: _message,
+                    uplink: _uplink,
+                    downlink: _downlink,
+                    sessionTotal: _sessionTotal,
+                  ),
+                  const SizedBox(height: 16),
+                  _ProfilePanel(
+                    strings: s,
+                    profiles: _profiles,
+                    selectedId: selected?.id,
+                    serverLatencies: _serverLatencies,
+                    checkingServerLatency: _checkingServerLatency,
+                    onSelect: _selectProfile,
+                    onAdd: _showImportSheet,
+                    onCopy: selected == null ? null : _copySelected,
+                    onQr: selected == null ? null : _showQr,
+                    onDelete: selected == null ? null : _deleteSelected,
+                    onRefreshLatency: () =>
+                        unawaited(_refreshServerLatencies()),
+                    kindLabel: _profileKindLabel,
+                  ),
+                  if (Platform.isWindows) ...[
+                    const SizedBox(height: 14),
+                    _WindowsToolsPanel(
+                      strings: s,
+                      autoStart: _autoStart,
+                      autoConnect: _autoConnect,
+                      busy: _windowsSettingsBusy,
+                      checkingUpdate: _checkingUpdate,
+                      installingUpdate: _installingUpdate,
+                      excludedProcessCount:
+                          _splitTunnelExcludedProcesses.length,
+                      updateInfo: _updateInfo,
+                      onAutoStartChanged: (value) =>
+                          unawaited(_setAutoStart(value)),
+                      onAutoConnectChanged: (value) =>
+                          unawaited(_setAutoConnect(value)),
+                      onEditSplitTunnel: _showSplitTunnelSheet,
+                      onCheckUpdate: _checkForUpdates,
+                      onOpenReleases: () =>
+                          _openUrl(WindowsIntegrationService.releasesUrl),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  _SupportPanel(
+                    strings: s,
+                    onSupport: () => _openUrl(_telegramUrl),
+                    onTelegram: () => _openUrl(_telegramUrl),
+                    onVk: () => _openUrl(_vkUrl),
+                    onDonate: () => _openUrl(_donateUrl),
+                    onDeveloper: _emailDeveloper,
+                  ),
+                  const SizedBox(height: 16),
+                  _FaqPanel(strings: s),
+                  const SizedBox(height: 16),
+                  _LogsPanel(strings: s, logs: _logs),
+                ],
               ),
-            ],
-            const SizedBox(height: 18),
-            FilledButton.icon(
-              onPressed: _busy || selected == null ? null : _toggleVpn,
-              icon: Icon(_connected ? Icons.power_settings_new : Icons.shield),
-              label: Text(_connected ? s.disconnect : s.connect),
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(54),
-                textStyle: Theme.of(context).textTheme.titleMedium,
-              ),
             ),
-            const SizedBox(height: 16),
-            _SupportPanel(
-              strings: s,
-              onSupport: () => _openUrl(_telegramUrl),
-              onTelegram: () => _openUrl(_telegramUrl),
-              onVk: () => _openUrl(_vkUrl),
-              onDonate: () => _openUrl(_donateUrl),
-              onDeveloper: _emailDeveloper,
-            ),
-            const SizedBox(height: 16),
-            _FaqPanel(strings: s),
-            const SizedBox(height: 16),
-            _LogsPanel(strings: s, logs: _logs),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildConnectButton(BuildContext context, VpnProfile? selected) {
+    return FilledButton.icon(
+      onPressed: _busy || selected == null ? null : _toggleVpn,
+      icon: Icon(_connected ? Icons.power_settings_new : Icons.shield),
+      label: Text(_connected ? s.disconnect : s.connect),
+      style: FilledButton.styleFrom(
+        minimumSize: const Size.fromHeight(54),
+        textStyle: Theme.of(context).textTheme.titleMedium,
       ),
     );
   }

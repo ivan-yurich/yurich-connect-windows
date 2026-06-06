@@ -63,7 +63,11 @@ class SingBoxConfigBuilder {
     final usesNaiveProxyCore =
         target == SingBoxConfigTarget.windows &&
         proxyOutbound['type'] == 'socks';
-    final rejectQuicUdp = profile.kind == VpnProfileKind.naive;
+    final rejectQuicUdp =
+        profile.kind == VpnProfileKind.naive ||
+        (target == SingBoxConfigTarget.windows &&
+            (profile.kind == VpnProfileKind.vlessReality ||
+                profile.kind == VpnProfileKind.vlessTls));
     final rejectAllUdp =
         profile.kind == VpnProfileKind.naive && proxyOutbound['type'] == 'http';
     final excludedProcesses = _normalizeProcessNames(
@@ -99,6 +103,7 @@ class SingBoxConfigBuilder {
               'outbound': 'direct',
             },
           if (target == SingBoxConfigTarget.windows) ...[
+            {'ip_version': 6, 'action': 'reject'},
             {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
             {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
           ],
