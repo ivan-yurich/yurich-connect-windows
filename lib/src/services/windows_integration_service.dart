@@ -27,7 +27,7 @@ class WindowsUpdateInfo {
 
 class WindowsIntegrationService {
   static const githubOwner = 'ivan-yurich';
-  static const githubRepo = 'aurum-vpn-windows';
+  static const githubRepo = 'yurich-connect-windows';
   static const releasesUrl =
       'https://github.com/$githubOwner/$githubRepo/releases';
   static final latestReleaseApi = Uri.https(
