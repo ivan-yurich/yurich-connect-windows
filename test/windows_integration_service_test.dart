@@ -159,7 +159,7 @@ void main() {
       expect(
         WindowsIntegrationService.compareReleaseVersions(
           'v1.0.19-windows',
-          '1.0.21',
+          '1.0.22',
         ),
         isNegative,
       );
