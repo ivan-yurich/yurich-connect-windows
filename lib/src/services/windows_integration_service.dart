@@ -6,21 +6,25 @@ import '../branding.dart';
 class WindowsUpdateInfo {
   const WindowsUpdateInfo({
     required this.message,
+    this.currentVersion,
     this.latestVersion,
     this.releaseUrl,
     this.installerUrl,
     this.installerName,
     this.installerSize,
     this.available = false,
+    this.latestIsOlder = false,
   });
 
   final String message;
+  final String? currentVersion;
   final String? latestVersion;
   final Uri? releaseUrl;
   final Uri? installerUrl;
   final String? installerName;
   final int? installerSize;
   final bool available;
+  final bool latestIsOlder;
 
   bool get canInstall => available && installerUrl != null;
 }
@@ -142,9 +146,13 @@ class WindowsIntegrationService {
         return const WindowsUpdateInfo(message: 'Latest release has no tag.');
       }
 
-      final available = compareReleaseVersions(tag, currentVersion) > 0;
+      final versionComparison = compareReleaseVersions(tag, currentVersion);
+      final available = versionComparison > 0;
+      final latestIsOlder = versionComparison < 0;
       return WindowsUpdateInfo(
         available: available,
+        latestIsOlder: latestIsOlder,
+        currentVersion: currentVersion,
         latestVersion: tag,
         releaseUrl: htmlUrl == null || htmlUrl.isEmpty
             ? null
@@ -154,6 +162,8 @@ class WindowsIntegrationService {
         installerSize: installerAsset?.size,
         message: available
             ? 'Update available: $tag'
+            : latestIsOlder
+            ? 'Installed build $currentVersion is newer than GitHub latest $tag.'
             : 'You are up to date: $tag',
       );
     } on Object catch (e) {

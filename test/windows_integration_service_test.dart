@@ -154,5 +154,15 @@ void main() {
         isPositive,
       );
     });
+
+    test('treats older Windows release tags as not updateable', () {
+      expect(
+        WindowsIntegrationService.compareReleaseVersions(
+          'v1.0.19-windows',
+          '1.0.21',
+        ),
+        isNegative,
+      );
+    });
   });
 }

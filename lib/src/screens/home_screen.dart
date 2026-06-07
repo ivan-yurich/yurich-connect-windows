@@ -2840,9 +2840,19 @@ class _Strings {
   String updateMessage(WindowsUpdateInfo info) => switch (this) {
     _Strings.en when info.available && info.latestVersion != null =>
       'Update available: ${info.latestVersion}',
+    _Strings.en
+        when info.latestIsOlder &&
+            info.latestVersion != null &&
+            info.currentVersion != null =>
+      'GitHub latest is ${info.latestVersion}, installed build is ${info.currentVersion}. Publish a newer Windows release.',
     _Strings.en => info.message,
     _ when info.available && info.latestVersion != null =>
       'Доступно обновление: ${info.latestVersion}',
+    _
+        when info.latestIsOlder &&
+            info.latestVersion != null &&
+            info.currentVersion != null =>
+      'На GitHub пока ${info.latestVersion}, установлена ${info.currentVersion}. Опубликуй более новый Windows-релиз.',
     _ when info.message.contains('not published') =>
       'Релизы GitHub пока не опубликованы.',
     _ when info.message.contains('up to date') =>
