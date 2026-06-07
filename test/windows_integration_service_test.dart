@@ -4,7 +4,7 @@ import 'package:yurich_connect_windows/src/services/windows_integration_service.
 void main() {
   group('WindowsIntegrationService auto-start task XML', () {
     test('accepts elevated delayed task that can run on battery', () {
-      const xml = '''
+      const xml = r'''
 <Task>
   <Principals>
     <Principal>
@@ -13,9 +13,15 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT5S</Delay>
+      <Delay>PT1S</Delay>
     </LogonTrigger>
   </Triggers>
+  <Actions>
+    <Exec>
+      <Command>C:\Program Files\Yurich Connect\YurichConnect.exe</Command>
+      <WorkingDirectory>C:\Program Files\Yurich Connect</WorkingDirectory>
+    </Exec>
+  </Actions>
   <Settings>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
@@ -27,7 +33,7 @@ void main() {
     });
 
     test('rejects old elevated task without startup delay', () {
-      const xml = '''
+      const xml = r'''
 <Task>
   <Principals>
     <Principal>
@@ -48,7 +54,7 @@ void main() {
       );
     });
 
-    test('rejects tasks that stop on battery power', () {
+    test('rejects elevated task without working directory', () {
       const xml = '''
 <Task>
   <Principals>
@@ -58,9 +64,42 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT5S</Delay>
+      <Delay>PT1S</Delay>
     </LogonTrigger>
   </Triggers>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+</Task>
+''';
+
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
+      expect(
+        WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
+        isTrue,
+      );
+    });
+
+    test('rejects tasks that stop on battery power', () {
+      const xml = r'''
+<Task>
+  <Principals>
+    <Principal>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <LogonTrigger>
+      <Delay>PT1S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Actions>
+    <Exec>
+      <Command>C:\Program Files\Yurich Connect\YurichConnect.exe</Command>
+      <WorkingDirectory>C:\Program Files\Yurich Connect</WorkingDirectory>
+    </Exec>
+  </Actions>
   <Settings>
     <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>

@@ -30,7 +30,9 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.20';
+const _appVersion = '1.0.21';
+const _collapsedProfileLimit = 4;
+const _maxConcurrentPingChecks = 6;
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -99,6 +101,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoStart = false;
   bool _autoConnect = false;
   bool _autoConnectAttempted = false;
+  bool _showAllProfiles = false;
   bool _healthWatchdogRestarting = false;
   int _healthWatchdogFailures = 0;
   bool _quitFromTray = false;
@@ -319,9 +322,10 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _autoConnectWithRetry(String profileId) async {
     const delays = [
-      Duration(seconds: 5),
-      Duration(seconds: 15),
-      Duration(seconds: 35),
+      Duration(seconds: 2),
+      Duration(seconds: 8),
+      Duration(seconds: 20),
+      Duration(seconds: 40),
     ];
 
     for (var attempt = 0; attempt < delays.length; attempt += 1) {
@@ -581,14 +585,7 @@ class _HomeScreenState extends State<HomeScreen>
       setState(() => _checkingServerLatency = true);
     }
     final profiles = List<VpnProfile>.of(_profiles);
-    final results = Map<String, _ServerLatencyResult>.fromEntries(
-      await Future.wait(
-        profiles.map((profile) async {
-          final latency = await _measureServerLatency(profile);
-          return MapEntry(profile.id, latency);
-        }),
-      ),
-    );
+    final results = await _measureServerLatencies(profiles);
     if (!mounted) {
       return;
     }
@@ -596,6 +593,31 @@ class _HomeScreenState extends State<HomeScreen>
       _serverLatencies = results;
       _checkingServerLatency = false;
     });
+  }
+
+  Future<Map<String, _ServerLatencyResult>> _measureServerLatencies(
+    List<VpnProfile> profiles,
+  ) async {
+    final results = <String, _ServerLatencyResult>{};
+    var nextIndex = 0;
+    final workerCount = profiles.length < _maxConcurrentPingChecks
+        ? profiles.length
+        : _maxConcurrentPingChecks;
+
+    Future<void> worker() async {
+      while (true) {
+        final index = nextIndex;
+        nextIndex += 1;
+        if (index >= profiles.length) {
+          return;
+        }
+        final profile = profiles[index];
+        results[profile.id] = await _measureServerLatency(profile);
+      }
+    }
+
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+    return results;
   }
 
   Future<_ServerLatencyResult> _measureServerLatency(VpnProfile profile) async {
@@ -1323,25 +1345,27 @@ class _HomeScreenState extends State<HomeScreen>
     };
   }
 
-  Future<void> _deleteSelected() async {
-    final selected = _selectedProfile;
-    if (selected == null) {
-      return;
-    }
-
+  Future<void> _deleteProfile(VpnProfile profile) async {
     final next = _profiles
-        .where((profile) => profile.id != selected.id)
+        .where((savedProfile) => savedProfile.id != profile.id)
         .toList();
+    final deletingSelected = _selectedProfileId == profile.id;
+    final nextSelectedId = deletingSelected
+        ? (next.isEmpty ? null : next.first.id)
+        : _selectedProfileId;
     await _store.saveProfiles(next);
-    await _store.saveSelectedProfileId(next.isEmpty ? null : next.first.id);
+    await _store.saveSelectedProfileId(nextSelectedId);
     if (!mounted) {
       return;
     }
     setState(() {
       _profiles = next;
-      _selectedProfileId = next.isEmpty ? null : next.first.id;
+      _selectedProfileId = nextSelectedId;
+      _serverLatencies = Map<String, _ServerLatencyResult>.of(_serverLatencies)
+        ..remove(profile.id);
       _message = s.profileDeleted;
     });
+    unawaited(_refreshTrayMenu());
   }
 
   Future<void> _copySelected() async {
@@ -1744,11 +1768,15 @@ class _HomeScreenState extends State<HomeScreen>
                     selectedId: selected?.id,
                     serverLatencies: _serverLatencies,
                     checkingServerLatency: _checkingServerLatency,
+                    showAllProfiles: _showAllProfiles,
                     onSelect: _selectProfile,
                     onAdd: _showImportSheet,
                     onCopy: selected == null ? null : _copySelected,
                     onQr: selected == null ? null : _showQr,
-                    onDelete: selected == null ? null : _deleteSelected,
+                    onDeleteProfile: (profile) =>
+                        unawaited(_deleteProfile(profile)),
+                    onToggleShowAllProfiles: () =>
+                        setState(() => _showAllProfiles = !_showAllProfiles),
                     onRefreshLatency: () =>
                         unawaited(_refreshServerLatencies()),
                     kindLabel: _profileKindLabel,
@@ -1918,11 +1946,13 @@ class _ProfilePanel extends StatelessWidget {
     required this.selectedId,
     required this.serverLatencies,
     required this.checkingServerLatency,
+    required this.showAllProfiles,
     required this.onSelect,
     required this.onAdd,
     required this.onCopy,
     required this.onQr,
-    required this.onDelete,
+    required this.onDeleteProfile,
+    required this.onToggleShowAllProfiles,
     required this.onRefreshLatency,
     required this.kindLabel,
   });
@@ -1932,16 +1962,20 @@ class _ProfilePanel extends StatelessWidget {
   final String? selectedId;
   final Map<String, _ServerLatencyResult> serverLatencies;
   final bool checkingServerLatency;
+  final bool showAllProfiles;
   final ValueChanged<VpnProfile> onSelect;
   final VoidCallback onAdd;
   final VoidCallback? onCopy;
   final VoidCallback? onQr;
-  final VoidCallback? onDelete;
+  final ValueChanged<VpnProfile> onDeleteProfile;
+  final VoidCallback onToggleShowAllProfiles;
   final VoidCallback onRefreshLatency;
   final String Function(VpnProfileKind kind) kindLabel;
 
   @override
   Widget build(BuildContext context) {
+    final visibleProfiles = _visibleProfiles();
+    final hiddenCount = profiles.length - visibleProfiles.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1969,9 +2003,16 @@ class _ProfilePanel extends StatelessWidget {
               icon: const Icon(Icons.copy),
             ),
             IconButton(
-              tooltip: strings.delete,
-              onPressed: onDelete,
-              icon: const Icon(Icons.delete_outline),
+              tooltip: strings.pingRefresh,
+              onPressed: checkingServerLatency || profiles.isEmpty
+                  ? null
+                  : onRefreshLatency,
+              icon: checkingServerLatency
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh),
             ),
           ],
         ),
@@ -1979,29 +2020,60 @@ class _ProfilePanel extends StatelessWidget {
         if (profiles.isEmpty)
           _EmptyProfiles(strings: strings)
         else
-          ...profiles.map(
+          ...visibleProfiles.map(
             (profile) => Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: _ProfileTile(
                 profile: profile,
                 selected: profile.id == selectedId,
+                latency: serverLatencies[profile.id],
+                checkingLatency: checkingServerLatency,
                 onTap: () => onSelect(profile),
+                onDelete: () => onDeleteProfile(profile),
+                strings: strings,
                 kindLabel: kindLabel,
               ),
             ),
           ),
-        const SizedBox(height: 6),
-        _ServerPingPanel(
-          strings: strings,
-          profiles: profiles,
-          selectedId: selectedId,
-          latencies: serverLatencies,
-          checking: checkingServerLatency,
-          onRefresh: onRefreshLatency,
-          kindLabel: kindLabel,
-        ),
+        if (hiddenCount > 0 ||
+            (showAllProfiles && profiles.length > _collapsedProfileLimit))
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: OutlinedButton.icon(
+              onPressed: onToggleShowAllProfiles,
+              icon: Icon(
+                showAllProfiles ? Icons.expand_less : Icons.expand_more,
+              ),
+              label: Text(
+                showAllProfiles
+                    ? strings.collapseProfiles
+                    : strings.showAllProfiles(hiddenCount),
+              ),
+            ),
+          ),
       ],
     );
+  }
+
+  List<VpnProfile> _visibleProfiles() {
+    if (showAllProfiles || profiles.length <= _collapsedProfileLimit) {
+      return profiles;
+    }
+
+    final selected = <VpnProfile>[];
+    final others = <VpnProfile>[];
+    for (final profile in profiles) {
+      if (profile.id == selectedId) {
+        selected.add(profile);
+      } else {
+        others.add(profile);
+      }
+    }
+
+    return [
+      ...selected,
+      ...others.take(_collapsedProfileLimit - selected.length),
+    ];
   }
 }
 
@@ -2009,17 +2081,34 @@ class _ProfileTile extends StatelessWidget {
   const _ProfileTile({
     required this.profile,
     required this.selected,
+    required this.latency,
+    required this.checkingLatency,
     required this.onTap,
+    required this.onDelete,
+    required this.strings,
     required this.kindLabel,
   });
 
   final VpnProfile profile;
   final bool selected;
+  final _ServerLatencyResult? latency;
+  final bool checkingLatency;
   final VoidCallback onTap;
+  final VoidCallback onDelete;
+  final _Strings strings;
   final String Function(VpnProfileKind kind) kindLabel;
 
   @override
   Widget build(BuildContext context) {
+    final pingLabel = latency == null
+        ? (checkingLatency ? strings.pingChecking : strings.pingNotChecked)
+        : latency!.label(strings);
+    final pingColor = latency == null
+        ? _mutedGold
+        : latency!.ok
+        ? _goldSoft
+        : Colors.redAccent.shade100;
+
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
@@ -2057,6 +2146,55 @@ class _ProfileTile extends StatelessWidget {
                 ],
               ),
             ),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minWidth: 70),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: _surfaceMetric.withValues(alpha: 0.82),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: selected
+                            ? _gold.withValues(alpha: 0.55)
+                            : Colors.white10,
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 5,
+                      ),
+                      child: Text(
+                        pingLabel,
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: pingColor,
+                          fontSize: 12,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                SizedBox.square(
+                  dimension: 32,
+                  child: IconButton(
+                    tooltip: strings.delete,
+                    padding: EdgeInsets.zero,
+                    onPressed: onDelete,
+                    iconSize: 18,
+                    icon: const Icon(Icons.delete_outline),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -2080,160 +2218,6 @@ class _EmptyProfiles extends StatelessWidget {
         border: Border.all(color: Colors.white12),
       ),
       child: Text(strings.emptyProfiles),
-    );
-  }
-}
-
-class _ServerPingPanel extends StatelessWidget {
-  const _ServerPingPanel({
-    required this.strings,
-    required this.profiles,
-    required this.selectedId,
-    required this.latencies,
-    required this.checking,
-    required this.onRefresh,
-    required this.kindLabel,
-  });
-
-  final _Strings strings;
-  final List<VpnProfile> profiles;
-  final String? selectedId;
-  final Map<String, _ServerLatencyResult> latencies;
-  final bool checking;
-  final VoidCallback onRefresh;
-  final String Function(VpnProfileKind kind) kindLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: _surfaceMetric.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: _gold.withValues(alpha: 0.18)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.network_ping_outlined, color: _goldSoft),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    strings.profileInsight,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                IconButton(
-                  tooltip: strings.pingRefresh,
-                  onPressed: checking || profiles.isEmpty ? null : onRefresh,
-                  icon: checking
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh),
-                ),
-              ],
-            ),
-            if (profiles.isEmpty)
-              Text(
-                strings.profileInsightEmpty,
-                style: const TextStyle(color: _mutedGold),
-              )
-            else
-              Column(
-                children: profiles
-                    .map(
-                      (profile) => _ServerPingRow(
-                        profile: profile,
-                        selected: profile.id == selectedId,
-                        latency: latencies[profile.id],
-                        checking: checking,
-                        strings: strings,
-                        kindLabel: kindLabel,
-                      ),
-                    )
-                    .toList(),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ServerPingRow extends StatelessWidget {
-  const _ServerPingRow({
-    required this.profile,
-    required this.selected,
-    required this.latency,
-    required this.checking,
-    required this.strings,
-    required this.kindLabel,
-  });
-
-  final VpnProfile profile;
-  final bool selected;
-  final _ServerLatencyResult? latency;
-  final bool checking;
-  final _Strings strings;
-  final String Function(VpnProfileKind kind) kindLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final status = latency == null
-        ? (checking ? strings.pingChecking : strings.pingNotChecked)
-        : latency!.label(strings);
-    final statusColor = latency == null
-        ? _mutedGold
-        : latency!.ok
-        ? _goldSoft
-        : Colors.redAccent.shade100;
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Row(
-        children: [
-          Icon(
-            selected ? Icons.radio_button_checked : Icons.radio_button_off,
-            color: selected ? _goldSoft : _mutedGold,
-            size: 18,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  profile.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelLarge,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${kindLabel(profile.kind)} · ${profile.endpoint}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: _mutedGold, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          Text(
-            status,
-            style: TextStyle(
-              color: statusColor,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -2587,8 +2571,6 @@ class _Strings {
     required this.copy,
     required this.delete,
     required this.emptyProfiles,
-    required this.profileInsight,
-    required this.profileInsightEmpty,
     required this.pingRefresh,
     required this.pingChecking,
     required this.pingNotChecked,
@@ -2681,8 +2663,6 @@ class _Strings {
   final String copy;
   final String delete;
   final String emptyProfiles;
-  final String profileInsight;
-  final String profileInsightEmpty;
   final String pingRefresh;
   final String pingChecking;
   final String pingNotChecked;
@@ -2813,6 +2793,16 @@ class _Strings {
     _ => 'Исключения: $count',
   };
 
+  String showAllProfiles(int hiddenCount) => switch (this) {
+    _Strings.en => 'Show all profiles (+$hiddenCount)',
+    _ => 'Показать все профили (+$hiddenCount)',
+  };
+
+  String get collapseProfiles => switch (this) {
+    _Strings.en => 'Collapse profiles',
+    _ => 'Свернуть профили',
+  };
+
   String vpnOnlyButton(int count) => switch (this) {
     _Strings.en when count == 0 => 'Always VPN',
     _Strings.en => 'Always VPN: $count',
@@ -2903,8 +2893,6 @@ class _Strings {
     delete: 'Удалить',
     emptyProfiles:
         'Пока нет профилей. Нажми +, вставь подписку или сканируй QR.',
-    profileInsight: 'Пинг серверов',
-    profileInsightEmpty: 'Импортируй подписку, чтобы проверить пинг серверов.',
     pingRefresh: 'Обновить пинг',
     pingChecking: 'Проверяю...',
     pingNotChecked: '—',
@@ -3034,8 +3022,6 @@ class _Strings {
     copy: 'Copy',
     delete: 'Delete',
     emptyProfiles: 'No profiles yet. Tap +, paste a subscription, or scan QR.',
-    profileInsight: 'Server ping',
-    profileInsightEmpty: 'Import a subscription to check server latency.',
     pingRefresh: 'Refresh ping',
     pingChecking: 'Checking...',
     pingNotChecked: '—',

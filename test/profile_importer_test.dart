@@ -579,6 +579,46 @@ void main() {
     expect(profiles, hasLength(2));
   });
 
+  test('imports large mixed base64 subscription under load', () async {
+    final raw = List.generate(60, (index) {
+      final suffix = index.toString().padLeft(2, '0');
+      return switch (index % 3) {
+        0 =>
+          'naive+https://user$suffix:pass$suffix@node$suffix.example.com:443#Naive-$suffix',
+        1 =>
+          'hy2://secret$suffix@hy$suffix.example.com:8443?sni=cdn$suffix.example.com#Hy2-$suffix',
+        _ =>
+          'vless://11111111-1111-4111-8111-${index.toString().padLeft(12, '0')}@reality$suffix.example.com:8444?security=reality&pbk=abc$suffix&sid=$suffix#Reality-$suffix',
+      };
+    }).join('\n');
+    final encoded = base64.encode(utf8.encode(raw));
+
+    final profiles = await ProfileImporter().importFromText(encoded);
+    final ids = profiles.map((profile) => profile.id).toSet();
+
+    expect(profiles, hasLength(60));
+    expect(ids, hasLength(60));
+    expect(
+      profiles.map((profile) => profile.kind),
+      containsAll([
+        VpnProfileKind.naive,
+        VpnProfileKind.hysteria2,
+        VpnProfileKind.vlessReality,
+      ]),
+    );
+    for (final profile in profiles) {
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  target: SingBoxConfigTarget.windows,
+                ),
+              )
+              as Map<String, dynamic>;
+      expect(config['outbounds'], isA<List>());
+    }
+  });
+
   test('imports supported links from HTML subscription page', () async {
     const html = '''
 <!doctype html>

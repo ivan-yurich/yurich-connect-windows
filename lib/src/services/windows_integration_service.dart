@@ -37,7 +37,7 @@ class WindowsIntegrationService {
 
   static const _taskName = YurichBranding.appName;
   static const _legacyTaskName = 'Aurum VPN';
-  static const _startupDelayIso8601 = 'PT5S';
+  static const _startupDelayIso8601 = 'PT1S';
 
   Future<bool> isAutoStartEnabled() async {
     if (!Platform.isWindows) {
@@ -277,10 +277,11 @@ class WindowsIntegrationService {
   static String _createStartupTaskScript(String executable) {
     final taskName = _quotePowerShell(_taskName);
     final exe = _quotePowerShell(executable);
+    final workingDirectory = _quotePowerShell(File(executable).parent.path);
     final delay = _quotePowerShell(_startupDelayIso8601);
     return '''
 \$ErrorActionPreference = 'Stop'
-\$action = New-ScheduledTaskAction -Execute $exe
+\$action = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $workingDirectory
 \$trigger = New-ScheduledTaskTrigger -AtLogOn
 \$trigger.Delay = $delay
 \$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
@@ -300,6 +301,7 @@ Register-ScheduledTask -TaskName $taskName -Action \$action -Trigger \$trigger -
         normalized.contains(
           '<delay>$_startupDelayIso8601</delay>'.toLowerCase(),
         ) &&
+        normalized.contains('<workingdirectory>') &&
         !normalized.contains(
           '<disallowstartifonbatteries>true</disallowstartifonbatteries>',
         ) &&
