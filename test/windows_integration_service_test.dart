@@ -13,7 +13,7 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT30S</Delay>
+      <Delay>PT5S</Delay>
     </LogonTrigger>
   </Triggers>
   <Settings>
@@ -58,7 +58,7 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT30S</Delay>
+      <Delay>PT5S</Delay>
     </LogonTrigger>
   </Triggers>
   <Settings>

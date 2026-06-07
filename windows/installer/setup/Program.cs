@@ -11,7 +11,7 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.19";
+    private const string AppVersion = "1.0.20";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
@@ -333,7 +333,7 @@ internal static class Program
                 $ErrorActionPreference = 'Stop'
                 $action = New-ScheduledTaskAction -Execute {PowerShellQuote(exePath)}
                 $trigger = New-ScheduledTaskTrigger -AtLogOn
-                $trigger.Delay = 'PT30S'
+                $trigger.Delay = 'PT5S'
                 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
                 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
                 Register-ScheduledTask -TaskName {PowerShellQuote(StartupTaskName)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null

@@ -41,6 +41,7 @@ class SingBoxConfigBuilder {
     SingBoxConfigTarget target = SingBoxConfigTarget.android,
     NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
     List<String> splitTunnelExcludedProcesses = const [],
+    List<String> vpnOnlyProcesses = const [],
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -70,9 +71,16 @@ class SingBoxConfigBuilder {
                 profile.kind == VpnProfileKind.vlessTls));
     final rejectAllUdp =
         profile.kind == VpnProfileKind.naive && proxyOutbound['type'] == 'http';
-    final excludedProcesses = _normalizeProcessNames(
-      splitTunnelExcludedProcesses,
-    );
+    final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses);
+    final forcedProxyLookup = forcedProxyProcesses
+        .map((process) => process.toLowerCase())
+        .toSet();
+    final excludedProcesses =
+        _normalizeProcessNames(splitTunnelExcludedProcesses)
+            .where(
+              (process) => !forcedProxyLookup.contains(process.toLowerCase()),
+            )
+            .toList(growable: false);
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
@@ -94,24 +102,29 @@ class SingBoxConfigBuilder {
             ],
             'action': 'hijack-dns',
           },
-          if (target == SingBoxConfigTarget.windows &&
-              excludedProcesses.isNotEmpty)
-            {'process_name': excludedProcesses, 'outbound': 'direct'},
           if (usesNaiveProxyCore)
             {
               'process_name': ['naive.exe'],
               'outbound': 'direct',
             },
           if (target == SingBoxConfigTarget.windows) ...[
-            {'ip_version': 6, 'action': 'reject'},
-            {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
-            {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
+            {'ip_is_private': true, 'outbound': 'direct'},
+            if (excludedProcesses.isNotEmpty)
+              {'process_name': excludedProcesses, 'outbound': 'direct'},
           ],
           _unsupportedUdpRule(
             rejectQuicUdp: rejectQuicUdp,
             rejectAllUdp: rejectAllUdp,
           ),
-          {'ip_is_private': true, 'outbound': 'direct'},
+          if (target != SingBoxConfigTarget.windows)
+            {'ip_is_private': true, 'outbound': 'direct'},
+          if (target == SingBoxConfigTarget.windows) ...[
+            {'ip_version': 6, 'action': 'reject'},
+            if (forcedProxyProcesses.isNotEmpty)
+              {'process_name': forcedProxyProcesses, 'outbound': 'proxy'},
+            {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
+            {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
+          ],
         ],
         if (target == SingBoxConfigTarget.windows)
           'rule_set': [
@@ -126,7 +139,9 @@ class SingBoxConfigBuilder {
         'auto_detect_interface': true,
         'find_process':
             target == SingBoxConfigTarget.windows &&
-            (excludedProcesses.isNotEmpty || usesNaiveProxyCore),
+            (excludedProcesses.isNotEmpty ||
+                forcedProxyProcesses.isNotEmpty ||
+                usesNaiveProxyCore),
         'final': 'proxy',
       },
     };

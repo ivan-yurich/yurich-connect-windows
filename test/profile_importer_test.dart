@@ -433,6 +433,11 @@ void main() {
                   'chrome.exe',
                   'bad/path.exe',
                 ],
+                vpnOnlyProcesses: const [
+                  'Codex.exe',
+                  'codex.exe',
+                  'bad/path.exe',
+                ],
               ),
             )
             as Map<String, dynamic>;
@@ -459,6 +464,17 @@ void main() {
         return rule['outbound'] == 'direct' &&
             processName is List &&
             processName.contains('chrome.exe');
+      }),
+      isTrue,
+    );
+    expect(
+      routeRules.any((rule) {
+        final processName = rule['process_name'];
+        return rule['outbound'] == 'proxy' &&
+            processName is List &&
+            processName.contains('Codex.exe') &&
+            processName.contains('codex.exe') &&
+            !processName.contains('bad/path.exe');
       }),
       isTrue,
     );
@@ -542,6 +558,15 @@ void main() {
       ),
       isTrue,
     );
+    final vpnOnlyIndex = routeRules.indexWhere(
+      (rule) => rule['outbound'] == 'proxy' && rule['process_name'] is List,
+    );
+    final geoIpRuIndex = routeRules.indexWhere(
+      (rule) => rule['rule_set'] == SingBoxConfigBuilder.russianGeoIpRuleSet,
+    );
+    expect(vpnOnlyIndex, greaterThanOrEqualTo(0));
+    expect(geoIpRuIndex, greaterThanOrEqualTo(0));
+    expect(vpnOnlyIndex, lessThan(geoIpRuIndex));
   });
 
   test('imports base64 subscription list', () async {

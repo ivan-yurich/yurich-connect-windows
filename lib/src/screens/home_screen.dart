@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.19';
+const _appVersion = '1.0.20';
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -103,6 +103,7 @@ class _HomeScreenState extends State<HomeScreen>
   int _healthWatchdogFailures = 0;
   bool _quitFromTray = false;
   List<String> _splitTunnelExcludedProcesses = const [];
+  List<String> _vpnOnlyProcesses = ProfileStore.defaultVpnOnlyProcesses;
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
   bool _checkingServerLatency = false;
@@ -272,6 +273,7 @@ class _HomeScreenState extends State<HomeScreen>
     final autoConnect = await _store.loadAutoConnect();
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
+    final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
     if (Platform.isWindows) {
       await _windowsIntegration.repairAutoStartIfNeeded();
     }
@@ -293,6 +295,7 @@ class _HomeScreenState extends State<HomeScreen>
       _autoConnect = autoConnect;
       _autoStart = autoStart;
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
+      _vpnOnlyProcesses = vpnOnlyProcesses;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -306,13 +309,37 @@ class _HomeScreenState extends State<HomeScreen>
         resolvedSelectedId != null &&
         !_autoConnectAttempted) {
       _autoConnectAttempted = true;
-      unawaited(
-        Future<void>.delayed(const Duration(seconds: 12), () async {
-          if (mounted && !_connected && !_busy) {
-            await _connect();
-          }
-        }),
+      _scheduleStartupAutoConnect(resolvedSelectedId);
+    }
+  }
+
+  void _scheduleStartupAutoConnect(String profileId) {
+    unawaited(_autoConnectWithRetry(profileId));
+  }
+
+  Future<void> _autoConnectWithRetry(String profileId) async {
+    const delays = [
+      Duration(seconds: 5),
+      Duration(seconds: 15),
+      Duration(seconds: 35),
+    ];
+
+    for (var attempt = 0; attempt < delays.length; attempt += 1) {
+      await Future<void>.delayed(delays[attempt]);
+      if (!mounted || !_autoConnect || _connected) {
+        return;
+      }
+      if (_selectedProfileId != profileId || _busy) {
+        continue;
+      }
+
+      _queueLog(
+        'Startup auto-connect attempt ${attempt + 1}/${delays.length}.',
       );
+      await _connect();
+      if (!mounted || _connected) {
+        return;
+      }
     }
   }
 
@@ -674,6 +701,7 @@ class _HomeScreenState extends State<HomeScreen>
         target: _vpnEngine.configTarget,
         naiveMode: plan.naiveMode,
         splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
+        vpnOnlyProcesses: _vpnOnlyProcesses,
       );
       final naiveProxyConfig =
           _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
@@ -806,6 +834,10 @@ class _HomeScreenState extends State<HomeScreen>
         uri: Uri.https('cp.cloudflare.com', '/generate_204'),
         allowCertificateMismatch: false,
       ),
+      (
+        uri: Uri.https('connectivitycheck.gstatic.com', '/generate_204'),
+        allowCertificateMismatch: false,
+      ),
     ];
 
     for (final endpoint in endpoints) {
@@ -895,8 +927,13 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (_hasActiveTraffic()) {
-      _queueLog('VPN health watchdog probe failed during active traffic.');
-      _healthWatchdogFailures = 0;
+      if (_healthWatchdogFailures < 2) {
+        _healthWatchdogFailures += 1;
+      }
+      _queueLog(
+        'VPN health watchdog probe failed during active traffic; '
+        'delaying restart $_healthWatchdogFailures/3.',
+      );
       return;
     }
 
@@ -1137,15 +1174,63 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _showSplitTunnelSheet() async {
-    final controller = TextEditingController(
-      text: _splitTunnelExcludedProcesses.join('\n'),
+    final value = await _showProcessListSheet(
+      current: _splitTunnelExcludedProcesses,
+      title: s.splitTunnelTitle,
+      description: s.splitTunnelDescription,
+      hint: s.splitTunnelHint,
+      pickExeTitle: s.splitTunnelPickExeTitle,
     );
+
+    if (value == null) {
+      return;
+    }
+    await _store.saveSplitTunnelExcludedProcesses(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _splitTunnelExcludedProcesses = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+  }
+
+  Future<void> _showVpnOnlySheet() async {
+    final value = await _showProcessListSheet(
+      current: _vpnOnlyProcesses,
+      title: s.vpnOnlyTitle,
+      description: s.vpnOnlyDescription,
+      hint: s.vpnOnlyHint,
+      pickExeTitle: s.vpnOnlyPickExeTitle,
+    );
+
+    if (value == null) {
+      return;
+    }
+    await _store.saveVpnOnlyProcesses(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _vpnOnlyProcesses = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+  }
+
+  Future<List<String>?> _showProcessListSheet({
+    required List<String> current,
+    required String title,
+    required String description,
+    required String hint,
+    required String pickExeTitle,
+  }) async {
+    final controller = TextEditingController(text: current.join('\n'));
     final value = await showDialog<List<String>>(
       context: context,
       builder: (context) {
         Future<void> pickExecutables() async {
           final result = await FilePicker.pickFiles(
-            dialogTitle: s.pickExeTitle,
+            dialogTitle: pickExeTitle,
             type: FileType.custom,
             allowedExtensions: const ['exe'],
             allowMultiple: true,
@@ -1169,20 +1254,20 @@ class _HomeScreenState extends State<HomeScreen>
         }
 
         return AlertDialog(
-          title: Text(s.splitTunnelTitle),
+          title: Text(title),
           content: SizedBox(
             width: 440,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(s.splitTunnelDescription),
+                Text(description),
                 const SizedBox(height: 12),
                 TextField(
                   controller: controller,
                   minLines: 4,
                   maxLines: 8,
-                  decoration: InputDecoration(hintText: s.splitTunnelHint),
+                  decoration: InputDecoration(hintText: hint),
                 ),
                 const SizedBox(height: 10),
                 Align(
@@ -1212,18 +1297,7 @@ class _HomeScreenState extends State<HomeScreen>
       },
     );
     controller.dispose();
-
-    if (value == null) {
-      return;
-    }
-    await _store.saveSplitTunnelExcludedProcesses(value);
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _splitTunnelExcludedProcesses = value;
-      _message = _connected ? s.reconnectToApply : s.settingsSaved;
-    });
+    return value;
   }
 
   List<String> _parseProcessList(String value) {
@@ -1690,12 +1764,14 @@ class _HomeScreenState extends State<HomeScreen>
                       installingUpdate: _installingUpdate,
                       excludedProcessCount:
                           _splitTunnelExcludedProcesses.length,
+                      vpnOnlyProcessCount: _vpnOnlyProcesses.length,
                       updateInfo: _updateInfo,
                       onAutoStartChanged: (value) =>
                           unawaited(_setAutoStart(value)),
                       onAutoConnectChanged: (value) =>
                           unawaited(_setAutoConnect(value)),
                       onEditSplitTunnel: _showSplitTunnelSheet,
+                      onEditVpnOnly: _showVpnOnlySheet,
                       onCheckUpdate: _checkForUpdates,
                       onOpenReleases: () =>
                           _openUrl(WindowsIntegrationService.releasesUrl),
@@ -2199,10 +2275,12 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.checkingUpdate,
     required this.installingUpdate,
     required this.excludedProcessCount,
+    required this.vpnOnlyProcessCount,
     required this.updateInfo,
     required this.onAutoStartChanged,
     required this.onAutoConnectChanged,
     required this.onEditSplitTunnel,
+    required this.onEditVpnOnly,
     required this.onCheckUpdate,
     required this.onOpenReleases,
   });
@@ -2214,10 +2292,12 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool checkingUpdate;
   final bool installingUpdate;
   final int excludedProcessCount;
+  final int vpnOnlyProcessCount;
   final WindowsUpdateInfo? updateInfo;
   final ValueChanged<bool> onAutoStartChanged;
   final ValueChanged<bool> onAutoConnectChanged;
   final VoidCallback onEditSplitTunnel;
+  final VoidCallback onEditVpnOnly;
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenReleases;
 
@@ -2271,6 +2351,11 @@ class _WindowsToolsPanel extends StatelessWidget {
                   onPressed: onEditSplitTunnel,
                   icon: const Icon(Icons.call_split_outlined),
                   label: Text(strings.splitTunnelButton(excludedProcessCount)),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onEditVpnOnly,
+                  icon: const Icon(Icons.vpn_lock_outlined),
+                  label: Text(strings.vpnOnlyButton(vpnOnlyProcessCount)),
                 ),
                 OutlinedButton.icon(
                   onPressed: checkingUpdate || installingUpdate
@@ -2539,8 +2624,12 @@ class _Strings {
     required this.splitTunnelTitle,
     required this.splitTunnelDescription,
     required this.splitTunnelHint,
+    required this.splitTunnelPickExeTitle,
+    required this.vpnOnlyTitle,
+    required this.vpnOnlyDescription,
+    required this.vpnOnlyHint,
+    required this.vpnOnlyPickExeTitle,
     required this.pickExeButton,
-    required this.pickExeTitle,
     required this.settingsSaved,
     required this.reconnectToApply,
     required this.updates,
@@ -2629,8 +2718,12 @@ class _Strings {
   final String splitTunnelTitle;
   final String splitTunnelDescription;
   final String splitTunnelHint;
+  final String splitTunnelPickExeTitle;
+  final String vpnOnlyTitle;
+  final String vpnOnlyDescription;
+  final String vpnOnlyHint;
+  final String vpnOnlyPickExeTitle;
   final String pickExeButton;
-  final String pickExeTitle;
   final String settingsSaved;
   final String reconnectToApply;
   final String updates;
@@ -2718,6 +2811,13 @@ class _Strings {
     _Strings.en => 'App exclusions: $count',
     _ when count == 0 => 'Исключения приложений',
     _ => 'Исключения: $count',
+  };
+
+  String vpnOnlyButton(int count) => switch (this) {
+    _Strings.en when count == 0 => 'Always VPN',
+    _Strings.en => 'Always VPN: $count',
+    _ when count == 0 => 'Всегда через VPN',
+    _ => 'VPN всегда: $count',
   };
 
   String get installingUpdate => switch (this) {
@@ -2874,8 +2974,13 @@ class _Strings {
     splitTunnelDescription:
         'Укажи exe-файлы, которые должны идти напрямую, минуя VPN. По одному в строке.',
     splitTunnelHint: 'chrome.exe\nsteam.exe\nqbittorrent.exe',
+    splitTunnelPickExeTitle: 'Выбери приложения для исключений',
+    vpnOnlyTitle: 'Постоянный VPN для приложений',
+    vpnOnlyDescription:
+        'Укажи exe-файлы, которые всегда должны идти через VPN. Локальные адреса останутся напрямую, чтобы не ломать работу приложения.',
+    vpnOnlyHint: 'Codex.exe\ncodex.exe\nChatGPT.exe',
+    vpnOnlyPickExeTitle: 'Выбери приложения для постоянного VPN',
     pickExeButton: 'Выбрать exe',
-    pickExeTitle: 'Выбери приложения для исключений',
     settingsSaved: 'Настройки сохранены',
     reconnectToApply: 'Настройки сохранены. Переподключи VPN, чтобы применить.',
     updates: 'Обновления',
@@ -3000,8 +3105,13 @@ class _Strings {
     splitTunnelDescription:
         'Enter exe files that should go directly and bypass the VPN. One per line.',
     splitTunnelHint: 'chrome.exe\nsteam.exe\nqbittorrent.exe',
+    splitTunnelPickExeTitle: 'Choose apps to exclude',
+    vpnOnlyTitle: 'Always-on VPN for apps',
+    vpnOnlyDescription:
+        'Enter exe files that should always use the VPN. Local addresses stay direct so the app can keep its local IPC working.',
+    vpnOnlyHint: 'Codex.exe\ncodex.exe\nChatGPT.exe',
+    vpnOnlyPickExeTitle: 'Choose always-on VPN apps',
     pickExeButton: 'Choose exe',
-    pickExeTitle: 'Choose apps to exclude',
     settingsSaved: 'Settings saved',
     reconnectToApply: 'Settings saved. Reconnect the VPN to apply them.',
     updates: 'Updates',

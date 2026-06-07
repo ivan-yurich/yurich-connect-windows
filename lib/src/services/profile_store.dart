@@ -11,6 +11,12 @@ class ProfileStore {
   static const _autoConnectKey = 'autoConnect';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
+  static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
+  static const defaultVpnOnlyProcesses = <String>[
+    'Codex.exe',
+    'codex.exe',
+    'ChatGPT.exe',
+  ];
 
   Future<List<VpnProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -76,5 +82,15 @@ class ProfileStore {
   Future<void> saveSplitTunnelExcludedProcesses(List<String> processes) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_splitTunnelExcludedProcessesKey, processes);
+  }
+
+  Future<List<String>> loadVpnOnlyProcesses() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(_vpnOnlyProcessesKey) ?? defaultVpnOnlyProcesses;
+  }
+
+  Future<void> saveVpnOnlyProcesses(List<String> processes) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_vpnOnlyProcessesKey, processes);
   }
 }
