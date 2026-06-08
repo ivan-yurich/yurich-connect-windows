@@ -34,7 +34,7 @@ class SingBoxConfigBuilder {
     'ozon.ru',
     'wildberries.ru',
   ];
-  static const windowsLocalDnsQueryTypes = ['PTR', 'SRV', 'HTTPS', 'SVCB'];
+  static const windowsLocalDnsQueryTypes = ['PTR', 'SRV'];
 
   String build(
     VpnProfile profile, {
@@ -204,7 +204,8 @@ class SingBoxConfigBuilder {
           'inet4_range': '198.18.0.0/15',
           'inet6_range': 'fc00::/18',
         },
-      if (target == SingBoxConfigTarget.android)
+      if (target == SingBoxConfigTarget.android ||
+          target == SingBoxConfigTarget.windows)
         {
           'type': 'https',
           'tag': 'global-dns',
@@ -242,9 +243,7 @@ class SingBoxConfigBuilder {
       'strategy': 'ipv4_only',
       'cache_capacity': target == SingBoxConfigTarget.windows ? 32768 : 8192,
       'reverse_mapping': true,
-      'final': target == SingBoxConfigTarget.windows
-          ? 'local-dns'
-          : 'global-dns',
+      'final': 'global-dns',
     };
   }
 

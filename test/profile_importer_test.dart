@@ -35,9 +35,7 @@ void main() {
 
   test('propagates subscription expiry from JSON payload', () async {
     final payload = jsonEncode({
-      'links': [
-        'naive+https://example.com:user@example.com:443#Naive',
-      ],
+      'links': ['naive+https://example.com:user@example.com:443#Naive'],
       'expire': 1740960000,
     });
 
@@ -518,22 +516,27 @@ void main() {
       'type': 'local',
       'tag': 'local-dns',
     });
-    expect((config['dns'] as Map<String, dynamic>)['servers'], hasLength(1));
-    expect((config['dns'] as Map<String, dynamic>)['final'], 'local-dns');
+    expect((config['dns'] as Map<String, dynamic>)['servers'][1], {
+      'type': 'https',
+      'tag': 'global-dns',
+      'server': '1.1.1.1',
+      'server_port': 443,
+      'path': '/dns-query',
+      'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
+      'detour': 'proxy',
+    });
+    expect((config['dns'] as Map<String, dynamic>)['servers'], hasLength(2));
+    expect((config['dns'] as Map<String, dynamic>)['final'], 'global-dns');
     expect((config['dns'] as Map<String, dynamic>)['cache_capacity'], 32768);
     final dnsRules = (config['dns'] as Map<String, dynamic>)['rules'] as List;
-    expect(
-      dnsRules.any(
-        (rule) =>
-            rule['server'] == 'local-dns' &&
-            rule['query_type'] is List &&
-            (rule['query_type'] as List).contains('PTR') &&
-            (rule['query_type'] as List).contains('SRV') &&
-            (rule['query_type'] as List).contains('HTTPS') &&
-            (rule['query_type'] as List).contains('SVCB'),
-      ),
-      isTrue,
-    );
+    final localQueryTypeRule = dnsRules
+        .whereType<Map<String, dynamic>>()
+        .firstWhere((rule) => rule['query_type'] is List);
+    expect(localQueryTypeRule, {
+      'query_type': ['PTR', 'SRV'],
+      'action': 'route',
+      'server': 'local-dns',
+    });
     expect(
       dnsRules.any(
         (rule) =>
