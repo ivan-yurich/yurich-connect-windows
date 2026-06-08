@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.28';
+const _appVersion = '1.0.29';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -788,12 +788,13 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _refreshServerLatencies() async {
+  Future<void> _refreshServerLatencies({bool force = false}) async {
     if (_checkingServerLatency || _profiles.isEmpty) {
       return;
     }
     final lastUpdated = _serverLatencyLastUpdated;
-    if (lastUpdated != null &&
+    if (!force &&
+        lastUpdated != null &&
         DateTime.now().difference(lastUpdated) < _serverLatencyCacheTtl) {
       return;
     }
@@ -801,15 +802,20 @@ class _HomeScreenState extends State<HomeScreen>
       setState(() => _checkingServerLatency = true);
     }
     final profiles = List<VpnProfile>.of(_profiles);
-    final results = await _measureServerLatencies(profiles);
-    if (!mounted) {
-      return;
+    try {
+      final results = await _measureServerLatencies(profiles);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _serverLatencies = results;
+        _serverLatencyLastUpdated = DateTime.now();
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _checkingServerLatency = false);
+      }
     }
-    setState(() {
-      _serverLatencies = results;
-      _checkingServerLatency = false;
-      _serverLatencyLastUpdated = DateTime.now();
-    });
   }
 
   Future<Map<String, _ServerLatencyResult>> _measureServerLatencies(
@@ -2266,7 +2272,7 @@ class _HomeScreenState extends State<HomeScreen>
                       _showAllProfiles = false;
                     }),
                     onRefreshLatency: () =>
-                        unawaited(_refreshServerLatencies()),
+                        unawaited(_refreshServerLatencies(force: true)),
                     kindLabel: _profileKindLabel,
                   ),
                   if (Platform.isWindows) ...[
@@ -2674,6 +2680,7 @@ class _ProfilePanel extends StatelessWidget {
                 latency: serverLatencies[profile.id],
                 checkingLatency: checkingServerLatency,
                 onTap: () => onSelect(profile),
+                onRefreshLatency: onRefreshLatency,
                 onDelete: () => onDeleteProfile(profile),
                 strings: strings,
                 kindLabel: kindLabel,
@@ -2799,6 +2806,7 @@ class _ProfileTile extends StatelessWidget {
     required this.latency,
     required this.checkingLatency,
     required this.onTap,
+    required this.onRefreshLatency,
     required this.onDelete,
     required this.strings,
     required this.kindLabel,
@@ -2809,6 +2817,7 @@ class _ProfileTile extends StatelessWidget {
   final _ServerLatencyResult? latency;
   final bool checkingLatency;
   final VoidCallback onTap;
+  final VoidCallback onRefreshLatency;
   final VoidCallback onDelete;
   final _Strings strings;
   final String Function(VpnProfileKind kind) kindLabel;
@@ -2880,32 +2889,41 @@ class _ProfileTile extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.end,
               mainAxisSize: MainAxisSize.min,
               children: [
-                ConstrainedBox(
-                  constraints: const BoxConstraints(minWidth: 70),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: _surfaceMetric.withValues(alpha: 0.82),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: selected
-                            ? _gold.withValues(alpha: 0.55)
-                            : Colors.white10,
-                      ),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 5,
-                      ),
-                      child: Text(
-                        pingLabel,
-                        textAlign: TextAlign.center,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: pingColor,
-                          fontSize: 12,
-                          fontFeatures: const [FontFeature.tabularFigures()],
+                Tooltip(
+                  message: strings.pingRefresh,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: checkingLatency ? null : onRefreshLatency,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 70),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: _surfaceMetric.withValues(alpha: 0.82),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: selected
+                                ? _gold.withValues(alpha: 0.55)
+                                : Colors.white10,
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 5,
+                          ),
+                          child: Text(
+                            pingLabel,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: pingColor,
+                              fontSize: 12,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
                     ),
