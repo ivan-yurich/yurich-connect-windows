@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.22';
+const _appVersion = '1.0.23';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 176.0;
@@ -1046,10 +1046,6 @@ class _HomeScreenState extends State<HomeScreen>
         } finally {
           client.close(force: true);
           stopwatch.stop();
-        }
-
-        if (attemptLog == null) {
-          continue;
         }
 
         attempts.add(attemptLog);
@@ -2542,7 +2538,7 @@ String? _formatProfileExpiry(DateTime? expiresAt, _Strings strings) {
   if (daysLeft == 1) {
     return 'Subscription until $formattedDate (1 day)';
   }
-  return 'Subscription until $formattedDate (${daysLeft} days left)';
+  return 'Subscription until $formattedDate ($daysLeft days left)';
 }
 
 bool _isRu(_Strings strings) {

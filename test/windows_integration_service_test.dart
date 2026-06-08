@@ -3,7 +3,7 @@ import 'package:yurich_connect_windows/src/services/windows_integration_service.
 
 void main() {
   group('WindowsIntegrationService auto-start task XML', () {
-    test('accepts elevated delayed task that can run on battery', () {
+    test('accepts elevated immediate task that can run on battery', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -13,7 +13,7 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT1S</Delay>
+      <Delay>PT0S</Delay>
     </LogonTrigger>
   </Triggers>
   <Actions>
@@ -64,7 +64,7 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT1S</Delay>
+      <Delay>PT0S</Delay>
     </LogonTrigger>
   </Triggers>
   <Settings>
@@ -91,7 +91,7 @@ void main() {
   </Principals>
   <Triggers>
     <LogonTrigger>
-      <Delay>PT1S</Delay>
+      <Delay>PT0S</Delay>
     </LogonTrigger>
   </Triggers>
   <Actions>
