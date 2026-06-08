@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.29';
+const _appVersion = '1.0.30';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -166,6 +166,7 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
   bool _refreshingSubscriptions = false;
+  String? _dismissedUpdateVersion;
   String? _lastConfigSummary;
   final List<_HealthProbeAttempt> _healthProbeHistory = [];
   final _logs = <String>[];
@@ -405,6 +406,9 @@ class _HomeScreenState extends State<HomeScreen>
     });
     if (profiles.isNotEmpty) {
       unawaited(_refreshServerLatencies());
+    }
+    if (Platform.isWindows) {
+      unawaited(_checkForUpdates(silent: true, installIfAvailable: false));
     }
 
     if (Platform.isWindows &&
@@ -1557,14 +1561,19 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _checkForUpdates() async {
+  Future<void> _checkForUpdates({
+    bool silent = false,
+    bool installIfAvailable = true,
+  }) async {
     if (_checkingUpdate || _installingUpdate) {
       return;
     }
     setState(() {
       _checkingUpdate = true;
-      _updateInfo = null;
-      _message = s.checkingUpdates;
+      if (!silent) {
+        _updateInfo = null;
+        _message = s.checkingUpdates;
+      }
     });
     try {
       final info = await _windowsIntegration.checkForUpdate(_appVersion);
@@ -1574,10 +1583,12 @@ class _HomeScreenState extends State<HomeScreen>
       setState(() {
         _checkingUpdate = false;
         _updateInfo = info;
-        _message = s.updateMessage(info);
+        if (!silent) {
+          _message = s.updateMessage(info);
+        }
       });
 
-      if (!info.available) {
+      if (!info.available || !installIfAvailable) {
         return;
       }
 
@@ -1609,7 +1620,7 @@ class _HomeScreenState extends State<HomeScreen>
       await _windowsIntegration.runInstallerAsAdmin(installer);
       exit(0);
     } on Object catch (error) {
-      if (mounted) {
+      if (mounted && !silent) {
         final message = '${s.updateFailed}: ${_redactSensitive('$error')}';
         setState(() => _message = message);
         _showSnack(message);
@@ -2232,7 +2243,26 @@ class _HomeScreenState extends State<HomeScreen>
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: _buildConnectButton(context, selected),
+              child: Column(
+                children: [
+                  _buildConnectButton(context, selected),
+                  if (_shouldShowUpdateBanner()) ...[
+                    const SizedBox(height: 10),
+                    _UpdateBanner(
+                      strings: s,
+                      updateInfo: _updateInfo!,
+                      checkingUpdate: _checkingUpdate,
+                      installingUpdate: _installingUpdate,
+                      onUpdate: () => unawaited(_checkForUpdates()),
+                      onDismiss: () {
+                        setState(() {
+                          _dismissedUpdateVersion = _updateInfo!.latestVersion;
+                        });
+                      },
+                    ),
+                  ],
+                ],
+              ),
             ),
             Expanded(
               child: ListView(
@@ -2329,6 +2359,103 @@ class _HomeScreenState extends State<HomeScreen>
       style: FilledButton.styleFrom(
         minimumSize: const Size.fromHeight(54),
         textStyle: Theme.of(context).textTheme.titleMedium,
+      ),
+    );
+  }
+
+  bool _shouldShowUpdateBanner() {
+    final info = _updateInfo;
+    return Platform.isWindows &&
+        info != null &&
+        info.available &&
+        info.latestVersion != null &&
+        _dismissedUpdateVersion != info.latestVersion;
+  }
+}
+
+class _UpdateBanner extends StatelessWidget {
+  const _UpdateBanner({
+    required this.strings,
+    required this.updateInfo,
+    required this.checkingUpdate,
+    required this.installingUpdate,
+    required this.onUpdate,
+    required this.onDismiss,
+  });
+
+  final _Strings strings;
+  final WindowsUpdateInfo updateInfo;
+  final bool checkingUpdate;
+  final bool installingUpdate;
+  final VoidCallback onUpdate;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final busy = checkingUpdate || installingUpdate;
+    final version = updateInfo.latestVersion ?? '';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _surfaceMetric,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _gold.withValues(alpha: 0.54)),
+        boxShadow: [
+          BoxShadow(
+            color: _gold.withValues(alpha: 0.12),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        child: Row(
+          children: [
+            const Icon(Icons.system_update_alt, color: _goldSoft, size: 22),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    strings.updateBannerTitle(version),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: _goldSoft,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    strings.updateBannerBody,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: _mutedGold, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: busy ? null : onUpdate,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(88, 36),
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+              ),
+              child: Text(
+                busy ? strings.checkingUpdates : strings.updateNow,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            IconButton(
+              tooltip: strings.close,
+              onPressed: busy ? null : onDismiss,
+              icon: const Icon(Icons.close, size: 18),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3447,6 +3574,8 @@ class _Strings {
     required this.reconnectToApply,
     required this.updates,
     required this.checkingUpdates,
+    required this.updateNow,
+    required this.updateBannerBody,
     required this.openRelease,
     required this.save,
     required this.cancel,
@@ -3542,6 +3671,8 @@ class _Strings {
   final String reconnectToApply;
   final String updates;
   final String checkingUpdates;
+  final String updateNow;
+  final String updateBannerBody;
   final String openRelease;
   final String save;
   final String cancel;
@@ -3686,6 +3817,13 @@ class _Strings {
   String get updateFailed => switch (this) {
     _Strings.en => 'Update failed',
     _ => 'Обновление не удалось',
+  };
+
+  String updateBannerTitle(String version) => switch (this) {
+    _Strings.en when version.isNotEmpty => 'New version available: $version',
+    _Strings.en => 'New version available',
+    _ when version.isNotEmpty => 'Доступна новая версия: $version',
+    _ => 'Доступна новая версия',
   };
 
   String updateMessage(WindowsUpdateInfo info) => switch (this) {
@@ -3838,6 +3976,9 @@ class _Strings {
     reconnectToApply: 'Настройки сохранены. Переподключи VPN, чтобы применить.',
     updates: 'Обновления',
     checkingUpdates: 'Проверяю...',
+    updateNow: 'Обновить',
+    updateBannerBody:
+        'Пора обновить Yurich Connect. Установщик скачается и запустится от администратора.',
     openRelease: 'Открыть',
     save: 'Сохранить',
     cancel: 'Отмена',
@@ -3971,6 +4112,9 @@ class _Strings {
     reconnectToApply: 'Settings saved. Reconnect the VPN to apply them.',
     updates: 'Updates',
     checkingUpdates: 'Checking...',
+    updateNow: 'Update',
+    updateBannerBody:
+        'Time to update Yurich Connect. The installer will download and run as administrator.',
     openRelease: 'Open',
     save: 'Save',
     cancel: 'Cancel',
