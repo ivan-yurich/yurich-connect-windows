@@ -297,12 +297,50 @@ exit \$process.ExitCode
       throw StateError('Downloaded installer not found: ${installer.path}');
     }
 
+    final helper = File(
+      '${installer.parent.path}\\run_yurich_connect_update_${DateTime.now().millisecondsSinceEpoch}.ps1',
+    );
+    await helper.writeAsString('''
+param(
+  [Parameter(Mandatory = \$true)]
+  [string]\$Installer,
+  [Parameter(Mandatory = \$true)]
+  [int]\$AppPid
+)
+
+\$ErrorActionPreference = 'Stop'
+try {
+  \$app = Get-Process -Id \$AppPid -ErrorAction SilentlyContinue
+  if (\$null -ne \$app) {
+    Wait-Process -Id \$AppPid -Timeout 30 -ErrorAction SilentlyContinue
+  }
+} catch {
+  # If the old app already exited, continue with the installer.
+}
+Start-Sleep -Milliseconds 700
+\$workingDirectory = Split-Path -Parent \$Installer
+\$setup = Start-Process -FilePath \$Installer -WorkingDirectory \$workingDirectory -Verb RunAs -Wait -PassThru
+try {
+  Remove-Item -LiteralPath \$PSCommandPath -Force -ErrorAction SilentlyContinue
+} catch {
+  # Cleanup is best-effort.
+}
+if (\$null -eq \$setup) { exit 1 }
+exit \$setup.ExitCode
+''', flush: true);
+
+    final helperPath = _quotePowerShell(helper.path);
+    final installerPath = _quotePowerShell(installer.path);
+    final workingDirectory = _quotePowerShell(installer.parent.path);
     final result = await Process.run('powershell', [
       '-NoProfile',
       '-ExecutionPolicy',
       'Bypass',
       '-Command',
-      'Start-Process -FilePath ${_quotePowerShell(installer.path)} -Verb RunAs',
+      '''
+\$ErrorActionPreference = 'Stop'
+Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$helperPath,'-Installer',$installerPath,'-AppPid','$pid') | Out-Null
+''',
     ]);
     if (result.exitCode != 0) {
       final error = '${result.stderr}'.trim();

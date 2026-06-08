@@ -11,7 +11,7 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.25";
+    private const string AppVersion = "1.0.26";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
@@ -28,6 +28,7 @@ internal static class Program
     private static int Main()
     {
         ApplicationConfiguration.Initialize();
+        Directory.SetCurrentDirectory(Path.GetTempPath());
 
         try
         {
@@ -143,13 +144,65 @@ internal static class Program
             throw new InvalidOperationException($"Небезопасный путь установки: {actual}");
         }
 
+        var backupDir = installDir + ".backup_" + Guid.NewGuid().ToString("N");
         if (Directory.Exists(installDir))
         {
-            Directory.Delete(installDir, recursive: true);
+            RetryFileOperation(
+                () => Directory.Move(installDir, backupDir),
+                "Не удалось подготовить папку установки. Закрой Yurich Connect и попробуй снова.");
         }
 
-        Directory.CreateDirectory(installDir);
-        ZipFile.ExtractToDirectory(payloadPath, installDir, overwriteFiles: true);
+        try
+        {
+            Directory.CreateDirectory(installDir);
+            ZipFile.ExtractToDirectory(payloadPath, installDir, overwriteFiles: true);
+            TryDeleteDirectory(backupDir);
+        }
+        catch
+        {
+            TryDeleteDirectory(installDir);
+            if (Directory.Exists(backupDir) && !Directory.Exists(installDir))
+            {
+                Directory.Move(backupDir, installDir);
+            }
+
+            throw;
+        }
+    }
+
+    private static void RetryFileOperation(Action action, string failureMessage)
+    {
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                lastError = ex;
+                Thread.Sleep(500);
+            }
+        }
+
+        throw new IOException(failureMessage, lastError);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // A leftover backup folder is safer than breaking the active install.
+        }
     }
 
     private static void StopAppProcessesFromInstallDir(string installDir)
@@ -330,11 +383,10 @@ internal static class Program
             }
 
             var workingDirectory = Path.GetDirectoryName(exePath) ?? InstallDir();
-            var script = $"""
+                var script = $"""
                 $ErrorActionPreference = 'Stop'
                 $action = New-ScheduledTaskAction -Execute {PowerShellQuote(exePath)} -WorkingDirectory {PowerShellQuote(workingDirectory)}
                 $trigger = New-ScheduledTaskTrigger -AtLogOn
-                $trigger.Delay = 'PT1S'
                 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
                 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
                 Register-ScheduledTask -TaskName {PowerShellQuote(StartupTaskName)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
