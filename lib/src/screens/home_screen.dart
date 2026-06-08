@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.30';
+const _appVersion = '1.0.31';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -3255,7 +3255,11 @@ class _WindowsToolsPanel extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Icon(Icons.desktop_windows_outlined, color: _goldSoft),
+                const Icon(
+                  Icons.desktop_windows_outlined,
+                  color: _goldSoft,
+                  size: 22,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
@@ -3265,38 +3269,36 @@ class _WindowsToolsPanel extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
+            const SizedBox(height: 12),
+            _SettingsSwitchRow(
+              icon: Icons.rocket_launch_outlined,
               value: autoStart,
               onChanged: busy ? null : onAutoStartChanged,
               title: Text(strings.autoStart),
               subtitle: Text(strings.autoStartHint),
             ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
+              icon: Icons.shield_outlined,
               value: autoConnect,
               onChanged: onAutoConnectChanged,
               title: Text(strings.autoConnect),
               subtitle: Text(strings.autoConnectHint),
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              crossAxisAlignment: WrapCrossAlignment.center,
+            const SizedBox(height: 12),
+            _ActionGrid(
               children: [
-                OutlinedButton.icon(
+                _ActionTile(
                   onPressed: onEditSplitTunnel,
                   icon: const Icon(Icons.call_split_outlined),
                   label: Text(strings.splitTunnelButton(excludedProcessCount)),
                 ),
-                OutlinedButton.icon(
+                _ActionTile(
                   onPressed: onEditVpnOnly,
                   icon: const Icon(Icons.vpn_lock_outlined),
                   label: Text(strings.vpnOnlyButton(vpnOnlyProcessCount)),
                 ),
-                OutlinedButton.icon(
+                _ActionTile(
                   onPressed: checkingUpdate || installingUpdate
                       ? null
                       : onCheckUpdate,
@@ -3314,7 +3316,7 @@ class _WindowsToolsPanel extends StatelessWidget {
                         : strings.updates,
                   ),
                 ),
-                TextButton.icon(
+                _ActionTile(
                   onPressed: onOpenReleases,
                   icon: const Icon(Icons.open_in_new),
                   label: const Text('GitHub'),
@@ -3333,6 +3335,156 @@ class _WindowsToolsPanel extends StatelessWidget {
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsSwitchRow extends StatelessWidget {
+  const _SettingsSwitchRow({
+    required this.icon,
+    required this.value,
+    required this.onChanged,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final IconData icon;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  final Widget title;
+  final Widget subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _ink.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _gold.withValues(alpha: 0.14)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+        child: Row(
+          children: [
+            Icon(icon, color: _mutedGold, size: 22),
+            const SizedBox(width: 10),
+            Expanded(
+              child: DefaultTextStyle.merge(
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    DefaultTextStyle.merge(
+                      style: Theme.of(context).textTheme.titleSmall,
+                      child: title,
+                    ),
+                    const SizedBox(height: 3),
+                    DefaultTextStyle.merge(
+                      style: const TextStyle(
+                        color: _mutedGold,
+                        fontSize: 12,
+                        height: 1.25,
+                      ),
+                      child: subtitle,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Switch(value: value, onChanged: onChanged),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActionGrid extends StatelessWidget {
+  const _ActionGrid({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const gap = 10.0;
+        final columns = constraints.maxWidth < 330 ? 1 : 2;
+        final width = (constraints.maxWidth - gap * (columns - 1)) / columns;
+        return Wrap(
+          spacing: gap,
+          runSpacing: gap,
+          children: [
+            for (final child in children) SizedBox(width: width, child: child),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ActionTile extends StatelessWidget {
+  const _ActionTile({
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+  });
+
+  final VoidCallback? onPressed;
+  final Widget icon;
+  final Widget label;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    return SizedBox(
+      height: 42,
+      child: Material(
+        color: enabled
+            ? _surfaceMetric.withValues(alpha: 0.64)
+            : _ink.withValues(alpha: 0.28),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(
+            color: enabled
+                ? _gold.withValues(alpha: 0.34)
+                : Colors.white.withValues(alpha: 0.08),
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 11),
+            child: IconTheme.merge(
+              data: IconThemeData(
+                size: 18,
+                color: enabled ? _goldSoft : _mutedGold.withValues(alpha: 0.5),
+              ),
+              child: DefaultTextStyle.merge(
+                style: TextStyle(
+                  color: enabled
+                      ? _goldSoft
+                      : _mutedGold.withValues(alpha: 0.55),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                child: Row(
+                  children: [
+                    icon,
+                    const SizedBox(width: 8),
+                    Expanded(child: label),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -3358,43 +3510,60 @@ class _SupportPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(strings.contact, style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 10,
-          runSpacing: 10,
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _gold.withValues(alpha: 0.18)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            OutlinedButton.icon(
-              onPressed: onSupport,
-              icon: const Icon(Icons.support_agent),
-              label: Text(strings.support),
+            Row(
+              children: [
+                const Icon(Icons.link_outlined, color: _goldSoft, size: 22),
+                const SizedBox(width: 10),
+                Text(
+                  strings.contact,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ],
             ),
-            OutlinedButton.icon(
-              onPressed: onTelegram,
-              icon: const Icon(Icons.forum_outlined),
-              label: const Text('Telegram'),
-            ),
-            OutlinedButton.icon(
-              onPressed: onVk,
-              icon: const Icon(Icons.groups_outlined),
-              label: const Text('VK'),
-            ),
-            OutlinedButton.icon(
-              onPressed: onDonate,
-              icon: const Icon(Icons.volunteer_activism_outlined),
-              label: Text(strings.donate),
-            ),
-            OutlinedButton.icon(
-              onPressed: onDeveloper,
-              icon: const Icon(Icons.mail_outline),
-              label: Text(strings.developer),
+            const SizedBox(height: 12),
+            _ActionGrid(
+              children: [
+                _ActionTile(
+                  onPressed: onSupport,
+                  icon: const Icon(Icons.support_agent),
+                  label: Text(strings.support),
+                ),
+                _ActionTile(
+                  onPressed: onTelegram,
+                  icon: const Icon(Icons.forum_outlined),
+                  label: const Text('Telegram'),
+                ),
+                _ActionTile(
+                  onPressed: onVk,
+                  icon: const Icon(Icons.groups_outlined),
+                  label: const Text('VK'),
+                ),
+                _ActionTile(
+                  onPressed: onDonate,
+                  icon: const Icon(Icons.volunteer_activism_outlined),
+                  label: Text(strings.donate),
+                ),
+                _ActionTile(
+                  onPressed: onDeveloper,
+                  icon: const Icon(Icons.mail_outline),
+                  label: Text(strings.developer),
+                ),
+              ],
             ),
           ],
         ),
-      ],
+      ),
     );
   }
 }
@@ -3406,40 +3575,46 @@ class _FaqPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      leading: const Icon(Icons.help_outline, color: _goldSoft),
-      title: Text(strings.faq),
-      children: [
-        for (final item in strings.faqItems)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: _surface,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.white12),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _gold.withValues(alpha: 0.18)),
+      ),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        shape: const Border(),
+        collapsedShape: const Border(),
+        leading: const Icon(Icons.help_outline, color: _goldSoft),
+        title: Text(strings.faq),
+        children: [
+          for (var i = 0; i < strings.faqItems.length; i++) ...[
+            Padding(
+              padding: EdgeInsets.only(
+                top: i == 0 ? 2 : 10,
+                bottom: i == strings.faqItems.length - 1 ? 0 : 10,
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      item.question,
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      item.answer,
-                      style: const TextStyle(color: _mutedGold, height: 1.35),
-                    ),
-                  ],
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    strings.faqItems[i].question,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    strings.faqItems[i].answer,
+                    style: const TextStyle(color: _mutedGold, height: 1.35),
+                  ),
+                ],
               ),
             ),
-          ),
-      ],
+            if (i != strings.faqItems.length - 1)
+              Divider(color: _gold.withValues(alpha: 0.12), height: 1),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -3452,29 +3627,43 @@ class _LogsPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      title: Text(strings.logs),
-      children: [
-        Container(
-          width: double.infinity,
-          constraints: const BoxConstraints(minHeight: 92),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: _ink,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: _gold.withValues(alpha: 0.18)),
-          ),
-          child: Text(
-            logs.isEmpty ? strings.noLogs : logs.join('\n'),
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 12,
-              height: 1.35,
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _gold.withValues(alpha: 0.18)),
+      ),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        shape: const Border(),
+        collapsedShape: const Border(),
+        leading: const Icon(Icons.terminal_outlined, color: _goldSoft),
+        title: Text(strings.logs),
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: _ink,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: _gold.withValues(alpha: 0.16)),
+            ),
+            child: SizedBox(
+              width: double.infinity,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: SelectableText(
+                  logs.isEmpty ? strings.noLogs : logs.join('\n'),
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
