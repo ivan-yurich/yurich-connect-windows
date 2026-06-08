@@ -30,10 +30,10 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.23';
+const _appVersion = '1.0.24';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
-const _statusPanelHeight = 176.0;
+const _statusPanelHeight = 228.0;
 const _healthWatchdogTick = Duration(seconds: 20);
 const _healthWatchdogStartupGrace = Duration(seconds: 30);
 const _healthWatchdogRetryGrace = Duration(seconds: 60);
@@ -104,6 +104,8 @@ enum _AppLanguage {
   }
 }
 
+enum _ProfileFilter { all, vless, naive, hysteria }
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -125,9 +127,11 @@ class _HomeScreenState extends State<HomeScreen>
   StreamSubscription<Map<String, dynamic>>? _logSubscription;
   Timer? _logFlushTimer;
   Timer? _healthWatchdogTimer;
+  Timer? _sessionTimer;
   DateTime? _ignoreStoppedUntil;
   DateTime? _healthWatchdogWarmupUntil;
   DateTime? _lastTrafficUpdateAt;
+  DateTime? _connectedAt;
 
   List<VpnProfile> _profiles = const [];
   String? _selectedProfileId;
@@ -149,6 +153,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoConnect = false;
   bool _autoConnectAttempted = false;
   bool _showAllProfiles = false;
+  _ProfileFilter _profileFilter = _ProfileFilter.all;
   bool _healthWatchdogRestarting = false;
   int _healthWatchdogFailures = 0;
   DateTime? _healthWatchdogCooldownUntil;
@@ -178,6 +183,33 @@ class _HomeScreenState extends State<HomeScreen>
   bool get _connected =>
       _status == YurichConnectStatus.started ||
       _status == YurichConnectStatus.starting;
+
+  Duration get _sessionDuration {
+    final connectedAt = _connectedAt;
+    if (connectedAt == null) {
+      return Duration.zero;
+    }
+    final duration = DateTime.now().difference(connectedAt);
+    return duration.isNegative ? Duration.zero : duration;
+  }
+
+  void _startSessionTimer() {
+    _sessionTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) {
+        return;
+      }
+      if (_status != YurichConnectStatus.started) {
+        _stopSessionTimer();
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  void _stopSessionTimer() {
+    _sessionTimer?.cancel();
+    _sessionTimer = null;
+  }
 
   Future<void> _setupTray() async {
     if (!Platform.isWindows) {
@@ -272,6 +304,7 @@ class _HomeScreenState extends State<HomeScreen>
     _trafficSubscription?.cancel();
     _logSubscription?.cancel();
     _logFlushTimer?.cancel();
+    _sessionTimer?.cancel();
     _stopHealthWatchdog();
     if (Platform.isWindows) {
       trayManager.removeListener(this);
@@ -416,12 +449,18 @@ class _HomeScreenState extends State<HomeScreen>
           _status = status;
           if (status == YurichConnectStatus.started) {
             _lastError = null;
+            _connectedAt ??= DateTime.now();
             _ignoreStoppedUntil = DateTime.now().add(
               const Duration(seconds: 4),
             );
+            _startSessionTimer();
             _startHealthWatchdog(warmup: const Duration(seconds: 30));
           } else if (status == YurichConnectStatus.stopped ||
               status == YurichConnectStatus.stopping) {
+            if (status == YurichConnectStatus.stopped) {
+              _connectedAt = null;
+              _stopSessionTimer();
+            }
             _stopHealthWatchdog();
           }
           final ignoreStopped =
@@ -476,6 +515,10 @@ class _HomeScreenState extends State<HomeScreen>
       if (mounted) {
         setState(() {
           _status = status;
+          if (status == YurichConnectStatus.started) {
+            _connectedAt ??= DateTime.now();
+            _startSessionTimer();
+          }
           _logs
             ..clear()
             ..addAll(
@@ -615,15 +658,15 @@ class _HomeScreenState extends State<HomeScreen>
       await _store.saveSelectedProfileId(imported.first.id);
       _manualController.clear();
 
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _profiles = merged;
-      _selectedProfileId = imported.first.id;
-      _serverLatencyLastUpdated = null;
-      _message = s.imported(imported.length);
-    });
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _profiles = merged;
+        _selectedProfileId = imported.first.id;
+        _serverLatencyLastUpdated = null;
+        _message = s.imported(imported.length);
+      });
       unawaited(_refreshTrayMenu());
       unawaited(_refreshServerLatencies());
       _showSnack(s.importedProfiles(imported.length));
@@ -771,7 +814,7 @@ class _HomeScreenState extends State<HomeScreen>
     var connected = false;
     final plans = _connectionPlans(profile);
 
-  for (
+    for (
       var planIndex = 0;
       planIndex < plans.length && !connected;
       planIndex += 1
@@ -826,8 +869,8 @@ class _HomeScreenState extends State<HomeScreen>
             YurichConnectStatus.started,
           }, timeout: const Duration(seconds: 14));
           if (finalStatus == YurichConnectStatus.started) {
-            final probeResult = _vpnEngine.configTarget !=
-                    SingBoxConfigTarget.windows
+            final probeResult =
+                _vpnEngine.configTarget != SingBoxConfigTarget.windows
                 ? const _HealthProbeResult(
                     success: true,
                     attempts: <_HealthProbeAttempt>[],
@@ -946,13 +989,17 @@ class _HomeScreenState extends State<HomeScreen>
 
     final attempts = <_HealthProbeAttempt>[];
 
-    for (var endpointIndex = 0;
-        endpointIndex < endpoints.length;
-        endpointIndex += 1) {
+    for (
+      var endpointIndex = 0;
+      endpointIndex < endpoints.length;
+      endpointIndex += 1
+    ) {
       final endpoint = endpoints[endpointIndex];
-      for (var attempt = 1;
-          attempt <= _healthWatchdogProbeAttempts;
-          attempt += 1) {
+      for (
+        var attempt = 1;
+        attempt <= _healthWatchdogProbeAttempts;
+        attempt += 1
+      ) {
         final startedAt = DateTime.now();
         final stopwatch = Stopwatch()..start();
         final client = HttpClient()
@@ -1062,7 +1109,9 @@ class _HomeScreenState extends State<HomeScreen>
         if (logFailures &&
             attempt == _healthWatchdogProbeAttempts &&
             endpointIndex == endpoints.length - 1) {
-          _queueLog('VPN health probe failed: ${_healthProbeDescription(attemptLog)}.');
+          _queueLog(
+            'VPN health probe failed: ${_healthProbeDescription(attemptLog)}.',
+          );
         }
 
         if (attempt < _healthWatchdogProbeAttempts) {
@@ -1088,7 +1137,9 @@ class _HomeScreenState extends State<HomeScreen>
   void _recordHealthProbeAttempt(_HealthProbeAttempt attempt) {
     _healthProbeHistory.add(attempt);
     final cutoff = DateTime.now().subtract(_healthProbeHistoryWindow);
-    _healthProbeHistory.removeWhere((entry) => entry.timestamp.isBefore(cutoff));
+    _healthProbeHistory.removeWhere(
+      (entry) => entry.timestamp.isBefore(cutoff),
+    );
     if (_healthProbeHistory.length > _healthProbeHistoryLimit) {
       _healthProbeHistory.removeRange(
         0,
@@ -1099,12 +1150,13 @@ class _HomeScreenState extends State<HomeScreen>
 
   int _healthProbeP99LatencyMs() {
     final cutoff = DateTime.now().subtract(_healthProbeHistoryWindow);
-    final durations = _healthProbeHistory
-        .where((entry) => entry.timestamp.isAfter(cutoff))
-        .map((entry) => entry.duration.inMilliseconds)
-        .where((value) => value > 0)
-        .toList()
-      ..sort();
+    final durations =
+        _healthProbeHistory
+            .where((entry) => entry.timestamp.isAfter(cutoff))
+            .map((entry) => entry.duration.inMilliseconds)
+            .where((value) => value > 0)
+            .toList()
+          ..sort();
     if (durations.isEmpty) {
       return 0;
     }
@@ -1188,8 +1240,9 @@ class _HomeScreenState extends State<HomeScreen>
 
     if (_hasActiveTraffic()) {
       _healthWatchdogFailures = 2;
-      _healthWatchdogCooldownUntil = DateTime.now()
-          .add(_healthWatchdogActiveTrafficFailureWindow);
+      _healthWatchdogCooldownUntil = DateTime.now().add(
+        _healthWatchdogActiveTrafficFailureWindow,
+      );
       _queueLog(
         'VPN health watchdog probe failed during active traffic: $probeDescription. '
         'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}. '
@@ -1205,7 +1258,9 @@ class _HomeScreenState extends State<HomeScreen>
       'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
     );
     if (_healthWatchdogFailures < _healthWatchdogFailureLimit) {
-      _healthWatchdogCooldownUntil = DateTime.now().add(_healthWatchdogRetryGrace);
+      _healthWatchdogCooldownUntil = DateTime.now().add(
+        _healthWatchdogRetryGrace,
+      );
       return;
     }
 
@@ -1790,7 +1845,7 @@ class _HomeScreenState extends State<HomeScreen>
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
       'health_probe_p99_ms: ${_healthProbeP99LatencyMs()}'
-      ' (${_healthProbeHistory.length} probes in window)',
+          ' (${_healthProbeHistory.length} probes in window)',
       if (_healthProbeHistory.isNotEmpty)
         'health_probe_last: ${_healthProbeDescription(_healthProbeHistory.last)}',
       '',
@@ -2029,6 +2084,7 @@ class _HomeScreenState extends State<HomeScreen>
                     uplink: _uplink,
                     downlink: _downlink,
                     sessionTotal: _sessionTotal,
+                    sessionDuration: _sessionDuration,
                   ),
                   const SizedBox(height: 16),
                   _ProfilePanel(
@@ -2038,6 +2094,7 @@ class _HomeScreenState extends State<HomeScreen>
                     serverLatencies: _serverLatencies,
                     checkingServerLatency: _checkingServerLatency,
                     showAllProfiles: _showAllProfiles,
+                    selectedFilter: _profileFilter,
                     onSelect: _selectProfile,
                     onAdd: _showImportSheet,
                     onCopy: selected == null ? null : _copySelected,
@@ -2046,6 +2103,10 @@ class _HomeScreenState extends State<HomeScreen>
                         unawaited(_deleteProfile(profile)),
                     onToggleShowAllProfiles: () =>
                         setState(() => _showAllProfiles = !_showAllProfiles),
+                    onFilterChanged: (filter) => setState(() {
+                      _profileFilter = filter;
+                      _showAllProfiles = false;
+                    }),
                     onRefreshLatency: () =>
                         unawaited(_refreshServerLatencies()),
                     kindLabel: _profileKindLabel,
@@ -2117,6 +2178,7 @@ class _StatusPanel extends StatelessWidget {
     required this.uplink,
     required this.downlink,
     required this.sessionTotal,
+    required this.sessionDuration,
   });
 
   final _Strings strings;
@@ -2125,6 +2187,7 @@ class _StatusPanel extends StatelessWidget {
   final String uplink;
   final String downlink;
   final String sessionTotal;
+  final Duration sessionDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -2145,9 +2208,7 @@ class _StatusPanel extends StatelessWidget {
           border: Border.all(color: connected ? _gold : Colors.white12),
           boxShadow: [
             BoxShadow(
-              color: connected
-                  ? _gold.withValues(alpha: 0.18)
-                  : Colors.black26,
+              color: connected ? _gold.withValues(alpha: 0.18) : Colors.black26,
               blurRadius: 18,
               offset: const Offset(0, 8),
             ),
@@ -2187,14 +2248,24 @@ class _StatusPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 10),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  _Metric(label: '↑', value: uplink),
-                  _Metric(label: '↓', value: downlink),
-                  _Metric(label: 'Σ', value: sessionTotal),
-                ],
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _Metric(label: '↑', value: uplink),
+                    ),
+                    const SizedBox(width: 14),
+                    _SessionDial(
+                      connected: connected,
+                      duration: sessionDuration,
+                      total: sessionTotal,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: _Metric(label: '↓', value: downlink),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -2224,6 +2295,76 @@ class _Metric extends StatelessWidget {
   }
 }
 
+class _SessionDial extends StatelessWidget {
+  const _SessionDial({
+    required this.connected,
+    required this.duration,
+    required this.total,
+  });
+
+  final bool connected;
+  final Duration duration;
+  final String total;
+
+  @override
+  Widget build(BuildContext context) {
+    final durationLabel = _formatSessionDuration(duration);
+    return Container(
+      width: 116,
+      height: 116,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: RadialGradient(
+          colors: connected
+              ? const [Color(0xFF9BE7FF), Color(0xFF1EC8FF), Color(0xFF0B6ED7)]
+              : const [Color(0xFF294560), Color(0xFF19344E), Color(0xFF0E2237)],
+        ),
+        border: Border.all(color: _goldSoft.withValues(alpha: 0.86), width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: connected
+                ? _gold.withValues(alpha: 0.42)
+                : Colors.black.withValues(alpha: 0.18),
+            blurRadius: 28,
+            spreadRadius: 5,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.timer_outlined,
+            color: connected ? _ink : _mutedGold,
+            size: 24,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            durationLabel,
+            style: TextStyle(
+              color: connected ? _ink : _goldSoft,
+              fontWeight: FontWeight.w800,
+              fontSize: 22,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            total,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: connected ? _ink.withValues(alpha: 0.7) : _mutedGold,
+              fontSize: 11,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ProfilePanel extends StatelessWidget {
   const _ProfilePanel({
     required this.strings,
@@ -2232,12 +2373,14 @@ class _ProfilePanel extends StatelessWidget {
     required this.serverLatencies,
     required this.checkingServerLatency,
     required this.showAllProfiles,
+    required this.selectedFilter,
     required this.onSelect,
     required this.onAdd,
     required this.onCopy,
     required this.onQr,
     required this.onDeleteProfile,
     required this.onToggleShowAllProfiles,
+    required this.onFilterChanged,
     required this.onRefreshLatency,
     required this.kindLabel,
   });
@@ -2248,19 +2391,22 @@ class _ProfilePanel extends StatelessWidget {
   final Map<String, _ServerLatencyResult> serverLatencies;
   final bool checkingServerLatency;
   final bool showAllProfiles;
+  final _ProfileFilter selectedFilter;
   final ValueChanged<VpnProfile> onSelect;
   final VoidCallback onAdd;
   final VoidCallback? onCopy;
   final VoidCallback? onQr;
   final ValueChanged<VpnProfile> onDeleteProfile;
   final VoidCallback onToggleShowAllProfiles;
+  final ValueChanged<_ProfileFilter> onFilterChanged;
   final VoidCallback onRefreshLatency;
   final String Function(VpnProfileKind kind) kindLabel;
 
   @override
   Widget build(BuildContext context) {
-    final visibleProfiles = _visibleProfiles();
-    final hiddenCount = profiles.length - visibleProfiles.length;
+    final filteredProfiles = _filteredProfiles();
+    final visibleProfiles = _visibleProfiles(filteredProfiles);
+    final hiddenCount = filteredProfiles.length - visibleProfiles.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2302,8 +2448,20 @@ class _ProfilePanel extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 8),
+        _ProfileFilterBar(
+          strings: strings,
+          profiles: profiles,
+          selectedFilter: selectedFilter,
+          onChanged: onFilterChanged,
+        ),
+        const SizedBox(height: 12),
         if (profiles.isEmpty)
           _EmptyProfiles(strings: strings)
+        else if (filteredProfiles.isEmpty)
+          _EmptyProfiles(
+            strings: strings,
+            message: _profileFilterEmptyLabel(selectedFilter, strings),
+          )
         else
           ...visibleProfiles.map(
             (profile) => Padding(
@@ -2321,7 +2479,8 @@ class _ProfilePanel extends StatelessWidget {
             ),
           ),
         if (hiddenCount > 0 ||
-            (showAllProfiles && profiles.length > _collapsedProfileLimit))
+            (showAllProfiles &&
+                filteredProfiles.length > _collapsedProfileLimit))
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: OutlinedButton.icon(
@@ -2340,7 +2499,13 @@ class _ProfilePanel extends StatelessWidget {
     );
   }
 
-  List<VpnProfile> _visibleProfiles() {
+  List<VpnProfile> _filteredProfiles() {
+    return profiles
+        .where((profile) => _profileMatchesFilter(profile, selectedFilter))
+        .toList();
+  }
+
+  List<VpnProfile> _visibleProfiles(List<VpnProfile> profiles) {
     if (showAllProfiles || profiles.length <= _collapsedProfileLimit) {
       return profiles;
     }
@@ -2359,6 +2524,69 @@ class _ProfilePanel extends StatelessWidget {
       ...selected,
       ...others.take(_collapsedProfileLimit - selected.length),
     ];
+  }
+}
+
+class _ProfileFilterBar extends StatelessWidget {
+  const _ProfileFilterBar({
+    required this.strings,
+    required this.profiles,
+    required this.selectedFilter,
+    required this.onChanged,
+  });
+
+  final _Strings strings;
+  final List<VpnProfile> profiles;
+  final _ProfileFilter selectedFilter;
+  final ValueChanged<_ProfileFilter> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: _ProfileFilter.values
+            .map(
+              (filter) => Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: ChoiceChip(
+                  label: Text(
+                    _profileFilterLabel(
+                      filter,
+                      strings,
+                      _profileFilterCount(filter),
+                    ),
+                  ),
+                  selected: selectedFilter == filter,
+                  showCheckmark: false,
+                  onSelected: (_) => onChanged(filter),
+                  selectedColor: _gold,
+                  backgroundColor: _surface,
+                  side: BorderSide(
+                    color: selectedFilter == filter
+                        ? _goldSoft
+                        : _gold.withValues(alpha: 0.24),
+                  ),
+                  labelStyle: TextStyle(
+                    color: selectedFilter == filter ? _ink : _goldSoft,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+
+  int _profileFilterCount(_ProfileFilter filter) {
+    return profiles
+        .where((profile) => _profileMatchesFilter(profile, filter))
+        .length;
   }
 }
 
@@ -2501,15 +2729,51 @@ class _ProfileTile extends StatelessWidget {
   }
 }
 
+bool _profileMatchesFilter(VpnProfile profile, _ProfileFilter filter) {
+  return switch (filter) {
+    _ProfileFilter.all => true,
+    _ProfileFilter.vless =>
+      profile.kind == VpnProfileKind.vlessReality ||
+          profile.kind == VpnProfileKind.vlessTls,
+    _ProfileFilter.naive => profile.kind == VpnProfileKind.naive,
+    _ProfileFilter.hysteria =>
+      profile.kind == VpnProfileKind.hysteria ||
+          profile.kind == VpnProfileKind.hysteria2,
+  };
+}
+
+String _profileFilterLabel(_ProfileFilter filter, _Strings strings, int count) {
+  final label = switch (filter) {
+    _ProfileFilter.all => _isRu(strings) ? 'Все' : 'All',
+    _ProfileFilter.vless => 'VLESS',
+    _ProfileFilter.naive => 'Naive',
+    _ProfileFilter.hysteria => 'Hysteria',
+  };
+  return '$label $count';
+}
+
+String _profileFilterEmptyLabel(_ProfileFilter filter, _Strings strings) {
+  final label = _profileFilterLabel(filter, strings, 0).replaceFirst(' 0', '');
+  return _isRu(strings) ? 'Нет профилей $label.' : 'No $label profiles.';
+}
+
+String _formatSessionDuration(Duration duration) {
+  final totalSeconds = duration.inSeconds;
+  final hours = totalSeconds ~/ 3600;
+  final minutes = (totalSeconds % 3600) ~/ 60;
+  final seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return '$hours:${minutes.toString().padLeft(2, '0')}:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+  return '$minutes:${seconds.toString().padLeft(2, '0')}';
+}
+
 String? _formatProfileExpiry(DateTime? expiresAt, _Strings strings) {
   if (expiresAt == null) {
     return null;
   }
-  final date = DateTime(
-    expiresAt.year,
-    expiresAt.month,
-    expiresAt.day,
-  );
+  final date = DateTime(expiresAt.year, expiresAt.month, expiresAt.day);
   final today = DateTime.now();
   final now = DateTime(today.year, today.month, today.day);
   final daysLeft = date.difference(now).inDays;
@@ -2546,9 +2810,10 @@ bool _isRu(_Strings strings) {
 }
 
 class _EmptyProfiles extends StatelessWidget {
-  const _EmptyProfiles({required this.strings});
+  const _EmptyProfiles({required this.strings, this.message});
 
   final _Strings strings;
+  final String? message;
 
   @override
   Widget build(BuildContext context) {
@@ -2560,7 +2825,7 @@ class _EmptyProfiles extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: Colors.white12),
       ),
-      child: Text(strings.emptyProfiles),
+      child: Text(message ?? strings.emptyProfiles),
     );
   }
 }

@@ -47,7 +47,7 @@ class ProfileImporter {
 
   Future<_SubscriptionFetchResult> _fetchSubscription(Uri uri) async {
     final clients = [
-      'YurichConnect-Windows/1.0.23 YurichCore/sing-box/1.13.12',
+      'YurichConnect-Windows/1.0.24 YurichCore/sing-box/1.13.12',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',
@@ -163,7 +163,10 @@ class ProfileImporter {
       return [jsonProfile.withExpiresAt(defaultExpiresAt)];
     }
 
-    final jsonLinks = _tryParseJsonLinks(text, defaultExpiresAt: defaultExpiresAt);
+    final jsonLinks = _tryParseJsonLinks(
+      text,
+      defaultExpiresAt: defaultExpiresAt,
+    );
     if (jsonLinks.isNotEmpty) {
       return jsonLinks;
     }
@@ -210,7 +213,10 @@ class ProfileImporter {
 
       final decodedLinks = _extractLinks(decoded);
       if (decodedLinks.isNotEmpty) {
-        return _profilesFromLinks(decodedLinks, defaultExpiresAt: defaultExpiresAt);
+        return _profilesFromLinks(
+          decodedLinks,
+          defaultExpiresAt: defaultExpiresAt,
+        );
       }
     }
 
@@ -263,7 +269,8 @@ class ProfileImporter {
         if (links is List) {
           return _profilesFromLinks(
             links.whereType<String>().toList(),
-            defaultExpiresAt: _extractExpiryFromJson(decoded) ?? defaultExpiresAt,
+            defaultExpiresAt:
+                _extractExpiryFromJson(decoded) ?? defaultExpiresAt,
           );
         }
       }
@@ -309,8 +316,8 @@ class ProfileImporter {
               _profileFromXrayVless(
                 config,
                 outbound,
-                defaultExpiresAt: _extractExpiryFromJson(config) ??
-                    defaultExpiresAt,
+                defaultExpiresAt:
+                    _extractExpiryFromJson(config) ?? defaultExpiresAt,
               ),
             );
           }
@@ -326,8 +333,7 @@ class ProfileImporter {
 
   VpnProfile _profileFromXrayVless(
     Map<String, dynamic> config,
-    Map<String, dynamic> outbound,
-    {
+    Map<String, dynamic> outbound, {
     DateTime? defaultExpiresAt,
   }) {
     final settings = _asMap(outbound['settings']);
@@ -424,35 +430,15 @@ class ProfileImporter {
       try {
         final lower = link.toLowerCase();
         if (lower.startsWith('vless://')) {
-          profiles.add(
-            _parseVless(
-              link,
-              expiresAt: defaultExpiresAt,
-            ),
-          );
+          profiles.add(_parseVless(link, expiresAt: defaultExpiresAt));
         } else if (lower.startsWith('naive+https://') ||
             lower.startsWith('naive://')) {
-          profiles.add(
-            _parseNaive(
-              link,
-              expiresAt: defaultExpiresAt,
-            ),
-          );
+          profiles.add(_parseNaive(link, expiresAt: defaultExpiresAt));
         } else if (lower.startsWith('hysteria2://') ||
             lower.startsWith('hy2://')) {
-          profiles.add(
-            _parseHysteria2(
-              link,
-              expiresAt: defaultExpiresAt,
-            ),
-          );
+          profiles.add(_parseHysteria2(link, expiresAt: defaultExpiresAt));
         } else if (lower.startsWith('hysteria://')) {
-          profiles.add(
-            _parseHysteria(
-              link,
-              expiresAt: defaultExpiresAt,
-            ),
-          );
+          profiles.add(_parseHysteria(link, expiresAt: defaultExpiresAt));
         }
       } on Object catch (error) {
         errors.add('$link: $error');
@@ -465,10 +451,7 @@ class ProfileImporter {
     return profiles;
   }
 
-  VpnProfile _parseVless(
-    String link, {
-    DateTime? expiresAt,
-  }) {
+  VpnProfile _parseVless(String link, {DateTime? expiresAt}) {
     final uri = Uri.parse(link);
     final uuid = Uri.decodeComponent(uri.userInfo);
     if (uuid.isEmpty || uri.host.isEmpty) {
@@ -549,10 +532,7 @@ class ProfileImporter {
     );
   }
 
-  VpnProfile _parseNaive(
-    String link, {
-    DateTime? expiresAt,
-  }) {
+  VpnProfile _parseNaive(String link, {DateTime? expiresAt}) {
     final normalized = link.toLowerCase().startsWith('naive+')
         ? link.substring('naive+'.length)
         : link;
@@ -603,10 +583,7 @@ class ProfileImporter {
     );
   }
 
-  VpnProfile _parseHysteria(
-    String link, {
-    DateTime? expiresAt,
-  }) {
+  VpnProfile _parseHysteria(String link, {DateTime? expiresAt}) {
     final uri = Uri.parse(link);
     if (uri.host.isEmpty || !uri.hasPort) {
       throw const ProfileImportException('Hysteria ссылка без host или port.');
@@ -662,10 +639,7 @@ class ProfileImporter {
     );
   }
 
-  VpnProfile _parseHysteria2(
-    String link, {
-    DateTime? expiresAt,
-  }) {
+  VpnProfile _parseHysteria2(String link, {DateTime? expiresAt}) {
     final normalized = link.toLowerCase().startsWith('hy2://')
         ? 'hysteria2://${link.substring('hy2://'.length)}'
         : link;
@@ -737,7 +711,7 @@ class ProfileImporter {
           key == 'subscription-info' ||
           key == 'expire' ||
           key == 'expires') {
-          candidates.addAll(values);
+        candidates.addAll(values);
       }
     });
 
@@ -851,8 +825,9 @@ class ProfileImporter {
       return parsedIso.isUtc ? parsedIso.toLocal() : parsedIso;
     }
 
-    final dateMatch = RegExp(r'^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T]|$)')
-        .firstMatch(source);
+    final dateMatch = RegExp(
+      r'^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T]|$)',
+    ).firstMatch(source);
     if (dateMatch != null) {
       final parsedDate = DateTime.tryParse(dateMatch.group(1)!);
       if (parsedDate != null) {

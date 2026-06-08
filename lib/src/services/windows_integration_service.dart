@@ -62,7 +62,7 @@ class WindowsIntegrationService {
         isAutoStartTaskInstalledXml(currentXml) &&
         !isAutoStartTaskHealthyXml(currentXml)) {
       try {
-        await setAutoStart(true);
+        await setAutoStart(true, requestElevation: false);
       } on Object {
         // The app may be opened without elevation. In that case the UI should
         // keep working and let the user reinstall or toggle startup later.
@@ -72,42 +72,121 @@ class WindowsIntegrationService {
     final legacyXml = await _queryTaskXml(_legacyTaskName);
     if (legacyXml != null && isAutoStartTaskInstalledXml(legacyXml)) {
       try {
-        await setAutoStart(true);
+        await setAutoStart(true, requestElevation: false);
       } on Object {
         // Same best-effort behavior as the regular startup repair.
       }
     }
   }
 
-  Future<void> setAutoStart(bool enabled) async {
+  Future<void> setAutoStart(
+    bool enabled, {
+    bool requestElevation = true,
+  }) async {
     if (!Platform.isWindows) {
       return;
     }
 
     if (!enabled) {
-      final result = await _deleteTask(_taskName);
-      await _deleteTask(_legacyTaskName);
-      if (result.exitCode != 0 && !await isAutoStartEnabled()) {
-        return;
-      }
+      await _runStartupTaskScript(
+        _deleteStartupTaskScript(),
+        requestElevation: requestElevation,
+      );
       return;
     }
 
     final executable = Platform.resolvedExecutable;
+    await _runStartupTaskScript(
+      _createStartupTaskScript(executable),
+      requestElevation: requestElevation,
+    );
+  }
+
+  Future<void> _runStartupTaskScript(
+    String script, {
+    required bool requestElevation,
+  }) async {
+    final elevated = await _isCurrentProcessElevated();
+    if (elevated) {
+      final result = await Process.run('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ]);
+      if (result.exitCode != 0) {
+        final error = '${result.stderr}${result.stdout}'.trim();
+        throw StateError(
+          error.isEmpty ? 'Could not update startup task.' : error,
+        );
+      }
+      return;
+    }
+
+    if (!requestElevation) {
+      throw StateError('Administrator rights are required.');
+    }
+
+    await _runPowerShellScriptAsAdmin(script);
+  }
+
+  Future<void> _runPowerShellScriptAsAdmin(String script) async {
+    final dir = Directory('${Directory.systemTemp.path}\\YurichConnect');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    final file = File(
+      '${dir.path}\\startup_${DateTime.now().millisecondsSinceEpoch}.ps1',
+    );
+    await file.writeAsString(script, flush: true);
+    try {
+      final filePath = _quotePowerShell(file.path);
+      final result = await Process.run('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        '''
+\$ErrorActionPreference = 'Stop'
+\$process = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$filePath) -Verb RunAs -Wait -PassThru
+if (\$null -eq \$process) { exit 1 }
+exit \$process.ExitCode
+''',
+      ]);
+      if (result.exitCode != 0) {
+        final error = '${result.stderr}${result.stdout}'.trim();
+        throw StateError(
+          error.isEmpty
+              ? 'Windows UAC did not allow startup task update.'
+              : error,
+        );
+      }
+    } finally {
+      try {
+        await file.delete();
+      } on Object {
+        // Best effort cleanup.
+      }
+    }
+  }
+
+  Future<bool> _isCurrentProcessElevated() async {
     final result = await Process.run('powershell', [
       '-NoProfile',
       '-ExecutionPolicy',
       'Bypass',
       '-Command',
-      _createStartupTaskScript(executable),
+      '''
+\$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+\$principal = [Security.Principal.WindowsPrincipal]::new(\$identity)
+\$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+''',
     ]);
     if (result.exitCode != 0) {
-      final error = '${result.stderr}${result.stdout}'.trim();
-      throw StateError(
-        error.isEmpty ? 'Could not create startup task.' : error,
-      );
+      return false;
     }
-    await _deleteTask(_legacyTaskName);
+    return '${result.stdout}'.trim().toLowerCase() == 'true';
   }
 
   Future<WindowsUpdateInfo> checkForUpdate(String currentVersion) async {
@@ -280,12 +359,19 @@ class WindowsIntegrationService {
     return '${result.stdout}${result.stderr}';
   }
 
-  Future<ProcessResult> _deleteTask(String taskName) {
-    return Process.run('schtasks', ['/Delete', '/TN', taskName, '/F']);
+  static String _deleteStartupTaskScript() {
+    final taskName = _quotePowerShell(_taskName);
+    final legacyTaskName = _quotePowerShell(_legacyTaskName);
+    return '''
+\$ErrorActionPreference = 'Stop'
+Unregister-ScheduledTask -TaskName $taskName -Confirm:\$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction SilentlyContinue
+''';
   }
 
   static String _createStartupTaskScript(String executable) {
     final taskName = _quotePowerShell(_taskName);
+    final legacyTaskName = _quotePowerShell(_legacyTaskName);
     final exe = _quotePowerShell(executable);
     final workingDirectory = _quotePowerShell(File(executable).parent.path);
     final delay = _quotePowerShell(_startupDelayIso8601);
@@ -297,6 +383,7 @@ class WindowsIntegrationService {
 \$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
 \$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $taskName -Action \$action -Trigger \$trigger -Principal \$principal -Settings \$settings -Force | Out-Null
+Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction SilentlyContinue
 ''';
   }
 
