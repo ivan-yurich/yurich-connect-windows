@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.26';
+const _appVersion = '1.0.27';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -2410,7 +2410,10 @@ class _StatusPanel extends StatelessWidget {
                 child: Row(
                   children: [
                     Expanded(
-                      child: _Metric(label: '↑', value: uplink),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: _Metric(label: '↑', value: uplink),
+                      ),
                     ),
                     const SizedBox(width: 14),
                     _SessionDial(
@@ -2420,7 +2423,10 @@ class _StatusPanel extends StatelessWidget {
                     ),
                     const SizedBox(width: 14),
                     Expanded(
-                      child: _Metric(label: '↓', value: downlink),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: _Metric(label: '↓', value: downlink),
+                      ),
                     ),
                   ],
                 ),
@@ -2436,19 +2442,41 @@ class _StatusPanel extends StatelessWidget {
 class _Metric extends StatelessWidget {
   const _Metric({required this.label, required this.value});
 
+  static const _width = 100.0;
+  static const _height = 38.0;
+
   final String label;
   final String value;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: _surfaceMetric,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: _gold.withValues(alpha: 0.18)),
+    return SizedBox(
+      width: _width,
+      height: _height,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _surfaceMetric,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: _gold.withValues(alpha: 0.18)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Center(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                '$label $value',
+                maxLines: 1,
+                softWrap: false,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
-      child: Text('$label $value'),
     );
   }
 }
