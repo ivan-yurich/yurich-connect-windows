@@ -9,6 +9,7 @@ class ProfileStore {
   static const _selectedProfileKey = 'selectedProfileId';
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
+  static const _subscriptionSourcesKey = 'subscriptionSources';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
@@ -72,6 +73,23 @@ class ProfileStore {
   Future<void> saveAutoConnect(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_autoConnectKey, enabled);
+  }
+
+  Future<List<String>> loadSubscriptionSources() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(_subscriptionSourcesKey) ?? const [];
+  }
+
+  Future<void> saveSubscriptionSources(List<String> sources) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized =
+        sources
+            .map((source) => source.trim())
+            .where((source) => source.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+    await prefs.setStringList(_subscriptionSourcesKey, normalized);
   }
 
   Future<List<String>> loadSplitTunnelExcludedProcesses() async {

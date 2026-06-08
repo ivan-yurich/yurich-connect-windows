@@ -32,7 +32,7 @@ void main() {
       expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
     });
 
-    test('rejects old elevated task without startup delay', () {
+    test('accepts elevated immediate task without startup delay field', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -40,6 +40,45 @@ void main() {
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
+  <Actions>
+    <Exec>
+      <Command>C:\Program Files\Yurich Connect\YurichConnect.exe</Command>
+      <WorkingDirectory>C:\Program Files\Yurich Connect</WorkingDirectory>
+    </Exec>
+  </Actions>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+</Task>
+''';
+
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
+      expect(
+        WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
+        isTrue,
+      );
+    });
+
+    test('rejects old task with non-zero startup delay', () {
+      const xml = r'''
+<Task>
+  <Principals>
+    <Principal>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <LogonTrigger>
+      <Delay>PT30S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Actions>
+    <Exec>
+      <Command>C:\Program Files\Yurich Connect\YurichConnect.exe</Command>
+      <WorkingDirectory>C:\Program Files\Yurich Connect</WorkingDirectory>
+    </Exec>
+  </Actions>
   <Settings>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>

@@ -30,7 +30,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.24';
+const _appVersion = '1.0.25';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -160,10 +160,12 @@ class _HomeScreenState extends State<HomeScreen>
   bool _quitFromTray = false;
   List<String> _splitTunnelExcludedProcesses = const [];
   List<String> _vpnOnlyProcesses = ProfileStore.defaultVpnOnlyProcesses;
+  List<String> _subscriptionSources = const [];
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
   DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
+  bool _refreshingSubscriptions = false;
   String? _lastConfigSummary;
   final List<_HealthProbeAttempt> _healthProbeHistory = [];
   final _logs = <String>[];
@@ -360,6 +362,20 @@ class _HomeScreenState extends State<HomeScreen>
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
     final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
+    var subscriptionSources = await _store.loadSubscriptionSources();
+    final inferredSubscriptionSources = _extractSubscriptionSourcesFromProfiles(
+      profiles,
+    );
+    if (inferredSubscriptionSources.isNotEmpty) {
+      final mergedSources = _mergeSubscriptionSources([
+        ...subscriptionSources,
+        ...inferredSubscriptionSources,
+      ]);
+      if (mergedSources.length != subscriptionSources.length) {
+        subscriptionSources = mergedSources;
+        await _store.saveSubscriptionSources(subscriptionSources);
+      }
+    }
     if (Platform.isWindows) {
       await _windowsIntegration.repairAutoStartIfNeeded();
     }
@@ -382,6 +398,7 @@ class _HomeScreenState extends State<HomeScreen>
       _autoStart = autoStart;
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
       _vpnOnlyProcesses = vpnOnlyProcesses;
+      _subscriptionSources = subscriptionSources;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -644,11 +661,18 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _importText(String text) async {
     await _runBusy(() async {
+      final subscriptionSource = _normalizeSubscriptionSource(text);
       final imported = await _importer.importFromText(text);
       if (imported.isEmpty) {
         throw ProfileImportException(s.nothingToImport);
       }
 
+      final subscriptionSources = subscriptionSource == null
+          ? _subscriptionSources
+          : _mergeSubscriptionSources([
+              ..._subscriptionSources,
+              subscriptionSource,
+            ]);
       final merged = <String, VpnProfile>{
         for (final profile in _profiles) profile.id: profile,
         for (final profile in imported) profile.id: profile,
@@ -656,6 +680,9 @@ class _HomeScreenState extends State<HomeScreen>
 
       await _store.saveProfiles(merged);
       await _store.saveSelectedProfileId(imported.first.id);
+      if (subscriptionSource != null) {
+        await _store.saveSubscriptionSources(subscriptionSources);
+      }
       _manualController.clear();
 
       if (!mounted) {
@@ -663,6 +690,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
       setState(() {
         _profiles = merged;
+        _subscriptionSources = subscriptionSources;
         _selectedProfileId = imported.first.id;
         _serverLatencyLastUpdated = null;
         _message = s.imported(imported.length);
@@ -671,6 +699,93 @@ class _HomeScreenState extends State<HomeScreen>
       unawaited(_refreshServerLatencies());
       _showSnack(s.importedProfiles(imported.length));
     });
+  }
+
+  Future<void> _refreshSubscriptions() async {
+    if (_busy || _refreshingSubscriptions) {
+      return;
+    }
+
+    final sources = _mergeSubscriptionSources([
+      ..._subscriptionSources,
+      ..._extractSubscriptionSourcesFromProfiles(_profiles),
+    ]);
+    if (sources.isEmpty) {
+      _showSnack(s.noSubscriptionSources);
+      await _showImportSheet();
+      return;
+    }
+
+    setState(() {
+      _refreshingSubscriptions = true;
+      _message = s.refreshingSubscriptions;
+    });
+
+    final imported = <VpnProfile>[];
+    final errors = <String>[];
+    try {
+      for (final source in sources) {
+        try {
+          imported.addAll(await _importer.importFromText(source));
+        } on Object catch (error) {
+          errors.add(
+            '${_redactSensitive(source)}: ${_redactSensitive('$error')}',
+          );
+        }
+      }
+
+      if (imported.isEmpty) {
+        final message = errors.isEmpty ? s.nothingToImport : errors.first;
+        throw ProfileImportException(message);
+      }
+
+      final merged = <String, VpnProfile>{
+        for (final profile in _profiles) profile.id: profile,
+        for (final profile in imported) profile.id: profile,
+      }.values.toList();
+      final selectedProfileId =
+          _selectedProfileId != null &&
+              merged.any((profile) => profile.id == _selectedProfileId)
+          ? _selectedProfileId
+          : imported.first.id;
+
+      await _store.saveProfiles(merged);
+      await _store.saveSelectedProfileId(selectedProfileId);
+      await _store.saveSubscriptionSources(sources);
+
+      if (!mounted) {
+        return;
+      }
+      final message = errors.isEmpty
+          ? s.subscriptionsUpdated(imported.length, sources.length)
+          : s.subscriptionsUpdatedPartial(imported.length, errors.length);
+      setState(() {
+        _profiles = merged;
+        _subscriptionSources = sources;
+        _selectedProfileId = selectedProfileId;
+        _serverLatencyLastUpdated = null;
+        _message = message;
+      });
+      for (final error in errors.take(3)) {
+        _queueLog('Subscription refresh warning: $error');
+      }
+      unawaited(_refreshTrayMenu());
+      unawaited(_refreshServerLatencies());
+      _showSnack(message);
+    } on Object catch (error) {
+      final message = _redactSensitive('$error');
+      if (mounted) {
+        setState(() {
+          _lastError = message;
+          _message = message;
+        });
+        _showSnack(message);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _refreshingSubscriptions = false);
+      }
+    }
   }
 
   Future<void> _refreshServerLatencies() async {
@@ -1424,7 +1539,9 @@ class _HomeScreenState extends State<HomeScreen>
         _message = enabled ? s.autoStartEnabled : s.autoStartDisabled;
       });
     } on Object catch (e) {
+      final enabled = await _windowsIntegration.isAutoStartEnabled();
       if (mounted) {
+        setState(() => _autoStart = enabled);
         _showSnack('${s.autoStartFailed}: ${_redactSensitive('$e')}');
       }
     } finally {
@@ -1638,6 +1755,44 @@ class _HomeScreenState extends State<HomeScreen>
         .toList();
     items.sort();
     return items;
+  }
+
+  List<String> _extractSubscriptionSourcesFromProfiles(
+    List<VpnProfile> profiles,
+  ) {
+    return _mergeSubscriptionSources(
+      profiles
+          .map((profile) => profile.originalInput)
+          .map(_normalizeSubscriptionSource)
+          .whereType<String>(),
+    );
+  }
+
+  List<String> _mergeSubscriptionSources(Iterable<String> sources) {
+    final normalized =
+        sources
+            .map(_normalizeSubscriptionSource)
+            .whereType<String>()
+            .toSet()
+            .toList()
+          ..sort();
+    return normalized;
+  }
+
+  String? _normalizeSubscriptionSource(String value) {
+    final text = value.trim();
+    if (text.isEmpty ||
+        text.length > 4096 ||
+        text.contains(RegExp(r'\s')) ||
+        text.contains(RegExp(r'^(?:vless|naive|hysteria2|hy2|hysteria)://'))) {
+      return null;
+    }
+
+    final uri = Uri.tryParse(text);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return null;
+    }
+    return uri.toString();
   }
 
   String _profileKindLabel(VpnProfileKind kind) {
@@ -2093,10 +2248,13 @@ class _HomeScreenState extends State<HomeScreen>
                     selectedId: selected?.id,
                     serverLatencies: _serverLatencies,
                     checkingServerLatency: _checkingServerLatency,
+                    refreshingSubscriptions: _refreshingSubscriptions,
                     showAllProfiles: _showAllProfiles,
                     selectedFilter: _profileFilter,
                     onSelect: _selectProfile,
                     onAdd: _showImportSheet,
+                    onRefreshSubscriptions: () =>
+                        unawaited(_refreshSubscriptions()),
                     onCopy: selected == null ? null : _copySelected,
                     onQr: selected == null ? null : _showQr,
                     onDeleteProfile: (profile) =>
@@ -2372,10 +2530,12 @@ class _ProfilePanel extends StatelessWidget {
     required this.selectedId,
     required this.serverLatencies,
     required this.checkingServerLatency,
+    required this.refreshingSubscriptions,
     required this.showAllProfiles,
     required this.selectedFilter,
     required this.onSelect,
     required this.onAdd,
+    required this.onRefreshSubscriptions,
     required this.onCopy,
     required this.onQr,
     required this.onDeleteProfile,
@@ -2390,10 +2550,12 @@ class _ProfilePanel extends StatelessWidget {
   final String? selectedId;
   final Map<String, _ServerLatencyResult> serverLatencies;
   final bool checkingServerLatency;
+  final bool refreshingSubscriptions;
   final bool showAllProfiles;
   final _ProfileFilter selectedFilter;
   final ValueChanged<VpnProfile> onSelect;
   final VoidCallback onAdd;
+  final VoidCallback onRefreshSubscriptions;
   final VoidCallback? onCopy;
   final VoidCallback? onQr;
   final ValueChanged<VpnProfile> onDeleteProfile;
@@ -2422,6 +2584,18 @@ class _ProfilePanel extends StatelessWidget {
               tooltip: strings.addProfile,
               onPressed: onAdd,
               icon: const Icon(Icons.add_link),
+            ),
+            IconButton(
+              tooltip: strings.refreshSubscriptions,
+              onPressed: refreshingSubscriptions
+                  ? null
+                  : onRefreshSubscriptions,
+              icon: refreshingSubscriptions
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.sync),
             ),
             IconButton(
               tooltip: strings.showQr,
@@ -3169,6 +3343,9 @@ class _Strings {
     required this.scanQr,
     required this.qrCameraUnavailable,
     required this.pasteFromClipboard,
+    required this.refreshSubscriptions,
+    required this.refreshingSubscriptions,
+    required this.noSubscriptionSources,
     required this.language,
     required this.connected,
     required this.connecting,
@@ -3261,6 +3438,9 @@ class _Strings {
   final String scanQr;
   final String qrCameraUnavailable;
   final String pasteFromClipboard;
+  final String refreshSubscriptions;
+  final String refreshingSubscriptions;
+  final String noSubscriptionSources;
   final String language;
   final String connected;
   final String connecting;
@@ -3345,6 +3525,23 @@ class _Strings {
     _Strings.en => 'Profiles imported: $count',
     _ => 'Импортировано профилей: $count',
   };
+
+  String subscriptionsUpdated(
+    int profileCount,
+    int sourceCount,
+  ) => switch (this) {
+    _Strings.en =>
+      'Subscriptions updated: $profileCount profiles from $sourceCount sources',
+    _ =>
+      'Подписки обновлены: $profileCount профилей из $sourceCount источников',
+  };
+
+  String subscriptionsUpdatedPartial(int profileCount, int errorCount) =>
+      switch (this) {
+        _Strings.en =>
+          'Updated $profileCount profiles. Subscription errors: $errorCount',
+        _ => 'Обновлено профилей: $profileCount. Ошибок подписок: $errorCount',
+      };
 
   String selectedProfile(String name) => switch (this) {
     _Strings.en => 'Selected profile: $name',
@@ -3500,6 +3697,10 @@ class _Strings {
     qrCameraUnavailable:
         'На Windows пока импортируй QR как текст: вставь ссылку вручную или из буфера.',
     pasteFromClipboard: 'Вставить из буфера',
+    refreshSubscriptions: 'Обновить подписки',
+    refreshingSubscriptions: 'Обновляю подписки...',
+    noSubscriptionSources:
+        'Сначала добавь подписку ссылкой. Я пока не вижу сохранённого URL.',
     language: 'Язык',
     connected: 'Подключено',
     connecting: 'Подключаюсь',
@@ -3630,6 +3831,10 @@ class _Strings {
     qrCameraUnavailable:
         'On Windows, import QR content as text: paste the link manually or from clipboard.',
     pasteFromClipboard: 'Paste from clipboard',
+    refreshSubscriptions: 'Refresh subscriptions',
+    refreshingSubscriptions: 'Refreshing subscriptions...',
+    noSubscriptionSources:
+        'Add a subscription URL first. No saved subscription source was found.',
     language: 'Language',
     connected: 'Connected',
     connecting: 'Connecting',

@@ -374,12 +374,10 @@ Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction
     final legacyTaskName = _quotePowerShell(_legacyTaskName);
     final exe = _quotePowerShell(executable);
     final workingDirectory = _quotePowerShell(File(executable).parent.path);
-    final delay = _quotePowerShell(_startupDelayIso8601);
     return '''
 \$ErrorActionPreference = 'Stop'
 \$action = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $workingDirectory
 \$trigger = New-ScheduledTaskTrigger -AtLogOn
-\$trigger.Delay = $delay
 \$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
 \$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $taskName -Action \$action -Trigger \$trigger -Principal \$principal -Settings \$settings -Force | Out-Null
@@ -394,10 +392,16 @@ Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction
 
   static bool isAutoStartTaskHealthyXml(String xml) {
     final normalized = xml.toLowerCase();
+    final delays =
+        RegExp(r'<delay>\s*([^<]+?)\s*</delay>', caseSensitive: false)
+            .allMatches(normalized)
+            .map((match) => (match[1] ?? '').trim())
+            .where((delay) => delay.isNotEmpty);
+    final hasUnsupportedDelay = delays.any(
+      (delay) => delay != _startupDelayIso8601.toLowerCase(),
+    );
     return isAutoStartTaskInstalledXml(xml) &&
-        normalized.contains(
-          '<delay>$_startupDelayIso8601</delay>'.toLowerCase(),
-        ) &&
+        !hasUnsupportedDelay &&
         normalized.contains('<workingdirectory>') &&
         !normalized.contains(
           '<disallowstartifonbatteries>true</disallowstartifonbatteries>',
