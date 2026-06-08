@@ -33,6 +33,53 @@ const _supportEmail = 'ai@ivan-it.net';
 const _appVersion = '1.0.22';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
+const _statusPanelHeight = 176.0;
+const _healthWatchdogTick = Duration(seconds: 20);
+const _healthWatchdogStartupGrace = Duration(seconds: 30);
+const _healthWatchdogRetryGrace = Duration(seconds: 60);
+const _healthWatchdogFailureLimit = 3;
+const _healthWatchdogActiveTrafficFailureWindow = Duration(minutes: 1);
+const _healthWatchdogProbeAttempts = 2;
+const _healthWatchdogProbeDelay = Duration(milliseconds: 350);
+const _serverLatencyCacheTtl = Duration(minutes: 8);
+const _healthProbeHistoryWindow = Duration(hours: 1);
+const _healthProbeHistoryLimit = 240;
+
+class _HealthProbeAttempt {
+  const _HealthProbeAttempt({
+    required this.timestamp,
+    required this.endpoint,
+    required this.endpointIndex,
+    required this.attempt,
+    required this.duration,
+    required this.success,
+    this.statusCode,
+    this.errorType,
+    this.errorMessage,
+  });
+
+  final DateTime timestamp;
+  final Uri endpoint;
+  final int endpointIndex;
+  final int attempt;
+  final Duration duration;
+  final bool success;
+  final int? statusCode;
+  final String? errorType;
+  final String? errorMessage;
+}
+
+class _HealthProbeResult {
+  const _HealthProbeResult({
+    required this.success,
+    required this.attempts,
+    required this.lastFailure,
+  });
+
+  final bool success;
+  final List<_HealthProbeAttempt> attempts;
+  final _HealthProbeAttempt? lastFailure;
+}
 
 class _ConnectionConfigPlan {
   const _ConnectionConfigPlan(this.naiveMode, this.label);
@@ -104,13 +151,16 @@ class _HomeScreenState extends State<HomeScreen>
   bool _showAllProfiles = false;
   bool _healthWatchdogRestarting = false;
   int _healthWatchdogFailures = 0;
+  DateTime? _healthWatchdogCooldownUntil;
   bool _quitFromTray = false;
   List<String> _splitTunnelExcludedProcesses = const [];
   List<String> _vpnOnlyProcesses = ProfileStore.defaultVpnOnlyProcesses;
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
+  DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
   String? _lastConfigSummary;
+  final List<_HealthProbeAttempt> _healthProbeHistory = [];
   final _logs = <String>[];
   final _pendingLogs = <String>[];
 
@@ -322,10 +372,12 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _autoConnectWithRetry(String profileId) async {
     const delays = [
-      Duration(seconds: 2),
+      Duration.zero,
+      Duration(seconds: 1),
+      Duration(seconds: 3),
       Duration(seconds: 8),
-      Duration(seconds: 20),
-      Duration(seconds: 40),
+      Duration(seconds: 16),
+      Duration(seconds: 32),
     ];
 
     for (var attempt = 0; attempt < delays.length; attempt += 1) {
@@ -563,14 +615,15 @@ class _HomeScreenState extends State<HomeScreen>
       await _store.saveSelectedProfileId(imported.first.id);
       _manualController.clear();
 
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _profiles = merged;
-        _selectedProfileId = imported.first.id;
-        _message = s.imported(imported.length);
-      });
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _profiles = merged;
+      _selectedProfileId = imported.first.id;
+      _serverLatencyLastUpdated = null;
+      _message = s.imported(imported.length);
+    });
       unawaited(_refreshTrayMenu());
       unawaited(_refreshServerLatencies());
       _showSnack(s.importedProfiles(imported.length));
@@ -579,6 +632,11 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _refreshServerLatencies() async {
     if (_checkingServerLatency || _profiles.isEmpty) {
+      return;
+    }
+    final lastUpdated = _serverLatencyLastUpdated;
+    if (lastUpdated != null &&
+        DateTime.now().difference(lastUpdated) < _serverLatencyCacheTtl) {
       return;
     }
     if (mounted) {
@@ -592,6 +650,7 @@ class _HomeScreenState extends State<HomeScreen>
     setState(() {
       _serverLatencies = results;
       _checkingServerLatency = false;
+      _serverLatencyLastUpdated = DateTime.now();
     });
   }
 
@@ -712,12 +771,13 @@ class _HomeScreenState extends State<HomeScreen>
     var connected = false;
     final plans = _connectionPlans(profile);
 
-    for (
+  for (
       var planIndex = 0;
       planIndex < plans.length && !connected;
       planIndex += 1
     ) {
       final plan = plans[planIndex];
+      String? lastProbeFailureReason;
       final config = _configBuilder.build(
         profile,
         target: _vpnEngine.configTarget,
@@ -766,11 +826,26 @@ class _HomeScreenState extends State<HomeScreen>
             YurichConnectStatus.started,
           }, timeout: const Duration(seconds: 14));
           if (finalStatus == YurichConnectStatus.started) {
-            if (_vpnEngine.configTarget != SingBoxConfigTarget.windows ||
-                await _probeLocalMixedProxy()) {
+            final probeResult = _vpnEngine.configTarget !=
+                    SingBoxConfigTarget.windows
+                ? const _HealthProbeResult(
+                    success: true,
+                    attempts: <_HealthProbeAttempt>[],
+                    lastFailure: null,
+                  )
+                : await _probeLocalMixedProxy();
+            if (probeResult.success) {
               connected = true;
               break;
             }
+            final probeInfo = _healthProbeDescription(probeResult.lastFailure);
+            final p99Latency = _healthProbeP99LatencyMs();
+            final attemptCount = probeResult.attempts.length;
+            lastProbeFailureReason = probeInfo;
+            _queueLog(
+              'VPN start probe failed for ${plan.label}: $probeInfo. '
+              'attempts=$attemptCount, p99=${_formatLatency(p99Latency)}.',
+            );
             lastStartError = s.connectionProbeFailed;
           } else {
             lastStartError = s.vpnNotConnected(finalStatus);
@@ -781,7 +856,7 @@ class _HomeScreenState extends State<HomeScreen>
 
         if (!connected) {
           _queueLog(
-            'VPN start retry [$attempt/${plan.label}]: '
+            'VPN start retry [attempt=$attempt/2 · ${plan.label}]: '
             '${_redactSensitive('$lastStartError')}',
           );
           await _stopVpnCore(updateMessage: false);
@@ -795,7 +870,12 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       if (!connected && planIndex < plans.length - 1) {
-        _queueLog('Naive mode fallback: ${plan.label} did not pass probe.');
+        final fallbackProbeInfo = _healthProbeP99LatencyMs();
+        _queueLog(
+          'Naive mode fallback: ${plan.label} did not pass probe. '
+          '${lastProbeFailureReason == null ? '' : 'Last failure: $lastProbeFailureReason. '}'
+          'p99=${_formatLatency(fallbackProbeInfo)}.',
+        );
         await Future<void>.delayed(const Duration(milliseconds: 800));
       }
     }
@@ -850,7 +930,9 @@ class _HomeScreenState extends State<HomeScreen>
     ];
   }
 
-  Future<bool> _probeLocalMixedProxy({bool logFailures = true}) async {
+  Future<_HealthProbeResult> _probeLocalMixedProxy({
+    bool logFailures = true,
+  }) async {
     final endpoints = <({Uri uri, bool allowCertificateMismatch})>[
       (
         uri: Uri.https('cp.cloudflare.com', '/generate_204'),
@@ -862,58 +944,205 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     ];
 
-    for (final endpoint in endpoints) {
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 3)
-        ..badCertificateCallback = endpoint.allowCertificateMismatch
-            ? (_, host, _) => host == endpoint.uri.host
-            : null
-        ..findProxy = (_) =>
-            'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
-      try {
-        final request = await client
-            .getUrl(endpoint.uri)
-            .timeout(const Duration(seconds: 3));
-        request.headers.set(
-          HttpHeaders.userAgentHeader,
-          'YurichConnect/$_appVersion',
-        );
-        request.followRedirects = false;
-        final response = await request.close().timeout(
-          const Duration(seconds: 4),
-        );
-        await response.drain<void>().timeout(
-          const Duration(seconds: 2),
-          onTimeout: () {},
-        );
-        if (response.statusCode >= 200 && response.statusCode < 400) {
-          return true;
+    final attempts = <_HealthProbeAttempt>[];
+
+    for (var endpointIndex = 0;
+        endpointIndex < endpoints.length;
+        endpointIndex += 1) {
+      final endpoint = endpoints[endpointIndex];
+      for (var attempt = 1;
+          attempt <= _healthWatchdogProbeAttempts;
+          attempt += 1) {
+        final startedAt = DateTime.now();
+        final stopwatch = Stopwatch()..start();
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 3)
+          ..badCertificateCallback = endpoint.allowCertificateMismatch
+              ? (_, host, _) => host == endpoint.uri.host
+              : null
+          ..findProxy = (_) =>
+              'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+        _HealthProbeAttempt? attemptLog;
+        try {
+          final request = await client
+              .getUrl(endpoint.uri)
+              .timeout(const Duration(seconds: 3));
+          request.headers.set(
+            HttpHeaders.userAgentHeader,
+            'YurichConnect/$_appVersion',
+          );
+          request.followRedirects = false;
+          final response = await request.close().timeout(
+            const Duration(seconds: 4),
+          );
+          await response.drain<void>().timeout(
+            const Duration(seconds: 2),
+            onTimeout: () {},
+          );
+          attemptLog = _HealthProbeAttempt(
+            timestamp: startedAt,
+            endpoint: endpoint.uri,
+            endpointIndex: endpointIndex,
+            attempt: attempt,
+            duration: stopwatch.elapsed,
+            success: response.statusCode >= 200 && response.statusCode < 400,
+            statusCode: response.statusCode,
+          );
+        } on TimeoutException catch (error) {
+          attemptLog = _HealthProbeAttempt(
+            timestamp: startedAt,
+            endpoint: endpoint.uri,
+            endpointIndex: endpointIndex,
+            attempt: attempt,
+            duration: stopwatch.elapsed,
+            success: false,
+            errorType: 'timeout',
+            errorMessage: _redactSensitive('$error'),
+          );
+        } on SocketException catch (error) {
+          attemptLog = _HealthProbeAttempt(
+            timestamp: startedAt,
+            endpoint: endpoint.uri,
+            endpointIndex: endpointIndex,
+            attempt: attempt,
+            duration: stopwatch.elapsed,
+            success: false,
+            errorType: 'socket',
+            errorMessage: _redactSensitive('$error'),
+          );
+        } on HandshakeException catch (error) {
+          attemptLog = _HealthProbeAttempt(
+            timestamp: startedAt,
+            endpoint: endpoint.uri,
+            endpointIndex: endpointIndex,
+            attempt: attempt,
+            duration: stopwatch.elapsed,
+            success: false,
+            errorType: 'tls',
+            errorMessage: _redactSensitive('$error'),
+          );
+        } on HttpException catch (error) {
+          attemptLog = _HealthProbeAttempt(
+            timestamp: startedAt,
+            endpoint: endpoint.uri,
+            endpointIndex: endpointIndex,
+            attempt: attempt,
+            duration: stopwatch.elapsed,
+            success: false,
+            errorType: 'http',
+            errorMessage: _redactSensitive('$error'),
+          );
+        } on Object catch (error) {
+          attemptLog = _HealthProbeAttempt(
+            timestamp: startedAt,
+            endpoint: endpoint.uri,
+            endpointIndex: endpointIndex,
+            attempt: attempt,
+            duration: stopwatch.elapsed,
+            success: false,
+            errorType: 'unknown',
+            errorMessage: _redactSensitive('$error'),
+          );
+        } finally {
+          client.close(force: true);
+          stopwatch.stop();
         }
-        if (logFailures) {
-          _queueLog(
-            'VPN health probe HTTP ${response.statusCode}: ${endpoint.uri}',
+
+        if (attemptLog == null) {
+          continue;
+        }
+
+        attempts.add(attemptLog);
+        _recordHealthProbeAttempt(attemptLog);
+
+        if (attemptLog.success) {
+          return _HealthProbeResult(
+            success: true,
+            attempts: List.unmodifiable(attempts),
+            lastFailure: null,
           );
         }
-      } on Object catch (error) {
-        if (logFailures) {
-          _queueLog('VPN health probe failed: ${_redactSensitive('$error')}');
+
+        if (logFailures &&
+            attempt == _healthWatchdogProbeAttempts &&
+            endpointIndex == endpoints.length - 1) {
+          _queueLog('VPN health probe failed: ${_healthProbeDescription(attemptLog)}.');
         }
-      } finally {
-        client.close(force: true);
+
+        if (attempt < _healthWatchdogProbeAttempts) {
+          await Future<void>.delayed(_healthWatchdogProbeDelay);
+        }
       }
     }
 
-    return false;
+    _HealthProbeAttempt? lastFailure;
+    for (final attempt in attempts.reversed) {
+      if (!attempt.success) {
+        lastFailure = attempt;
+        break;
+      }
+    }
+    return _HealthProbeResult(
+      success: false,
+      attempts: List.unmodifiable(attempts),
+      lastFailure: lastFailure,
+    );
   }
 
-  void _startHealthWatchdog({Duration warmup = Duration.zero}) {
+  void _recordHealthProbeAttempt(_HealthProbeAttempt attempt) {
+    _healthProbeHistory.add(attempt);
+    final cutoff = DateTime.now().subtract(_healthProbeHistoryWindow);
+    _healthProbeHistory.removeWhere((entry) => entry.timestamp.isBefore(cutoff));
+    if (_healthProbeHistory.length > _healthProbeHistoryLimit) {
+      _healthProbeHistory.removeRange(
+        0,
+        _healthProbeHistory.length - _healthProbeHistoryLimit,
+      );
+    }
+  }
+
+  int _healthProbeP99LatencyMs() {
+    final cutoff = DateTime.now().subtract(_healthProbeHistoryWindow);
+    final durations = _healthProbeHistory
+        .where((entry) => entry.timestamp.isAfter(cutoff))
+        .map((entry) => entry.duration.inMilliseconds)
+        .where((value) => value > 0)
+        .toList()
+      ..sort();
+    if (durations.isEmpty) {
+      return 0;
+    }
+    final index = ((durations.length - 1) * 99 / 100).round();
+    final safeIndex = index.clamp(0, durations.length - 1).toInt();
+    return durations[safeIndex];
+  }
+
+  String _healthProbeDescription(_HealthProbeAttempt? attempt) {
+    if (attempt == null) {
+      return 'unknown probe issue';
+    }
+    if (attempt.statusCode != null) {
+      return 'HTTP ${attempt.statusCode} on ${attempt.endpoint.host} '
+          '(probe #${attempt.endpointIndex + 1}-${attempt.attempt})';
+    }
+    final errorType = attempt.errorType ?? 'error';
+    final detail = attempt.errorMessage;
+    return '[$errorType] on ${attempt.endpoint.host} '
+        '(probe #${attempt.endpointIndex + 1}-${attempt.attempt})'
+        '${detail == null || detail.isEmpty ? '' : ': $detail'}';
+  }
+
+  String _formatLatency(int ms) => ms <= 0 ? 'n/a' : '${ms}ms';
+
+  void _startHealthWatchdog({Duration warmup = _healthWatchdogStartupGrace}) {
     if (!Platform.isWindows) {
       return;
     }
     _healthWatchdogTimer?.cancel();
     _healthWatchdogFailures = 0;
+    _healthWatchdogCooldownUntil = null;
     _healthWatchdogWarmupUntil = DateTime.now().add(warmup);
-    _healthWatchdogTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+    _healthWatchdogTimer = Timer.periodic(_healthWatchdogTick, (_) {
       unawaited(_runHealthWatchdogTick());
     });
   }
@@ -923,6 +1152,7 @@ class _HomeScreenState extends State<HomeScreen>
     _healthWatchdogTimer = null;
     _healthWatchdogWarmupUntil = null;
     _healthWatchdogFailures = 0;
+    _healthWatchdogCooldownUntil = null;
   }
 
   Future<void> _runHealthWatchdogTick() async {
@@ -934,45 +1164,70 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    final cooldownUntil = _healthWatchdogCooldownUntil;
+    if (cooldownUntil != null && DateTime.now().isBefore(cooldownUntil)) {
+      return;
+    }
+
     final warmupUntil = _healthWatchdogWarmupUntil;
     if (warmupUntil != null && DateTime.now().isBefore(warmupUntil)) {
       return;
     }
 
-    final healthy = await _probeLocalMixedProxy(logFailures: false);
-    if (healthy) {
+    final probeResult = await _probeLocalMixedProxy(logFailures: false);
+    if (probeResult.success) {
       if (_healthWatchdogFailures > 0) {
-        _queueLog('VPN health watchdog recovered.');
+        _queueLog(
+          'VPN health watchdog recovered. '
+          'p99=${_formatLatency(_healthProbeP99LatencyMs())}.',
+        );
       }
       _healthWatchdogFailures = 0;
       return;
     }
 
+    final probeDescription = _healthProbeDescription(probeResult.lastFailure);
+    final probeP99 = _healthProbeP99LatencyMs();
+    final probeAttempts = probeResult.attempts.length;
+
     if (_hasActiveTraffic()) {
-      if (_healthWatchdogFailures < 2) {
-        _healthWatchdogFailures += 1;
-      }
+      _healthWatchdogFailures = 2;
+      _healthWatchdogCooldownUntil = DateTime.now()
+          .add(_healthWatchdogActiveTrafficFailureWindow);
       _queueLog(
-        'VPN health watchdog probe failed during active traffic; '
-        'delaying restart $_healthWatchdogFailures/3.',
+        'VPN health watchdog probe failed during active traffic: $probeDescription. '
+        'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}. '
+        'Retrying after traffic cooldown.',
       );
       return;
     }
 
     _healthWatchdogFailures += 1;
-    _queueLog('VPN health watchdog failed $_healthWatchdogFailures/3.');
-    if (_healthWatchdogFailures < 3) {
+    _queueLog(
+      'VPN health watchdog failed $_healthWatchdogFailures/'
+      '$_healthWatchdogFailureLimit: $probeDescription. '
+      'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
+    );
+    if (_healthWatchdogFailures < _healthWatchdogFailureLimit) {
+      _healthWatchdogCooldownUntil = DateTime.now().add(_healthWatchdogRetryGrace);
       return;
     }
 
     final profile = _selectedProfile;
     if (profile == null) {
       _healthWatchdogFailures = 0;
+      _healthWatchdogCooldownUntil = null;
       return;
     }
 
     _healthWatchdogRestarting = true;
-    _queueLog('VPN health watchdog restarting tunnel.');
+    _healthWatchdogCooldownUntil = DateTime.now().add(
+      _healthWatchdogActiveTrafficFailureWindow,
+    );
+    _queueLog(
+      'VPN health watchdog restarting tunnel after repeated probe failures: '
+      '$probeDescription. attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
+    );
     await _runBusy(() async {
       await _stopVpnCore(updateMessage: false);
       await Future<void>.delayed(const Duration(seconds: 2));
@@ -991,10 +1246,10 @@ class _HomeScreenState extends State<HomeScreen>
   bool _hasActiveTraffic() {
     final lastUpdateAt = _lastTrafficUpdateAt;
     if (lastUpdateAt == null ||
-        DateTime.now().difference(lastUpdateAt) > const Duration(seconds: 12)) {
+        DateTime.now().difference(lastUpdateAt) > const Duration(seconds: 20)) {
       return false;
     }
-    return _uplinkBytesPerSecond + _downlinkBytesPerSecond > 1024;
+    return _uplinkBytesPerSecond + _downlinkBytesPerSecond > 2048;
   }
 
   Future<void> _disconnect() async {
@@ -1361,10 +1616,14 @@ class _HomeScreenState extends State<HomeScreen>
     setState(() {
       _profiles = next;
       _selectedProfileId = nextSelectedId;
+      _serverLatencyLastUpdated = null;
       _serverLatencies = Map<String, _ServerLatencyResult>.of(_serverLatencies)
         ..remove(profile.id);
       _message = s.profileDeleted;
     });
+    if (_profiles.isNotEmpty) {
+      unawaited(_refreshServerLatencies());
+    }
     unawaited(_refreshTrayMenu());
   }
 
@@ -1534,6 +1793,10 @@ class _HomeScreenState extends State<HomeScreen>
         'endpoint: ${_redactSensitive(profile.endpoint)}',
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
+      'health_probe_p99_ms: ${_healthProbeP99LatencyMs()}'
+      ' (${_healthProbeHistory.length} probes in window)',
+      if (_healthProbeHistory.isNotEmpty)
+        'health_probe_last: ${_healthProbeDescription(_healthProbeHistory.last)}',
       '',
       'logs:',
     ];
@@ -1664,13 +1927,23 @@ class _HomeScreenState extends State<HomeScreen>
         );
   }
 
+  String _formatLogTimestamp(DateTime time) {
+    return '${time.year.toString().padLeft(4, '0')}-${time.month.toString().padLeft(2, '0')}-'
+        '${time.day.toString().padLeft(2, '0')} '
+        '${time.hour.toString().padLeft(2, '0')}:'
+        '${time.minute.toString().padLeft(2, '0')}:'
+        '${time.second.toString().padLeft(2, '0')}.'
+        '${time.millisecond.toString().padLeft(3, '0')}';
+  }
+
   void _queueLog(String message) {
     final cleaned = _cleanLog(message);
     if (cleaned.isEmpty) {
       return;
     }
 
-    _pendingLogs.add(cleaned);
+    final timestamped = '${_formatLogTimestamp(DateTime.now())} $cleaned';
+    _pendingLogs.add(timestamped);
     if (_pendingLogs.length > 120) {
       _pendingLogs.removeRange(0, _pendingLogs.length - 120);
     }
@@ -1867,52 +2140,68 @@ class _StatusPanel extends StatelessWidget {
       _ => strings.stopped,
     };
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: _surface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: connected ? _gold : Colors.white12),
-        boxShadow: [
-          BoxShadow(
-            color: connected ? _gold.withValues(alpha: 0.18) : Colors.black26,
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  connected ? Icons.verified_user : Icons.shield_outlined,
-                  color: connected ? _goldSoft : _mutedGold,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    statusLabel,
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(message, style: const TextStyle(color: _mutedGold)),
-            const SizedBox(height: 14),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                _Metric(label: '↑', value: uplink),
-                _Metric(label: '↓', value: downlink),
-                _Metric(label: 'Σ', value: sessionTotal),
-              ],
+    return SizedBox(
+      height: _statusPanelHeight,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _surface,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: connected ? _gold : Colors.white12),
+          boxShadow: [
+            BoxShadow(
+              color: connected
+                  ? _gold.withValues(alpha: 0.18)
+                  : Colors.black26,
+              blurRadius: 18,
+              offset: const Offset(0, 8),
             ),
           ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    connected ? Icons.verified_user : Icons.shield_outlined,
+                    color: connected ? _goldSoft : _mutedGold,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      statusLabel,
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 36,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    message,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: _mutedGold),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  _Metric(label: '↑', value: uplink),
+                  _Metric(label: '↓', value: downlink),
+                  _Metric(label: 'Σ', value: sessionTotal),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2108,6 +2397,7 @@ class _ProfileTile extends StatelessWidget {
         : latency!.ok
         ? _goldSoft
         : Colors.redAccent.shade100;
+    final expiryLabel = _formatProfileExpiry(profile.expiresAt, strings);
 
     return InkWell(
       onTap: onTap,
@@ -2143,6 +2433,19 @@ class _ProfileTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: _mutedGold),
                   ),
+                  if (expiryLabel != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        expiryLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFFB8D3EF),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -2200,6 +2503,50 @@ class _ProfileTile extends StatelessWidget {
       ),
     );
   }
+}
+
+String? _formatProfileExpiry(DateTime? expiresAt, _Strings strings) {
+  if (expiresAt == null) {
+    return null;
+  }
+  final date = DateTime(
+    expiresAt.year,
+    expiresAt.month,
+    expiresAt.day,
+  );
+  final today = DateTime.now();
+  final now = DateTime(today.year, today.month, today.day);
+  final daysLeft = date.difference(now).inDays;
+  final formattedDate =
+      '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}';
+
+  if (_isRu(strings)) {
+    if (daysLeft < 0) {
+      return 'Подписка истекла $formattedDate';
+    }
+    if (daysLeft == 0) {
+      return 'Подписка до $formattedDate (истекает сегодня)';
+    }
+    if (daysLeft == 1) {
+      return 'Подписка до $formattedDate (1 день)';
+    }
+    return 'Подписка до $formattedDate (осталось $daysLeft дн.)';
+  }
+
+  if (daysLeft < 0) {
+    return 'Subscription expired on $formattedDate';
+  }
+  if (daysLeft == 0) {
+    return 'Subscription until $formattedDate (expires today)';
+  }
+  if (daysLeft == 1) {
+    return 'Subscription until $formattedDate (1 day)';
+  }
+  return 'Subscription until $formattedDate (${daysLeft} days left)';
+}
+
+bool _isRu(_Strings strings) {
+  return strings == _Strings.ru;
 }
 
 class _EmptyProfiles extends StatelessWidget {

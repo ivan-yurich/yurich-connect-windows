@@ -13,6 +13,13 @@ class ProfileImportException implements Exception {
   String toString() => message;
 }
 
+class _SubscriptionFetchResult {
+  const _SubscriptionFetchResult({required this.body, this.expiresAt});
+
+  final String body;
+  final DateTime? expiresAt;
+}
+
 class ProfileImporter {
   static final _linkPattern = RegExp(
     "(?:vless://|naive\\+https://|naive://|hysteria2://|hy2://|hysteria://)[^\\s<>\"']+",
@@ -28,13 +35,17 @@ class ProfileImporter {
     final uri = Uri.tryParse(text);
     if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
       final fetched = await _fetchSubscription(uri);
-      return _parsePayload(fetched, source: text);
+      return _parsePayload(
+        fetched.body,
+        source: text,
+        defaultExpiresAt: fetched.expiresAt,
+      );
     }
 
     return _parsePayload(text, source: text);
   }
 
-  Future<String> _fetchSubscription(Uri uri) async {
+  Future<_SubscriptionFetchResult> _fetchSubscription(Uri uri) async {
     final clients = [
       'YurichConnect-Windows/1.0.22 YurichCore/sing-box/1.13.12',
       'HiddifyNext/2.5.7',
@@ -44,17 +55,22 @@ class ProfileImporter {
 
     Object? lastError;
     final candidates = <String>[];
+    DateTime? candidateExpiresAt;
     for (final userAgent in clients) {
       for (final viaLocalProxy in const [false, true]) {
         try {
-          final body = await _get(
+          final fetched = await _get(
             uri,
             userAgent: userAgent,
             viaLocalProxy: viaLocalProxy,
           );
-          final normalizedBody = _decodeHtmlEntities(body);
+          candidateExpiresAt = fetched.expiresAt;
+          final normalizedBody = _decodeHtmlEntities(fetched.body);
           if (_canParsePayload(normalizedBody)) {
-            return normalizedBody;
+            return _SubscriptionFetchResult(
+              body: normalizedBody,
+              expiresAt: fetched.expiresAt,
+            );
           }
           if (_looksLikeHtml(normalizedBody)) {
             candidates.add(normalizedBody);
@@ -73,7 +89,10 @@ class ProfileImporter {
     }
 
     if (candidates.isNotEmpty) {
-      return candidates.first;
+      return _SubscriptionFetchResult(
+        body: candidates.first,
+        expiresAt: candidateExpiresAt,
+      );
     }
 
     throw ProfileImportException(
@@ -89,7 +108,7 @@ class ProfileImporter {
     }
   }
 
-  Future<String> _get(
+  Future<_SubscriptionFetchResult> _get(
     Uri uri, {
     required String userAgent,
     bool viaLocalProxy = false,
@@ -114,7 +133,8 @@ class ProfileImporter {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw ProfileImportException('HTTP ${response.statusCode}: $body');
       }
-      return body;
+      final expiresAt = _extractSubscriptionExpires(response.headers);
+      return _SubscriptionFetchResult(body: body, expiresAt: expiresAt);
     } finally {
       client.close(force: true);
     }
@@ -124,52 +144,73 @@ class ProfileImporter {
     return viaLocalProxy ? 'fallback через активный VPN' : 'прямой запрос';
   }
 
-  List<VpnProfile> _parsePayload(String payload, {required String source}) {
+  List<VpnProfile> _parsePayload(
+    String payload, {
+    required String source,
+    DateTime? defaultExpiresAt,
+  }) {
     final text = payload.trim();
     if (text.isEmpty) {
       throw const ProfileImportException('Подписка пустая.');
     }
 
-    final jsonProfile = _tryParseJsonConfig(text, source: source);
+    final jsonProfile = _tryParseJsonConfig(
+      text,
+      source: source,
+      defaultExpiresAt: defaultExpiresAt,
+    );
     if (jsonProfile != null) {
-      return [jsonProfile];
+      return [jsonProfile.withExpiresAt(defaultExpiresAt)];
     }
 
-    final jsonLinks = _tryParseJsonLinks(text);
+    final jsonLinks = _tryParseJsonLinks(text, defaultExpiresAt: defaultExpiresAt);
     if (jsonLinks.isNotEmpty) {
       return jsonLinks;
     }
 
-    final xrayProfiles = _tryParseXrayConfigs(text);
+    final xrayProfiles = _tryParseXrayConfigs(
+      text,
+      defaultExpiresAt: defaultExpiresAt,
+    );
     if (xrayProfiles.isNotEmpty) {
       return xrayProfiles;
     }
 
     final links = _extractLinks(text);
     if (links.isNotEmpty) {
-      return _profilesFromLinks(links);
+      return _profilesFromLinks(links, defaultExpiresAt: defaultExpiresAt);
     }
 
     final decoded = _tryDecodeBase64(text);
     if (decoded != null) {
-      final decodedJsonProfile = _tryParseJsonConfig(decoded, source: source);
+      final decodedJsonProfile = _tryParseJsonConfig(
+        decoded,
+        source: source,
+        defaultExpiresAt: defaultExpiresAt,
+      );
       if (decodedJsonProfile != null) {
         return [decodedJsonProfile];
       }
 
-      final decodedJsonLinks = _tryParseJsonLinks(decoded);
+      final decodedJsonLinks = _tryParseJsonLinks(
+        decoded,
+        defaultExpiresAt: defaultExpiresAt,
+      );
       if (decodedJsonLinks.isNotEmpty) {
         return decodedJsonLinks;
       }
 
-      final decodedXrayProfiles = _tryParseXrayConfigs(decoded);
+      final decodedXrayProfiles = _tryParseXrayConfigs(
+        decoded,
+        defaultExpiresAt: defaultExpiresAt,
+      );
       if (decodedXrayProfiles.isNotEmpty) {
         return decodedXrayProfiles;
       }
 
       final decodedLinks = _extractLinks(decoded);
       if (decodedLinks.isNotEmpty) {
-        return _profilesFromLinks(decodedLinks);
+        return _profilesFromLinks(decodedLinks, defaultExpiresAt: defaultExpiresAt);
       }
     }
 
@@ -184,7 +225,11 @@ class ProfileImporter {
     );
   }
 
-  VpnProfile? _tryParseJsonConfig(String text, {required String source}) {
+  VpnProfile? _tryParseJsonConfig(
+    String text, {
+    required String source,
+    DateTime? defaultExpiresAt,
+  }) {
     try {
       final decoded = jsonDecode(text);
       if (decoded is Map<String, dynamic>) {
@@ -196,6 +241,7 @@ class ProfileImporter {
             kind: VpnProfileKind.singBoxConfig,
             originalInput: source,
             rawConfig: const JsonEncoder.withIndent('  ').convert(decoded),
+            expiresAt: defaultExpiresAt,
           );
         }
       }
@@ -206,17 +252,26 @@ class ProfileImporter {
     return null;
   }
 
-  List<VpnProfile> _tryParseJsonLinks(String text) {
+  List<VpnProfile> _tryParseJsonLinks(
+    String text, {
+    DateTime? defaultExpiresAt,
+  }) {
     try {
       final decoded = jsonDecode(text);
       if (decoded is Map<String, dynamic>) {
         final links = decoded['links'];
         if (links is List) {
-          return _profilesFromLinks(links.whereType<String>().toList());
+          return _profilesFromLinks(
+            links.whereType<String>().toList(),
+            defaultExpiresAt: _extractExpiryFromJson(decoded) ?? defaultExpiresAt,
+          );
         }
       }
       if (decoded is List) {
-        return _profilesFromLinks(decoded.whereType<String>().toList());
+        return _profilesFromLinks(
+          decoded.whereType<String>().toList(),
+          defaultExpiresAt: defaultExpiresAt,
+        );
       }
     } on FormatException {
       return const [];
@@ -224,7 +279,10 @@ class ProfileImporter {
     return const [];
   }
 
-  List<VpnProfile> _tryParseXrayConfigs(String text) {
+  List<VpnProfile> _tryParseXrayConfigs(
+    String text, {
+    DateTime? defaultExpiresAt,
+  }) {
     try {
       final decoded = jsonDecode(text);
       final configs = switch (decoded) {
@@ -247,7 +305,14 @@ class ProfileImporter {
         for (final item in outbounds.whereType<Map>()) {
           final outbound = item.cast<String, dynamic>();
           if ((outbound['protocol'] as String?)?.toLowerCase() == 'vless') {
-            profiles.add(_profileFromXrayVless(config, outbound));
+            profiles.add(
+              _profileFromXrayVless(
+                config,
+                outbound,
+                defaultExpiresAt: _extractExpiryFromJson(config) ??
+                    defaultExpiresAt,
+              ),
+            );
           }
         }
       }
@@ -262,7 +327,9 @@ class ProfileImporter {
   VpnProfile _profileFromXrayVless(
     Map<String, dynamic> config,
     Map<String, dynamic> outbound,
-  ) {
+    {
+    DateTime? defaultExpiresAt,
+  }) {
     final settings = _asMap(outbound['settings']);
     if (settings == null) {
       throw const ProfileImportException('Xray VLESS outbound без settings.');
@@ -327,7 +394,13 @@ class ProfileImporter {
       queryParameters: query,
       fragment: name,
     );
-    return _parseVless(uri.toString());
+    return _parseVless(
+      uri.toString(),
+      expiresAt: _resolveExpiresAt(
+        defaultValue: defaultExpiresAt,
+        candidates: [_extractExpiryFromQuery(query)],
+      ),
+    );
   }
 
   List<String> _extractLinks(String text) {
@@ -340,7 +413,10 @@ class ProfileImporter {
         .toList();
   }
 
-  List<VpnProfile> _profilesFromLinks(List<String> links) {
+  List<VpnProfile> _profilesFromLinks(
+    List<String> links, {
+    DateTime? defaultExpiresAt,
+  }) {
     final profiles = <VpnProfile>[];
     final errors = <String>[];
 
@@ -348,15 +424,35 @@ class ProfileImporter {
       try {
         final lower = link.toLowerCase();
         if (lower.startsWith('vless://')) {
-          profiles.add(_parseVless(link));
+          profiles.add(
+            _parseVless(
+              link,
+              expiresAt: defaultExpiresAt,
+            ),
+          );
         } else if (lower.startsWith('naive+https://') ||
             lower.startsWith('naive://')) {
-          profiles.add(_parseNaive(link));
+          profiles.add(
+            _parseNaive(
+              link,
+              expiresAt: defaultExpiresAt,
+            ),
+          );
         } else if (lower.startsWith('hysteria2://') ||
             lower.startsWith('hy2://')) {
-          profiles.add(_parseHysteria2(link));
+          profiles.add(
+            _parseHysteria2(
+              link,
+              expiresAt: defaultExpiresAt,
+            ),
+          );
         } else if (lower.startsWith('hysteria://')) {
-          profiles.add(_parseHysteria(link));
+          profiles.add(
+            _parseHysteria(
+              link,
+              expiresAt: defaultExpiresAt,
+            ),
+          );
         }
       } on Object catch (error) {
         errors.add('$link: $error');
@@ -369,7 +465,10 @@ class ProfileImporter {
     return profiles;
   }
 
-  VpnProfile _parseVless(String link) {
+  VpnProfile _parseVless(
+    String link, {
+    DateTime? expiresAt,
+  }) {
     final uri = Uri.parse(link);
     final uuid = Uri.decodeComponent(uri.userInfo);
     if (uuid.isEmpty || uri.host.isEmpty) {
@@ -443,10 +542,17 @@ class ProfileImporter {
       server: uri.host,
       port: port,
       outbound: outbound,
+      expiresAt: _resolveExpiresAt(
+        defaultValue: expiresAt,
+        candidates: [_extractExpiryFromQuery(query)],
+      ),
     );
   }
 
-  VpnProfile _parseNaive(String link) {
+  VpnProfile _parseNaive(
+    String link, {
+    DateTime? expiresAt,
+  }) {
     final normalized = link.toLowerCase().startsWith('naive+')
         ? link.substring('naive+'.length)
         : link;
@@ -490,10 +596,17 @@ class ProfileImporter {
       server: uri.host,
       port: port,
       outbound: outbound,
+      expiresAt: _resolveExpiresAt(
+        defaultValue: expiresAt,
+        candidates: [_extractExpiryFromQuery(query)],
+      ),
     );
   }
 
-  VpnProfile _parseHysteria(String link) {
+  VpnProfile _parseHysteria(
+    String link, {
+    DateTime? expiresAt,
+  }) {
     final uri = Uri.parse(link);
     if (uri.host.isEmpty || !uri.hasPort) {
       throw const ProfileImportException('Hysteria ссылка без host или port.');
@@ -542,10 +655,17 @@ class ProfileImporter {
       server: uri.host,
       port: uri.port,
       outbound: outbound,
+      expiresAt: _resolveExpiresAt(
+        defaultValue: expiresAt,
+        candidates: [_extractExpiryFromQuery(query)],
+      ),
     );
   }
 
-  VpnProfile _parseHysteria2(String link) {
+  VpnProfile _parseHysteria2(
+    String link, {
+    DateTime? expiresAt,
+  }) {
     final normalized = link.toLowerCase().startsWith('hy2://')
         ? 'hysteria2://${link.substring('hy2://'.length)}'
         : link;
@@ -591,7 +711,186 @@ class ProfileImporter {
       server: uri.host,
       port: uri.hasPort ? uri.port : 443,
       outbound: outbound,
+      expiresAt: _resolveExpiresAt(
+        defaultValue: expiresAt,
+        candidates: [_extractExpiryFromQuery(query)],
+      ),
     );
+  }
+
+  DateTime? _extractSubscriptionExpires(HttpHeaders headers) {
+    final candidates = <String>[];
+    headers.forEach((name, values) {
+      final key = name.toLowerCase();
+      if (key == 'subscription-userinfo' ||
+          key == 'subscription-expires' ||
+          key == 'subscription_expires' ||
+          key == 'subscription-expire' ||
+          key == 'subscription_expire' ||
+          key == 'subscription-expires-at' ||
+          key == 'subscription_expires_at' ||
+          key == 'subscriptionexpiration' ||
+          key == 'subscription-expiration' ||
+          key == 'subscriptionexpire' ||
+          key == 'subscription-expire-at' ||
+          key == 'subscription_expire_at' ||
+          key == 'subscription-info' ||
+          key == 'expire' ||
+          key == 'expires') {
+          candidates.addAll(values);
+      }
+    });
+
+    for (final name in const [
+      'subscription-userinfo',
+      'subscription-expires',
+    ]) {
+      final value = headers[name];
+      if (value != null && value.isNotEmpty) {
+        candidates.addAll(value);
+      }
+    }
+
+    for (final candidate in candidates) {
+      final parsed = _extractExpiryFromString(candidate);
+      if (parsed != null) {
+        return parsed;
+      }
+      final parsedFromPairs = _extractExpiryFromPairString(candidate);
+      if (parsedFromPairs != null) {
+        return parsedFromPairs;
+      }
+    }
+    return null;
+  }
+
+  DateTime? _extractExpiryFromJson(Map<String, dynamic> map) {
+    final direct = _extractExpiryFromString(
+      map['expires'] ??
+          map['expiry'] ??
+          map['expire'] ??
+          map['subscription-expires'] ??
+          map['subscription_expires'] ??
+          map['subscription-expire'] ??
+          map['subscription_expire'] ??
+          map['subscription-expire-at'] ??
+          map['subscription_expires_at'] ??
+          map['expiresAt'] ??
+          map['expires_at'] ??
+          map['subscriptionExpire'] ??
+          map['subscription_expire_at'],
+    );
+    if (direct != null) {
+      return direct;
+    }
+
+    final subscription = _asMap(map['subscription']);
+    if (subscription != null) {
+      final nested = _extractExpiryFromJson(subscription);
+      if (nested != null) {
+        return nested;
+      }
+    }
+
+    final userInfo = map['subscription-userinfo'];
+    if (userInfo is String) {
+      return _extractExpiryFromPairString(userInfo);
+    }
+
+    return null;
+  }
+
+  DateTime? _extractExpiryFromQuery(Map<String, String> query) {
+    final candidateKeys = <String>[
+      'expire',
+      'expiry',
+      'expires',
+      'exp',
+      'subscription-expire',
+      'subscription_expire',
+      'subscription-expires',
+      'subscription_expires',
+      'subscription-expire-at',
+      'subscription_expire_at',
+      'expires-at',
+      'expires_at',
+      'subscription-expire-time',
+      'subscription_expire_time',
+    ];
+    for (final key in candidateKeys) {
+      final parsed = _extractExpiryFromString(query[key]);
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  DateTime? _extractExpiryFromString(Object? value) {
+    if (value == null) {
+      return null;
+    }
+    final source = '$value'.trim();
+    if (source.isEmpty) {
+      return null;
+    }
+
+    final epochMatch = RegExp(r'^\d{9,16}$').firstMatch(source);
+    if (epochMatch != null) {
+      final parsed = int.tryParse(epochMatch.group(0)!);
+      if (parsed == null) {
+        return null;
+      }
+      return parsed > 1000000000000
+          ? DateTime.fromMillisecondsSinceEpoch(parsed, isUtc: true)
+          : DateTime.fromMillisecondsSinceEpoch(parsed * 1000, isUtc: true);
+    }
+
+    final parsedIso = DateTime.tryParse(source);
+    if (parsedIso != null) {
+      return parsedIso.isUtc ? parsedIso.toLocal() : parsedIso;
+    }
+
+    final dateMatch = RegExp(r'^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T]|$)')
+        .firstMatch(source);
+    if (dateMatch != null) {
+      final parsedDate = DateTime.tryParse(dateMatch.group(1)!);
+      if (parsedDate != null) {
+        return parsedDate.isUtc ? parsedDate.toLocal() : parsedDate;
+      }
+    }
+    return null;
+  }
+
+  DateTime? _extractExpiryFromPairString(String source) {
+    final normalized = source.replaceAll(' ', '');
+    final pairs = normalized.split(RegExp(r'[;&,]'));
+    const keys = {'expire', 'expiry', 'expires', 'exp'};
+    for (final pair in pairs) {
+      final split = pair.split('=');
+      if (split.length == 2) {
+        final key = split.first.toLowerCase();
+        if (keys.contains(key)) {
+          final parsed = _extractExpiryFromString(split.last);
+          if (parsed != null) {
+            return parsed;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  DateTime? _resolveExpiresAt({
+    required DateTime? defaultValue,
+    required List<DateTime?> candidates,
+  }) {
+    for (final candidate in candidates) {
+      if (candidate != null) {
+        return candidate;
+      }
+    }
+    return defaultValue;
   }
 
   Map<String, dynamic> _tlsFromQuery(

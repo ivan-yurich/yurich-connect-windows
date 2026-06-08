@@ -19,6 +19,34 @@ void main() {
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
   });
 
+  test('imports VLESS Reality link with expiry date from query', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01&expires=2026-12-31#Reality';
+
+    final profiles = await ProfileImporter().importFromText(link);
+
+    expect(profiles, hasLength(1));
+    expect(profiles.first.expiresAt?.year, 2026);
+    expect(
+      profiles.first.expiresAt?.toIso8601String().startsWith('2026-12-31'),
+      isTrue,
+    );
+  });
+
+  test('propagates subscription expiry from JSON payload', () async {
+    final payload = jsonEncode({
+      'links': [
+        'naive+https://example.com:user@example.com:443#Naive',
+      ],
+      'expire': 1740960000,
+    });
+
+    final profiles = await ProfileImporter().importFromText(payload);
+
+    expect(profiles, hasLength(1));
+    expect(profiles.first.expiresAt, isNotNull);
+  });
+
   test('imports NaiveProxy link', () async {
     const link = 'naive+https://example.com:pass@example.com:443#Naive';
 

@@ -28,6 +28,7 @@ class VpnProfile {
     this.port,
     this.outbound,
     this.rawConfig,
+    this.expiresAt,
   });
 
   final String id;
@@ -38,12 +39,30 @@ class VpnProfile {
   final int? port;
   final Map<String, dynamic>? outbound;
   final String? rawConfig;
+  final DateTime? expiresAt;
 
   String get endpoint {
     if (server == null || server!.isEmpty) {
       return kind.label;
     }
     return port == null ? server! : '$server:$port';
+  }
+
+  VpnProfile withExpiresAt(DateTime? value) {
+    if (value == null || expiresAt != null) {
+      return this;
+    }
+    return VpnProfile(
+      id: id,
+      name: name,
+      kind: kind,
+      originalInput: originalInput,
+      server: server,
+      port: port,
+      outbound: outbound,
+      rawConfig: rawConfig,
+      expiresAt: value,
+    );
   }
 
   Map<String, dynamic> toJson() {
@@ -56,6 +75,7 @@ class VpnProfile {
       'port': port,
       'outbound': outbound,
       'rawConfig': rawConfig,
+      'expiresAt': expiresAt?.toIso8601String(),
     };
   }
 
@@ -74,6 +94,10 @@ class VpnProfile {
       port: json['port'] as int?,
       outbound: (json['outbound'] as Map?)?.cast<String, dynamic>(),
       rawConfig: json['rawConfig'] as String?,
+      expiresAt:
+          json['expiresAt'] == null
+              ? null
+              : DateTime.tryParse(json['expiresAt'] as String),
     );
   }
 }

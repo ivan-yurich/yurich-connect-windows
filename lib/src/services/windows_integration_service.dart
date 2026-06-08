@@ -41,7 +41,7 @@ class WindowsIntegrationService {
 
   static const _taskName = YurichBranding.appName;
   static const _legacyTaskName = 'Aurum VPN';
-  static const _startupDelayIso8601 = 'PT1S';
+  static const _startupDelayIso8601 = 'PT0S';
 
   Future<bool> isAutoStartEnabled() async {
     if (!Platform.isWindows) {
