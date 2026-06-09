@@ -107,7 +107,12 @@ class SingBoxConfigBuilder {
               'process_name': ['naive.exe'],
               'outbound': 'direct',
             },
-          if (target == SingBoxConfigTarget.windows) ...[
+        if (target == SingBoxConfigTarget.windows) ...[
+            {
+              'ip_is_private': true,
+              'protocol': 'icmp',
+              'action': 'reject',
+            },
             {'ip_is_private': true, 'outbound': 'direct'},
             if (excludedProcesses.isNotEmpty)
               {'process_name': excludedProcesses, 'outbound': 'direct'},
