@@ -85,6 +85,7 @@ if ($answer -cne 'YES') {
 
 $startShortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Yurich Connect.lnk'
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Yurich Connect.lnk'
+# Migration cleanup: remove shortcuts from the old Aurum VPN package if they exist.
 $legacyStartShortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Aurum VPN.lnk'
 $legacyDesktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Aurum VPN.lnk'
 

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../branding.dart';
+import 'secret_redactor.dart';
 import 'sing_box_config_builder.dart';
 import 'vpn_engine.dart';
 
@@ -14,6 +15,8 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   Process? _process;
   Process? _naiveProcess;
+  int? _processPid;
+  int? _naiveProcessPid;
   String _status = YurichConnectStatus.stopped;
   String _config = '{}';
   String? _naiveProxyConfig;
@@ -23,6 +26,7 @@ class WindowsSingBoxEngine implements VpnEngine {
   WebSocket? _trafficSocket;
   bool _trafficSocketConnecting = false;
   bool _reportedAdminIssue = false;
+  bool _transitioning = false;
   int _sessionTotalBytes = 0;
   static const _visualRuntimeDlls = [
     'MSVCP140.dll',
@@ -65,7 +69,11 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   @override
   Future<String> getVPNStatus() async {
-    if (_process == null && _status != YurichConnectStatus.stopped) {
+    if (_process == null &&
+        (_status == YurichConnectStatus.started ||
+            _status == YurichConnectStatus.starting ||
+            _status == YurichConnectStatus.stopping ||
+            _status == YurichConnectStatus.reconnecting)) {
       _setStatus(YurichConnectStatus.stopped);
     }
     return _status;
@@ -84,9 +92,17 @@ class WindowsSingBoxEngine implements VpnEngine {
   @override
   Future<bool> startVPN() async {
     if (_process != null) {
+      _appendLog(
+        'Start skipped: sing-box is already tracked with PID $_processPid.',
+      );
       return true;
     }
+    if (_transitioning) {
+      _appendLog('Start skipped: VPN transition is already in progress.');
+      return false;
+    }
 
+    _transitioning = true;
     _setStatus(YurichConnectStatus.starting);
     _reportedAdminIssue = false;
     try {
@@ -109,7 +125,9 @@ class WindowsSingBoxEngine implements VpnEngine {
         needsNaiveProxy: needsNaiveProxy,
       );
       if (!preflightOk) {
-        _setStatus(YurichConnectStatus.stopped);
+        if (_status != YurichConnectStatus.adminRequired) {
+          _setStatus(YurichConnectStatus.error);
+        }
         return false;
       }
 
@@ -137,14 +155,19 @@ class WindowsSingBoxEngine implements VpnEngine {
         runInShell: false,
       );
       _process = process;
+      _processPid = process.pid;
+      _appendLog('sing-box PID ${process.pid}');
       _pipeProcess(process);
       _startTrafficTicker();
 
       unawaited(
-        process.exitCode.then((code) {
+        process.exitCode.then((code) async {
           _appendLog('sing-box exited with code $code');
-          _process = null;
-          _stopNaiveProxy();
+          if (_process == process) {
+            _process = null;
+            _processPid = null;
+          }
+          await _stopNaiveProxy();
           _stopTrafficTicker();
           if (_status != YurichConnectStatus.stopping) {
             _setStatus(YurichConnectStatus.stopped);
@@ -157,17 +180,29 @@ class WindowsSingBoxEngine implements VpnEngine {
         _setStatus(YurichConnectStatus.started);
         return true;
       }
+
+      await _stopNaiveProxy();
+      if (_status != YurichConnectStatus.adminRequired) {
+        _setStatus(YurichConnectStatus.error);
+      }
+      return false;
     } on Object catch (e) {
       _appendLog('Не удалось запустить sing-box: $e');
+      await _stopNaiveProxy();
+      if (_status != YurichConnectStatus.adminRequired) {
+        _setStatus(YurichConnectStatus.error);
+      }
+      return false;
+    } finally {
+      _transitioning = false;
     }
-
-    _stopNaiveProxy();
-    _setStatus(YurichConnectStatus.stopped);
-    return false;
   }
 
   @override
   Future<bool> stopVPN() async {
+    if (_transitioning && _status == YurichConnectStatus.starting) {
+      _appendLog('Stop requested while VPN is starting; waiting for cleanup.');
+    }
     final process = _process;
     if (process == null) {
       try {
@@ -175,6 +210,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       } on Object {
         // Best-effort cleanup for untracked processes after app restarts.
       }
+      await _stopNaiveProxy();
       _setStatus(YurichConnectStatus.stopped);
       return true;
     }
@@ -185,13 +221,105 @@ class WindowsSingBoxEngine implements VpnEngine {
     try {
       await process.exitCode.timeout(const Duration(seconds: 5));
     } on TimeoutException {
+      _appendLog('sing-box did not exit in time; killing PID $_processPid.');
       process.kill(ProcessSignal.sigkill);
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 3));
+      } on TimeoutException {
+        _appendLog('sing-box kill timeout for PID $_processPid.');
+      }
     }
     _process = null;
-    _stopNaiveProxy();
+    _processPid = null;
+    await _stopNaiveProxy();
     _stopTrafficTicker();
     _setStatus(YurichConnectStatus.stopped);
     return true;
+  }
+
+  @override
+  Future<bool> repairConnection() async {
+    _appendLog('Connection repair started.');
+    var needsReboot = false;
+    try {
+      await stopVPN();
+
+      final runtimeDir = await _runtimeDir();
+      final configDir = await _configDir();
+      await _stopStaleRuntimeProcesses(runtimeDir);
+      await _cleanupTemporaryConfigs(configDir);
+      await _flushDnsCache();
+
+      final wintun = File('${runtimeDir.path}\\wintun.dll');
+      if (!await wintun.exists()) {
+        needsReboot = true;
+        _appendLog('Repair warning: wintun.dll is missing.');
+      } else {
+        _appendLog('Repair check: wintun.dll found.');
+      }
+
+      _setStatus(YurichConnectStatus.stopped);
+      _appendLog(
+        needsReboot
+            ? 'Connection repair finished: Windows reboot or reinstall may be required.'
+            : 'Connection repair finished successfully.',
+      );
+      if (!_statusController.isClosed) {
+        _statusController.add({
+          'type': 'repair',
+          'result': needsReboot ? 'reboot' : 'ok',
+          'message': needsReboot
+              ? 'Нужна перезагрузка Windows или переустановка приложения.'
+              : 'Подключение восстановлено.',
+        });
+      }
+      return !needsReboot;
+    } on Object catch (e) {
+      _appendLog('Connection repair failed: $e');
+      _setStatus(YurichConnectStatus.error);
+      if (!_statusController.isClosed) {
+        _statusController.add({
+          'type': 'repair',
+          'result': 'failed',
+          'message':
+              'Не удалось исправить автоматически, отправьте отчёт разработчику.',
+        });
+      }
+      return false;
+    }
+  }
+
+  Future<void> _cleanupTemporaryConfigs(Directory configDir) async {
+    final names = ['config.json', 'naive.json', 'geoip-ru.srs.download'];
+    for (final name in names) {
+      final file = File('${configDir.path}\\$name');
+      try {
+        if (await file.exists()) {
+          await file.delete();
+          _appendLog('Repair removed temporary file: $name');
+        }
+      } on Object catch (e) {
+        _appendLog('Repair could not remove $name: $e');
+      }
+    }
+  }
+
+  Future<void> _flushDnsCache() async {
+    try {
+      final result = await Process.run('ipconfig.exe', [
+        '/flushdns',
+      ]).timeout(const Duration(seconds: 8));
+      if (result.exitCode == 0) {
+        _appendLog('Repair flushed Windows DNS cache.');
+      } else {
+        final output = '${result.stdout}${result.stderr}'.trim();
+        _appendLog(
+          'Repair DNS flush failed: ${output.isEmpty ? result.exitCode : output}',
+        );
+      }
+    } on Object catch (e) {
+      _appendLog('Repair DNS flush skipped: $e');
+    }
   }
 
   Future<bool> _runPreflight(
@@ -202,14 +330,15 @@ class WindowsSingBoxEngine implements VpnEngine {
     _appendLog('Windows preflight check started.');
 
     if (!await _isAdministrator()) {
+      _setStatus(YurichConnectStatus.adminRequired);
       _appendLog(
         'Preflight failed: Yurich Connect запущен без прав администратора.',
       );
       if (!_statusController.isClosed) {
         _statusController.add({
           'type': 'alert',
-          'message':
-              'Yurich Connect нужны права администратора для Windows TUN/Wintun. Запусти приложение через START_YURICH_CONNECT.cmd или ярлык установщика.',
+          'code': 'adminRequired',
+          'message': 'Для подключения требуются права администратора.',
         });
       }
       return false;
@@ -492,10 +621,42 @@ class WindowsSingBoxEngine implements VpnEngine {
             ? 'sing-box config check failed with code ${result.exitCode}'
             : 'sing-box config check failed: $output',
       );
+      _emitUserAlert(_friendlyConfigError(output));
     } on Object catch (e) {
       _appendLog('sing-box config check failed: $e');
+      _emitUserAlert('Конфиг повреждён. Импортируйте профиль заново.');
     }
     return false;
+  }
+
+  String _friendlyConfigError(String output) {
+    final lower = output.toLowerCase();
+    if (lower.contains('server') && lower.contains('missing')) {
+      return 'В профиле отсутствует адрес сервера.';
+    }
+    if (lower.contains('uuid')) {
+      return 'В профиле отсутствует UUID.';
+    }
+    if (lower.contains('public_key') || lower.contains('publickey')) {
+      return 'Ошибка Reality: отсутствует publicKey.';
+    }
+    if (lower.contains('server_name') || lower.contains('servername')) {
+      return 'Ошибка Reality: отсутствует serverName.';
+    }
+    if (lower.contains('password') || lower.contains('auth')) {
+      return 'В профиле отсутствует пароль или токен авторизации.';
+    }
+    if (lower.contains('naive')) {
+      return 'Ошибка NaiveProxy: неверный формат ссылки.';
+    }
+    return 'Конфиг повреждён. Импортируйте профиль заново.';
+  }
+
+  void _emitUserAlert(String message) {
+    if (_statusController.isClosed || message.isEmpty) {
+      return;
+    }
+    _statusController.add({'type': 'alert', 'message': message});
   }
 
   Future<void> _stopStaleRuntimeProcesses(Directory runtimeDir) async {
@@ -588,6 +749,8 @@ Write-Output \$stopped
       runInShell: false,
     );
     _naiveProcess = process;
+    _naiveProcessPid = process.pid;
+    _appendLog('NaiveProxy PID ${process.pid}');
     process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -602,6 +765,7 @@ Write-Output \$stopped
         _appendLog('naive exited with code $code');
         if (_naiveProcess == process) {
           _naiveProcess = null;
+          _naiveProcessPid = null;
         }
         if (_process != null && _status != YurichConnectStatus.stopping) {
           _appendLog('NaiveProxy core stopped while VPN was running.');
@@ -614,14 +778,32 @@ Write-Output \$stopped
     return _naiveProcess == process;
   }
 
-  void _stopNaiveProxy() {
+  Future<void> _stopNaiveProxy() async {
     final process = _naiveProcess;
     if (process == null) {
+      _naiveProcessPid = null;
       return;
     }
-    _appendLog('Stopping NaiveProxy core...');
+    _appendLog('Stopping NaiveProxy core PID $_naiveProcessPid...');
     process.kill();
-    _naiveProcess = null;
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 4));
+    } on TimeoutException {
+      _appendLog(
+        'NaiveProxy did not exit in time; killing PID $_naiveProcessPid.',
+      );
+      process.kill(ProcessSignal.sigkill);
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 2));
+      } on TimeoutException {
+        _appendLog('NaiveProxy kill timeout for PID $_naiveProcessPid.');
+      }
+    } finally {
+      if (_naiveProcess == process) {
+        _naiveProcess = null;
+      }
+      _naiveProcessPid = null;
+    }
   }
 
   void _setStatus(String status) {
@@ -679,39 +861,7 @@ Write-Output \$stopped
   }
 
   String _redactSensitive(String value) {
-    return value
-        .replaceAll(
-          RegExp(
-            r'\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b',
-            caseSensitive: false,
-          ),
-          '***uuid***',
-        )
-        .replaceAllMapped(
-          RegExp(
-            r'(vless://|naive\+https://|hysteria2://|hy2://|hysteria://)[^\s]+',
-            caseSensitive: false,
-          ),
-          (match) => '${match[1]}***',
-        )
-        .replaceAllMapped(
-          RegExp(r'(https?://)[^:@/\s]+:[^@/\s]+@', caseSensitive: false),
-          (match) => '${match[1]}***:***@',
-        )
-        .replaceAllMapped(
-          RegExp(
-            r'("(?:password|passwd|token|access_token|refresh_token|uuid|auth|auth_str|public_key|short_id|subscription)"\s*:\s*")[^"]+',
-            caseSensitive: false,
-          ),
-          (match) => '${match[1]}***',
-        )
-        .replaceAllMapped(
-          RegExp(
-            r'((?:password|passwd|token|access_token|refresh_token|auth|key)=)[^&\s]+',
-            caseSensitive: false,
-          ),
-          (match) => '${match[1]}***',
-        );
+    return SecretRedactor.redact(value);
   }
 
   void _startTrafficTicker() {

@@ -11,7 +11,7 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.32";
+    private const string AppVersion = "1.0.33";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
@@ -241,6 +241,7 @@ internal static class Program
 
     private static void CleanupLegacyInstall(string legacyInstallDir)
     {
+        // Migration cleanup: remove shortcuts and uninstall entry from the old Aurum VPN package.
         var expected = Path.GetFullPath(LegacyInstallDir()).TrimEnd('\\');
         var actual = Path.GetFullPath(legacyInstallDir).TrimEnd('\\');
         if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))

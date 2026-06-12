@@ -10,6 +10,11 @@ class YurichConnectStatus {
   static const starting = 'Starting';
   static const started = 'Started';
   static const stopping = 'Stopping';
+  static const reconnecting = 'Reconnecting';
+  static const error = 'Error';
+  static const adminRequired = 'AdminRequired';
+  static const noProfile = 'NoProfile';
+  static const noInternet = 'NoInternet';
 }
 
 abstract class VpnEngine {
@@ -29,6 +34,7 @@ abstract class VpnEngine {
   Future<String> getConfig();
   Future<bool> startVPN();
   Future<bool> stopVPN();
+  Future<bool> repairConnection();
   Future<List<String>> getLogs();
   Future<bool> clearLogs();
   Future<void> dispose();

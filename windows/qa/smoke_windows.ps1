@@ -26,6 +26,7 @@ $windowsBuildDir = Join-Path $projectRoot 'build\windows'
 $buildOutputDir = Join-Path $projectRoot 'build\windows\x64\runner\Release'
 $releaseDir = Join-Path $projectRoot 'release\windows'
 $portableDir = Join-Path $releaseDir 'YurichConnect_Windows_Portable'
+$portableRootDir = Join-Path $portableDir 'Yurich Connect'
 $portableZip = Join-Path $releaseDir 'YurichConnect_Windows_Portable.zip'
 $setupExe = Join-Path $releaseDir 'YurichConnect_Setup.exe'
 $setupDir = Join-Path $projectRoot 'windows\installer\setup'
@@ -57,14 +58,17 @@ Invoke-Step 'Repack portable archive' {
   New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
   Remove-Item -LiteralPath $portableDir -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $portableZip -Force -ErrorAction SilentlyContinue
-  Copy-Item -LiteralPath $buildOutputDir -Destination $portableDir -Recurse -Force
+  New-Item -ItemType Directory -Path $portableRootDir -Force | Out-Null
+  Copy-Item -Path (Join-Path $buildOutputDir '*') -Destination $portableRootDir -Recurse -Force
+  New-Item -ItemType Directory -Path (Join-Path $portableRootDir 'logs') -Force | Out-Null
+  Copy-Item -LiteralPath (Join-Path $projectRoot 'windows\installer\README_PORTABLE_RU.txt') -Destination (Join-Path $portableRootDir 'README_RU.txt') -Force
 
-  $pdbFiles = @(Get-ChildItem -LiteralPath $portableDir -Recurse -Filter '*.pdb' -ErrorAction SilentlyContinue)
+  $pdbFiles = @(Get-ChildItem -LiteralPath $portableRootDir -Recurse -Filter '*.pdb' -ErrorAction SilentlyContinue)
   if ($pdbFiles.Count -gt 0) {
     throw "Release payload contains PDB files: $($pdbFiles.FullName -join ', ')"
   }
 
-  Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableZip -CompressionLevel Optimal -Force
+  Compress-Archive -Path $portableRootDir -DestinationPath $portableZip -CompressionLevel Optimal -Force
   Write-Host "Portable archive repacked: $portableZip"
 }
 
@@ -103,23 +107,23 @@ Invoke-Step 'Portable archive contents' {
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $requiredEntries = @(
-    'YurichConnect.exe',
-    'flutter_windows.dll',
-    'screen_retriever_windows_plugin.dll',
-    'tray_manager_plugin.dll',
-    'window_manager_plugin.dll',
-    'runtime/sing-box.exe',
-    'runtime/naive.exe',
-    'runtime/NAIVE_LICENSE.txt',
-    'runtime/wintun.dll',
-    'runtime/libcronet.dll',
-    'MSVCP140.dll',
-    'VCRUNTIME140.dll',
-    'VCRUNTIME140_1.dll',
-    'data/flutter_assets/windows/runner/resources/app_icon.ico',
-    'START_YURICH_CONNECT.cmd',
-    'uninstall_yurich_connect.ps1',
-    'README_PORTABLE_RU.txt'
+    'Yurich Connect/YurichConnect.exe',
+    'Yurich Connect/flutter_windows.dll',
+    'Yurich Connect/screen_retriever_windows_plugin.dll',
+    'Yurich Connect/tray_manager_plugin.dll',
+    'Yurich Connect/window_manager_plugin.dll',
+    'Yurich Connect/runtime/sing-box.exe',
+    'Yurich Connect/runtime/naive.exe',
+    'Yurich Connect/runtime/NAIVE_LICENSE.txt',
+    'Yurich Connect/runtime/wintun.dll',
+    'Yurich Connect/runtime/libcronet.dll',
+    'Yurich Connect/MSVCP140.dll',
+    'Yurich Connect/VCRUNTIME140.dll',
+    'Yurich Connect/VCRUNTIME140_1.dll',
+    'Yurich Connect/data/flutter_assets/windows/runner/resources/app_icon.ico',
+    'Yurich Connect/START_YURICH_CONNECT.cmd',
+    'Yurich Connect/uninstall_yurich_connect.ps1',
+    'Yurich Connect/README_RU.txt'
   )
 
   $zip = [IO.Compression.ZipFile]::OpenRead($portableZip)
@@ -147,18 +151,19 @@ Invoke-Step 'Installer payload safety scan' {
     'MSVCP140.dll',
     'VCRUNTIME140.dll',
     'VCRUNTIME140_1.dll',
+    'README_RU.txt',
     'README_PORTABLE_RU.txt',
     'START_YURICH_CONNECT.cmd',
     'uninstall_yurich_connect.ps1'
   )) {
-    $path = Join-Path $portableDir $name
+    $path = Join-Path $portableRootDir $name
     if (-not (Test-Path -LiteralPath $path)) {
       throw "Payload missing required file: $name"
     }
   }
 
   $forbiddenExtensions = @('.pdb', '.ilk', '.exp', '.lib')
-  $forbiddenFiles = @(Get-ChildItem -LiteralPath $portableDir -Recurse -File -ErrorAction SilentlyContinue |
+  $forbiddenFiles = @(Get-ChildItem -LiteralPath $portableRootDir -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $forbiddenExtensions -contains $_.Extension.ToLowerInvariant() })
   if ($forbiddenFiles.Count -gt 0) {
     throw "Payload contains debug/build files: $($forbiddenFiles.FullName -join ', ')"
@@ -177,16 +182,17 @@ Invoke-Step 'Installer payload safety scan' {
     '(?:Remnawave|Yurich ID)[^\r\n]+https?://'
   )
   $pattern = ($patterns -join '|')
-  $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' $pattern $portableDir 2>$null)
+  $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' $pattern $portableRootDir 2>$null)
   if ($matches.Count -gt 0) {
-    throw "Payload safety scan found sensitive/dev data in $portableDir`n$($matches -join [Environment]::NewLine)"
+    throw "Payload safety scan found sensitive/dev data in $portableRootDir`n$($matches -join [Environment]::NewLine)"
   }
   Write-Host "Payload safety scan OK"
 }
 
 if (-not $SkipInstallerPublish) {
   Invoke-Step 'Installer publish' {
-    Copy-Item -LiteralPath $portableZip -Destination $setupPayload -Force
+    Remove-Item -LiteralPath $setupPayload -Force -ErrorAction SilentlyContinue
+    Compress-Archive -Path (Join-Path $portableRootDir '*') -DestinationPath $setupPayload -CompressionLevel Optimal -Force
     Copy-Item -LiteralPath $runnerIcon -Destination $setupIcon -Force
     try {
       Remove-Item -LiteralPath (Join-Path $setupDir 'bin'), (Join-Path $setupDir 'obj') -Recurse -Force -ErrorAction SilentlyContinue
@@ -216,9 +222,13 @@ Invoke-Step 'Installer safety scan' {
 
 Invoke-Step 'Release hashes' {
   $portableHash = Get-FileHash -Algorithm SHA256 -LiteralPath $portableZip
+  $portableHashLine = "{0}  {1}" -f $portableHash.Hash, (Split-Path -Leaf $portableHash.Path)
+  Set-Content -LiteralPath "$portableZip.sha256" -Value $portableHashLine -Encoding ASCII
   Write-Host ("{0}  {1}" -f $portableHash.Hash, $portableHash.Path)
   if (Test-Path -LiteralPath $setupExe) {
     $setupHash = Get-FileHash -Algorithm SHA256 -LiteralPath $setupExe
+    $setupHashLine = "{0}  {1}" -f $setupHash.Hash, (Split-Path -Leaf $setupHash.Path)
+    Set-Content -LiteralPath "$setupExe.sha256" -Value $setupHashLine -Encoding ASCII
     Write-Host ("{0}  {1}" -f $setupHash.Hash, $setupHash.Path)
   }
 }

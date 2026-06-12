@@ -62,6 +62,17 @@ class AndroidVpnEngine implements VpnEngine {
   Future<bool> stopVPN() => _singBox.stopVPN();
 
   @override
+  Future<bool> repairConnection() async {
+    try {
+      await _singBox.stopVPN();
+      await _singBox.clearLogs();
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  @override
   Future<List<String>> getLogs() => _singBox.getLogs();
 
   @override

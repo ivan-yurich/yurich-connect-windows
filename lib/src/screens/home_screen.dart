@@ -14,6 +14,7 @@ import '../models/vpn_profile.dart';
 import '../branding.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_store.dart';
+import '../services/secret_redactor.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
 import '../services/windows_integration_service.dart';
@@ -30,7 +31,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.32';
+const _appVersion = '1.0.33';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -152,6 +153,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoStart = false;
   bool _autoConnect = false;
   bool _autoConnectAttempted = false;
+  bool _isWindowsAdmin = !Platform.isWindows;
   bool _showAllProfiles = false;
   _ProfileFilter _profileFilter = _ProfileFilter.all;
   bool _healthWatchdogRestarting = false;
@@ -380,6 +382,9 @@ class _HomeScreenState extends State<HomeScreen>
     if (Platform.isWindows) {
       await _windowsIntegration.repairAutoStartIfNeeded();
     }
+    final isWindowsAdmin = Platform.isWindows
+        ? await _windowsIntegration.isCurrentProcessElevated()
+        : true;
     final autoStart = Platform.isWindows
         ? await _windowsIntegration.isAutoStartEnabled()
         : false;
@@ -397,6 +402,7 @@ class _HomeScreenState extends State<HomeScreen>
       _selectedProfileId = resolvedSelectedId;
       _autoConnect = autoConnect;
       _autoStart = autoStart;
+      _isWindowsAdmin = isWindowsAdmin;
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
       _vpnOnlyProcesses = vpnOnlyProcesses;
       _subscriptionSources = subscriptionSources;
@@ -458,7 +464,36 @@ class _HomeScreenState extends State<HomeScreen>
       if (event['type'] == 'alert') {
         final message = event['message'] as String?;
         if (message != null && message.isNotEmpty && mounted) {
-          setState(() => _message = message);
+          setState(() {
+            _message = message;
+            _lastError = message;
+            if (event['code'] == 'adminRequired') {
+              _status = YurichConnectStatus.adminRequired;
+              _isWindowsAdmin = false;
+            }
+          });
+          if (event['code'] == 'adminRequired') {
+            _showSnack(
+              message,
+              action: SnackBarAction(
+                label: s.restartAsAdmin,
+                onPressed: () => unawaited(_restartAsAdministrator()),
+              ),
+            );
+          } else {
+            _showSnack(message);
+          }
+        }
+        return;
+      }
+
+      if (event['type'] == 'repair') {
+        final message = event['message'] as String?;
+        if (message != null && message.isNotEmpty && mounted) {
+          setState(() {
+            _message = message;
+            _lastError = event['result'] == 'ok' ? null : message;
+          });
           _showSnack(message);
         }
         return;
@@ -910,6 +945,14 @@ class _HomeScreenState extends State<HomeScreen>
     final profile = _selectedProfile;
     if (profile == null) {
       _showSnack(s.importFirst);
+      if (mounted) {
+        setState(() => _status = YurichConnectStatus.noProfile);
+      }
+      return;
+    }
+
+    if (Platform.isWindows && !_isWindowsAdmin) {
+      await _showAdminRequiredDialog();
       return;
     }
 
@@ -919,7 +962,64 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Future<void> _showAdminRequiredDialog() async {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _status = YurichConnectStatus.adminRequired;
+      _lastError = s.adminRightsRequired;
+      _message = s.adminRightsRequired;
+    });
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(s.adminRightsRequiredTitle),
+        content: Text(s.adminRightsRequiredBody),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(s.cancel),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.of(context).pop();
+              unawaited(_restartAsAdministrator());
+            },
+            icon: const Icon(Icons.admin_panel_settings_outlined),
+            label: Text(s.restartAsAdmin),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _restartAsAdministrator() async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    final started = await _windowsIntegration
+        .restartCurrentProcessAsAdministrator();
+    if (!started) {
+      if (!mounted) {
+        return;
+      }
+      _showSnack(s.adminRestartDeclined);
+      return;
+    }
+
+    try {
+      await trayManager.destroy();
+      await windowManager.setPreventClose(false);
+      await windowManager.close();
+    } on Object {
+      // The elevated copy has already been requested; process exit is enough.
+    }
+    exit(0);
+  }
+
   Future<void> _startVpnCore(VpnProfile profile) async {
+    _validateProfileForStart(profile);
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
     final status = await _refreshVpnStatus();
     if (status != YurichConnectStatus.stopped) {
@@ -1060,6 +1160,75 @@ class _HomeScreenState extends State<HomeScreen>
         _lastError = null;
         _message = s.connectionProfile(profile.name);
       });
+    }
+  }
+
+  void _validateProfileForStart(VpnProfile profile) {
+    if (profile.kind == VpnProfileKind.singBoxConfig) {
+      final raw = profile.rawConfig?.trim();
+      if (raw == null || raw.isEmpty) {
+        throw StateError('Конфиг повреждён. Импортируйте профиль заново.');
+      }
+      try {
+        jsonDecode(raw);
+      } on Object {
+        throw StateError('Конфиг повреждён. Импортируйте профиль заново.');
+      }
+      return;
+    }
+
+    final outbound = profile.outbound;
+    if (outbound == null) {
+      throw StateError('Конфиг повреждён. Импортируйте профиль заново.');
+    }
+
+    final serverValue = profile.server ?? outbound['server'];
+    final server = serverValue == null ? '' : '$serverValue'.trim();
+    if (server.isEmpty) {
+      throw StateError('В профиле отсутствует адрес сервера.');
+    }
+
+    switch (profile.kind) {
+      case VpnProfileKind.vlessReality:
+      case VpnProfileKind.vlessTls:
+        final uuid = '${outbound['uuid'] ?? ''}'.trim();
+        if (uuid.isEmpty) {
+          throw StateError('В профиле отсутствует UUID.');
+        }
+        final tls = (outbound['tls'] as Map?)?.cast<String, dynamic>();
+        if (profile.kind == VpnProfileKind.vlessReality) {
+          final reality = (tls?['reality'] as Map?)?.cast<String, dynamic>();
+          final publicKey = '${reality?['public_key'] ?? ''}'.trim();
+          final serverName = '${tls?['server_name'] ?? ''}'.trim();
+          if (publicKey.isEmpty) {
+            throw StateError('Ошибка Reality: отсутствует publicKey.');
+          }
+          if (serverName.isEmpty) {
+            throw StateError('Ошибка Reality: отсутствует serverName.');
+          }
+        }
+        break;
+      case VpnProfileKind.naive:
+        final password = '${outbound['password'] ?? ''}'.trim();
+        final username = '${outbound['username'] ?? ''}'.trim();
+        if (username.isEmpty && password.isEmpty) {
+          throw StateError('Ошибка NaiveProxy: неверный формат ссылки.');
+        }
+        break;
+      case VpnProfileKind.hysteria:
+        final auth = '${outbound['auth_str'] ?? outbound['auth'] ?? ''}'.trim();
+        if (auth.isEmpty) {
+          throw StateError('Ошибка Hysteria: отсутствует пароль.');
+        }
+        break;
+      case VpnProfileKind.hysteria2:
+        final password = '${outbound['password'] ?? ''}'.trim();
+        if (password.isEmpty) {
+          throw StateError('Ошибка Hysteria2: отсутствует пароль.');
+        }
+        break;
+      case VpnProfileKind.singBoxConfig:
+        break;
     }
   }
 
@@ -1404,6 +1573,12 @@ class _HomeScreenState extends State<HomeScreen>
       'VPN health watchdog restarting tunnel after repeated probe failures: '
       '$probeDescription. attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
     );
+    if (mounted) {
+      setState(() {
+        _status = YurichConnectStatus.reconnecting;
+        _message = s.reconnecting;
+      });
+    }
     await _runBusy(() async {
       await _stopVpnCore(updateMessage: false);
       await Future<void>.delayed(const Duration(seconds: 2));
@@ -1432,6 +1607,35 @@ class _HomeScreenState extends State<HomeScreen>
     await _runBusy(() => _stopVpnCore(), message: s.disconnectingVpn);
   }
 
+  Future<void> _repairConnection() async {
+    await _runBusy(() async {
+      final ok = await _vpnEngine.repairConnection();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status = ok ? YurichConnectStatus.stopped : YurichConnectStatus.error;
+        _connectedAt = null;
+        _uplink = '0 B/s';
+        _downlink = '0 B/s';
+        _sessionTotal = '0 B';
+        _lastError = ok ? null : s.repairFailed;
+        _message = ok ? s.repairOk : s.repairFailed;
+      });
+      if (ok) {
+        _showSnack(s.repairOk);
+      } else {
+        _showSnack(
+          s.repairFailed,
+          action: SnackBarAction(
+            label: s.report,
+            onPressed: () => unawaited(_emailDeveloper()),
+          ),
+        );
+      }
+    }, message: s.repairingConnection);
+  }
+
   Future<void> _stopVpnCore({bool updateMessage = true}) async {
     _stoppingByUser = true;
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
@@ -1442,7 +1646,7 @@ class _HomeScreenState extends State<HomeScreen>
       final status = await _refreshVpnStatus();
       if (status != YurichConnectStatus.stopped) {
         await _vpnEngine.stopVPN().timeout(
-          const Duration(seconds: 5),
+          const Duration(seconds: 16),
           onTimeout: () => true,
         );
         final stoppedStatus = await _waitForVpnStatus({
@@ -2107,47 +2311,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _redactSensitive(String value) {
-    return value
-        .replaceAll(
-          RegExp(
-            r'\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b',
-            caseSensitive: false,
-          ),
-          '***uuid***',
-        )
-        .replaceAllMapped(
-          RegExp(r'(naive\+https://)[^:@\s]+:[^@\s]+@', caseSensitive: false),
-          (match) => '${match[1]}***:***@',
-        )
-        .replaceAllMapped(
-          RegExp(
-            r'(vless://|hysteria2://|hy2://|hysteria://)[^\s]+',
-            caseSensitive: false,
-          ),
-          (match) => '${match[1]}***',
-        )
-        .replaceAllMapped(
-          RegExp(r'(vless://)[^@\s]+@', caseSensitive: false),
-          (match) => '${match[1]}***@',
-        )
-        .replaceAllMapped(
-          RegExp(r'(https?://)[^:@/\s]+:[^@/\s]+@', caseSensitive: false),
-          (match) => '${match[1]}***:***@',
-        )
-        .replaceAllMapped(
-          RegExp(
-            r'("(?:password|passwd|token|access_token|refresh_token|uuid|auth|auth_str|public_key|short_id|subscription)"\s*:\s*")[^"]+',
-            caseSensitive: false,
-          ),
-          (match) => '${match[1]}***',
-        )
-        .replaceAllMapped(
-          RegExp(
-            r'((?:password|passwd|token|access_token|refresh_token|auth|key)=)[^&\s]+',
-            caseSensitive: false,
-          ),
-          (match) => '${match[1]}***',
-        );
+    return SecretRedactor.redact(value);
   }
 
   String _formatLogTimestamp(DateTime time) {
@@ -2277,6 +2441,23 @@ class _HomeScreenState extends State<HomeScreen>
                     sessionTotal: _sessionTotal,
                     sessionDuration: _sessionDuration,
                   ),
+                  if (_status == YurichConnectStatus.adminRequired ||
+                      _lastError != null) ...[
+                    const SizedBox(height: 10),
+                    _IssueActionPanel(
+                      strings: s,
+                      status: _status,
+                      error: _lastError,
+                      busy: _busy,
+                      canRetry: selected != null,
+                      onRetry: () => unawaited(_connect()),
+                      onRestartAsAdmin: Platform.isWindows
+                          ? () => unawaited(_restartAsAdministrator())
+                          : null,
+                      onRepair: () => unawaited(_repairConnection()),
+                      onReport: () => unawaited(_emailDeveloper()),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   _ProfilePanel(
                     strings: s,
@@ -2327,6 +2508,7 @@ class _HomeScreenState extends State<HomeScreen>
                       onCheckUpdate: _checkForUpdates,
                       onOpenReleases: () =>
                           _openUrl(WindowsIntegrationService.releasesUrl),
+                      onRepairConnection: () => unawaited(_repairConnection()),
                     ),
                   ],
                   const SizedBox(height: 16),
@@ -2352,10 +2534,24 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _buildConnectButton(BuildContext context, VpnProfile? selected) {
+    final label = switch (_status) {
+      YurichConnectStatus.starting => s.connecting,
+      YurichConnectStatus.stopping => s.disconnecting,
+      YurichConnectStatus.reconnecting => s.reconnecting,
+      YurichConnectStatus.started => s.disconnect,
+      _ => s.connect,
+    };
+    final icon = switch (_status) {
+      YurichConnectStatus.starting ||
+      YurichConnectStatus.reconnecting => Icons.sync,
+      YurichConnectStatus.stopping => Icons.power_settings_new,
+      YurichConnectStatus.started => Icons.power_settings_new,
+      _ => Icons.shield,
+    };
     return FilledButton.icon(
       onPressed: _busy || selected == null ? null : _toggleVpn,
-      icon: Icon(_connected ? Icons.power_settings_new : Icons.shield),
-      label: Text(_connected ? s.disconnect : s.connect),
+      icon: Icon(icon),
+      label: Text(label),
       style: FilledButton.styleFrom(
         minimumSize: const Size.fromHeight(54),
         textStyle: Theme.of(context).textTheme.titleMedium,
@@ -2487,6 +2683,11 @@ class _StatusPanel extends StatelessWidget {
       YurichConnectStatus.started => strings.connected,
       YurichConnectStatus.starting => strings.connecting,
       YurichConnectStatus.stopping => strings.disconnecting,
+      YurichConnectStatus.reconnecting => strings.reconnecting,
+      YurichConnectStatus.adminRequired => strings.adminRequiredStatus,
+      YurichConnectStatus.noProfile => strings.noProfileStatus,
+      YurichConnectStatus.noInternet => strings.noInternetStatus,
+      YurichConnectStatus.error => strings.errorStatus,
       _ => strings.stopped,
     };
 
@@ -2513,8 +2714,20 @@ class _StatusPanel extends StatelessWidget {
               Row(
                 children: [
                   Icon(
-                    connected ? Icons.verified_user : Icons.shield_outlined,
-                    color: connected ? _goldSoft : _mutedGold,
+                    status == YurichConnectStatus.error
+                        ? Icons.error_outline
+                        : status == YurichConnectStatus.adminRequired
+                        ? Icons.admin_panel_settings_outlined
+                        : connected
+                        ? Icons.verified_user
+                        : Icons.shield_outlined,
+                    color: status == YurichConnectStatus.error
+                        ? Colors.redAccent
+                        : status == YurichConnectStatus.adminRequired
+                        ? Colors.orangeAccent
+                        : connected
+                        ? _goldSoft
+                        : _mutedGold,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -2566,6 +2779,113 @@ class _StatusPanel extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _IssueActionPanel extends StatelessWidget {
+  const _IssueActionPanel({
+    required this.strings,
+    required this.status,
+    required this.error,
+    required this.busy,
+    required this.canRetry,
+    required this.onRetry,
+    required this.onRestartAsAdmin,
+    required this.onRepair,
+    required this.onReport,
+  });
+
+  final _Strings strings;
+  final String status;
+  final String? error;
+  final bool busy;
+  final bool canRetry;
+  final VoidCallback onRetry;
+  final VoidCallback? onRestartAsAdmin;
+  final VoidCallback onRepair;
+  final VoidCallback onReport;
+
+  @override
+  Widget build(BuildContext context) {
+    final adminRequired = status == YurichConnectStatus.adminRequired;
+    final title = adminRequired
+        ? strings.adminRightsRequiredTitle
+        : strings.connectionErrorTitle;
+    final body = adminRequired
+        ? strings.adminRightsRequiredBody
+        : (error == null || error!.isEmpty
+              ? strings.connectionErrorBody
+              : error!);
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF22171B),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.orangeAccent.withValues(alpha: 0.34)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  adminRequired
+                      ? Icons.admin_panel_settings_outlined
+                      : Icons.error_outline,
+                  color: Colors.orangeAccent,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              body,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Color(0xFFE4C9B4), height: 1.25),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (adminRequired && onRestartAsAdmin != null)
+                  FilledButton.icon(
+                    onPressed: busy ? null : onRestartAsAdmin,
+                    icon: const Icon(Icons.restart_alt),
+                    label: Text(strings.restartAsAdmin),
+                  ),
+                if (!adminRequired)
+                  OutlinedButton.icon(
+                    onPressed: busy || !canRetry ? null : onRetry,
+                    icon: const Icon(Icons.refresh),
+                    label: Text(strings.tryAgain),
+                  ),
+                OutlinedButton.icon(
+                  onPressed: busy ? null : onRepair,
+                  icon: const Icon(Icons.healing_outlined),
+                  label: Text(strings.repairConnection),
+                ),
+                TextButton.icon(
+                  onPressed: busy ? null : onReport,
+                  icon: const Icon(Icons.description_outlined),
+                  label: Text(strings.sendReport),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
@@ -3222,6 +3542,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onEditVpnOnly,
     required this.onCheckUpdate,
     required this.onOpenReleases,
+    required this.onRepairConnection,
   });
 
   final _Strings strings;
@@ -3239,6 +3560,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final VoidCallback onEditVpnOnly;
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenReleases;
+  final VoidCallback onRepairConnection;
 
   @override
   Widget build(BuildContext context) {
@@ -3297,6 +3619,11 @@ class _WindowsToolsPanel extends StatelessWidget {
                   onPressed: onEditVpnOnly,
                   icon: const Icon(Icons.vpn_lock_outlined),
                   label: Text(strings.vpnOnlyButton(vpnOnlyProcessCount)),
+                ),
+                _ActionTile(
+                  onPressed: busy ? null : onRepairConnection,
+                  icon: const Icon(Icons.healing_outlined),
+                  label: Text(strings.repairConnection),
                 ),
                 _ActionTile(
                   onPressed: checkingUpdate || installingUpdate
@@ -4038,6 +4365,99 @@ class _Strings {
     _ when info.message.contains('failed') =>
       'Не удалось проверить обновления.',
     _ => info.message,
+  };
+
+  String get reconnecting => switch (this) {
+    _Strings.en => 'Reconnecting...',
+    _ => 'Переподключение...',
+  };
+
+  String get adminRequiredStatus => switch (this) {
+    _Strings.en => 'Administrator rights required',
+    _ => 'Требуются права администратора',
+  };
+
+  String get noProfileStatus => switch (this) {
+    _Strings.en => 'No profile',
+    _ => 'Нет профиля',
+  };
+
+  String get noInternetStatus => switch (this) {
+    _Strings.en => 'No internet',
+    _ => 'Нет интернета',
+  };
+
+  String get errorStatus => switch (this) {
+    _Strings.en => 'Error',
+    _ => 'Ошибка',
+  };
+
+  String get adminRightsRequiredTitle => switch (this) {
+    _Strings.en => 'Administrator rights required',
+    _ => 'Для подключения требуются права администратора',
+  };
+
+  String get adminRightsRequired => switch (this) {
+    _Strings.en => 'Administrator rights are required to connect.',
+    _ => 'Для подключения требуются права администратора.',
+  };
+
+  String get adminRightsRequiredBody => switch (this) {
+    _Strings.en =>
+      'Yurich Connect uses Windows TUN/Wintun mode. Restart the app as administrator and try connecting again.',
+    _ =>
+      'Yurich Connect использует режим Windows TUN/Wintun. Перезапустите приложение от имени администратора и подключитесь снова.',
+  };
+
+  String get restartAsAdmin => switch (this) {
+    _Strings.en => 'Restart as administrator',
+    _ => 'Перезапустить от имени администратора',
+  };
+
+  String get adminRestartDeclined => switch (this) {
+    _Strings.en => 'Windows UAC did not allow administrator restart.',
+    _ => 'Windows UAC не разрешил перезапуск от имени администратора.',
+  };
+
+  String get repairConnection => switch (this) {
+    _Strings.en => 'Repair connection',
+    _ => 'Починить подключение',
+  };
+
+  String get repairingConnection => switch (this) {
+    _Strings.en => 'Repairing connection...',
+    _ => 'Восстанавливаю подключение...',
+  };
+
+  String get repairOk => switch (this) {
+    _Strings.en => 'Connection repaired',
+    _ => 'Подключение восстановлено',
+  };
+
+  String get repairFailed => switch (this) {
+    _Strings.en => 'Could not repair automatically. Send a report.',
+    _ => 'Не удалось исправить автоматически, отправьте отчёт.',
+  };
+
+  String get connectionErrorTitle => switch (this) {
+    _Strings.en => 'Could not connect',
+    _ => 'Не удалось подключиться',
+  };
+
+  String get connectionErrorBody => switch (this) {
+    _Strings.en =>
+      'The profile is not responding or the server is temporarily unavailable.',
+    _ => 'Профиль не отвечает или сервер временно недоступен.',
+  };
+
+  String get tryAgain => switch (this) {
+    _Strings.en => 'Try again',
+    _ => 'Попробовать ещё раз',
+  };
+
+  String get sendReport => switch (this) {
+    _Strings.en => 'Send report',
+    _ => 'Отправить отчёт',
   };
 
   static const ru = _Strings._(

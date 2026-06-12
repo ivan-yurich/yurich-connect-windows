@@ -6,8 +6,10 @@ Yurich Connect Portable
 
 1. Распакуй YurichConnect_Windows_Portable.zip в отдельную папку.
 2. Открой распакованную папку Yurich Connect.
-3. Запусти START_YURICH_CONNECT.cmd.
-4. Разреши Windows UAC, потому что Yurich Desktop использует TUN/Wintun.
+3. Запусти YurichConnect.exe.
+4. Если приложение попросит права администратора, нажми "Перезапустить от имени администратора" и разреши Windows UAC.
+
+START_YURICH_CONNECT.cmd оставлен для совместимости. Он тоже запускает приложение через UAC.
 
 Если приложение не стартует:
 

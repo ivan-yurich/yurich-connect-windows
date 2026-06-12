@@ -79,6 +79,42 @@ class WindowsIntegrationService {
     }
   }
 
+  Future<bool> isCurrentProcessElevated() async {
+    if (!Platform.isWindows) {
+      return true;
+    }
+    return _isCurrentProcessElevated();
+  }
+
+  Future<bool> restartCurrentProcessAsAdministrator() async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+
+    final executable = Platform.resolvedExecutable;
+    final workingDirectory = File(executable).parent.path;
+    final exe = _quotePowerShell(executable);
+    final directory = _quotePowerShell(workingDirectory);
+    final result = await Process.run('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '''
+\$ErrorActionPreference = 'Stop'
+try {
+  Start-Process -FilePath $exe -WorkingDirectory $directory -Verb RunAs | Out-Null
+  exit 0
+} catch {
+  Write-Error \$_.Exception.Message
+  exit 1
+}
+''',
+    ]).timeout(const Duration(seconds: 20));
+
+    return result.exitCode == 0;
+  }
+
   Future<void> setAutoStart(
     bool enabled, {
     bool requestElevation = true,
