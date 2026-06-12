@@ -600,6 +600,80 @@ void main() {
     expect(vpnOnlyIndex, lessThan(geoIpRuIndex));
   });
 
+  test('routes Codex domains and executables directly on Windows', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                codexDirect: true,
+                vpnOnlyProcesses: const [
+                  'Codex.exe',
+                  'codex.exe',
+                  'openai-codex.exe',
+                  'OtherForeignApp.exe',
+                ],
+              ),
+            )
+            as Map<String, dynamic>;
+    final dnsRules = ((config['dns'] as Map<String, dynamic>)['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final route = config['route'] as Map<String, dynamic>;
+    final routeRules = (route['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
+    expect(route['find_process'], isTrue);
+    expect(
+      dnsRules.any(
+        (rule) =>
+            rule['server'] == 'local-dns' &&
+            rule['domain_suffix'] is List &&
+            (rule['domain_suffix'] as List).contains('chatgpt.com') &&
+            (rule['domain_suffix'] as List).contains('openai.com'),
+      ),
+      isTrue,
+    );
+    expect(
+      routeRules.any(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            rule['domain_suffix'] is List &&
+            (rule['domain_suffix'] as List).contains('chatgpt.com') &&
+            (rule['domain_suffix'] as List).contains('openai.com'),
+      ),
+      isTrue,
+    );
+    expect(
+      routeRules.any((rule) {
+        final processName = rule['process_name'];
+        return rule['outbound'] == 'direct' &&
+            processName is List &&
+            processName.contains('Codex.exe') &&
+            processName.contains('codex.exe') &&
+            processName.contains('openai-codex.exe') &&
+            !processName.contains('node.exe');
+      }),
+      isTrue,
+    );
+    expect(
+      routeRules.any((rule) {
+        final processName = rule['process_name'];
+        return rule['outbound'] == 'proxy' &&
+            processName is List &&
+            processName.contains('OtherForeignApp.exe') &&
+            !processName.contains('Codex.exe') &&
+            !processName.contains('codex.exe');
+      }),
+      isTrue,
+    );
+  });
+
   test('imports base64 subscription list', () async {
     const raw =
         'naive+https://user:pass@example.com:443#Naive\nvless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&pbk=abc123#Reality';

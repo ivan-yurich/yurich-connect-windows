@@ -13,6 +13,27 @@ class SingBoxConfigBuilder {
   static const russianGeoIpRuleSet = 'geoip-ru';
   static const russianGeoIpRuleSetUrl =
       'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs';
+  static const codexDirectDomains = [
+    'chatgpt.com',
+    'ws.chatgpt.com',
+    'openai.com',
+    'auth.openai.com',
+    'oaistatic.com',
+    'oaiusercontent.com',
+  ];
+  static const codexDirectDomainSuffixes = [
+    'chatgpt.com',
+    'openai.com',
+    'auth.openai.com',
+    'oaistatic.com',
+    'oaiusercontent.com',
+  ];
+  static const codexDirectProcesses = [
+    'codex.exe',
+    'Codex.exe',
+    'openai-codex.exe',
+    'OpenAI Codex.exe',
+  ];
   static const russianDirectDomains = [
     '.ru',
     '.рф',
@@ -42,6 +63,7 @@ class SingBoxConfigBuilder {
     NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
     List<String> splitTunnelExcludedProcesses = const [],
     List<String> vpnOnlyProcesses = const [],
+    bool codexDirect = false,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -71,12 +93,23 @@ class SingBoxConfigBuilder {
                 profile.kind == VpnProfileKind.vlessTls));
     final rejectAllUdp =
         profile.kind == VpnProfileKind.naive && proxyOutbound['type'] == 'http';
-    final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses);
+    final codexProcesses = target == SingBoxConfigTarget.windows && codexDirect
+        ? _normalizeProcessNames(codexDirectProcesses)
+        : const <String>[];
+    final codexProcessLookup = codexProcesses
+        .map((process) => process.toLowerCase())
+        .toSet();
+    final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses)
+        .where((process) => !codexProcessLookup.contains(process.toLowerCase()))
+        .toList(growable: false);
     final forcedProxyLookup = forcedProxyProcesses
         .map((process) => process.toLowerCase())
         .toSet();
     final excludedProcesses =
-        _normalizeProcessNames(splitTunnelExcludedProcesses)
+        _normalizeProcessNames([
+              ...splitTunnelExcludedProcesses,
+              ...codexProcesses,
+            ])
             .where(
               (process) => !forcedProxyLookup.contains(process.toLowerCase()),
             )
@@ -84,7 +117,7 @@ class SingBoxConfigBuilder {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
-      'dns': _dnsConfig(target),
+      'dns': _dnsConfig(target, codexDirect: codexDirect),
       'inbounds': [_tunInbound(target), _mixedInbound()],
       'outbounds': [
         proxyOutbound,
@@ -107,16 +140,18 @@ class SingBoxConfigBuilder {
               'process_name': ['naive.exe'],
               'outbound': 'direct',
             },
-        if (target == SingBoxConfigTarget.windows) ...[
-            {
-              'ip_is_private': true,
-              'protocol': 'icmp',
-              'action': 'reject',
-            },
+          if (target == SingBoxConfigTarget.windows) ...[
+            {'ip_is_private': true, 'protocol': 'icmp', 'action': 'reject'},
             {'ip_is_private': true, 'outbound': 'direct'},
             if (excludedProcesses.isNotEmpty)
               {'process_name': excludedProcesses, 'outbound': 'direct'},
           ],
+          if (target == SingBoxConfigTarget.windows && codexDirect)
+            {
+              'domain': codexDirectDomains,
+              'domain_suffix': codexDirectDomainSuffixes,
+              'outbound': 'direct',
+            },
           _unsupportedUdpRule(
             rejectQuicUdp: rejectQuicUdp,
             rejectAllUdp: rejectAllUdp,
@@ -199,7 +234,10 @@ class SingBoxConfigBuilder {
     };
   }
 
-  Map<String, dynamic> _dnsConfig(SingBoxConfigTarget target) {
+  Map<String, dynamic> _dnsConfig(
+    SingBoxConfigTarget target, {
+    required bool codexDirect,
+  }) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
       if (target == SingBoxConfigTarget.android)
@@ -239,6 +277,13 @@ class SingBoxConfigBuilder {
             'action': 'route',
             'server': 'local-dns',
           },
+          if (codexDirect)
+            {
+              'domain': codexDirectDomains,
+              'domain_suffix': codexDirectDomainSuffixes,
+              'action': 'route',
+              'server': 'local-dns',
+            },
           {
             'domain_suffix': russianDirectDomains,
             'action': 'route',

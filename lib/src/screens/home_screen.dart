@@ -31,20 +31,21 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.34';
+const _appVersion = '1.0.35';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
-const _healthWatchdogTick = Duration(seconds: 20);
-const _healthWatchdogStartupGrace = Duration(seconds: 30);
-const _healthWatchdogRetryGrace = Duration(seconds: 60);
-const _healthWatchdogFailureLimit = 3;
-const _healthWatchdogActiveTrafficFailureWindow = Duration(minutes: 1);
+const _healthWatchdogTick = Duration(seconds: 45);
+const _healthWatchdogStartupGrace = Duration(seconds: 75);
+const _healthWatchdogRetryGrace = Duration(minutes: 2);
+const _healthWatchdogFailureLimit = 4;
+const _healthWatchdogActiveTrafficFailureWindow = Duration(minutes: 5);
 const _healthWatchdogProbeAttempts = 2;
-const _healthWatchdogProbeDelay = Duration(milliseconds: 350);
+const _healthWatchdogProbeDelay = Duration(milliseconds: 800);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
 const _healthProbeHistoryWindow = Duration(hours: 1);
 const _healthProbeHistoryLimit = 240;
+const _codexProcessProbeTimeout = Duration(seconds: 5);
 
 class _HealthProbeAttempt {
   const _HealthProbeAttempt({
@@ -152,6 +153,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _installingUpdate = false;
   bool _autoStart = false;
   bool _autoConnect = false;
+  bool _codexDirect = ProfileStore.defaultCodexDirect;
   bool _autoConnectAttempted = false;
   bool _isWindowsAdmin = !Platform.isWindows;
   bool _showAllProfiles = false;
@@ -168,8 +170,12 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
   bool _refreshingSubscriptions = false;
+  bool _codexDiagnosticsBusy = false;
   String? _dismissedUpdateVersion;
   String? _lastConfigSummary;
+  DateTime? _lastVpnReconnectAt;
+  String? _lastVpnReconnectReason;
+  bool _lastReconnectDuringCodex = false;
   final List<_HealthProbeAttempt> _healthProbeHistory = [];
   final _logs = <String>[];
   final _pendingLogs = <String>[];
@@ -183,6 +189,17 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
     return _profiles.isEmpty ? null : _profiles.first;
+  }
+
+  bool get _codexDirectSupported {
+    final profile = _selectedProfile;
+    return profile == null || _codexDirectSupportedForProfile(profile);
+  }
+
+  bool _codexDirectSupportedForProfile(VpnProfile profile) {
+    return Platform.isWindows &&
+        _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
+        profile.kind != VpnProfileKind.singBoxConfig;
   }
 
   bool get _connected =>
@@ -362,6 +379,7 @@ class _HomeScreenState extends State<HomeScreen>
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final autoConnect = await _store.loadAutoConnect();
+    final codexDirect = await _store.loadCodexDirect();
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
     final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
@@ -401,6 +419,7 @@ class _HomeScreenState extends State<HomeScreen>
       _profiles = profiles;
       _selectedProfileId = resolvedSelectedId;
       _autoConnect = autoConnect;
+      _codexDirect = codexDirect;
       _autoStart = autoStart;
       _isWindowsAdmin = isWindowsAdmin;
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
@@ -1052,6 +1071,7 @@ class _HomeScreenState extends State<HomeScreen>
         naiveMode: plan.naiveMode,
         splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
         vpnOnlyProcesses: _vpnOnlyProcesses,
+        codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
       );
       final naiveProxyConfig =
           _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
@@ -1114,6 +1134,15 @@ class _HomeScreenState extends State<HomeScreen>
               'VPN start probe failed for ${plan.label}: $probeInfo. '
               'attempts=$attemptCount, p99=${_formatLatency(p99Latency)}.',
             );
+            final guardedSessionReason = await _healthReconnectGuardReason();
+            if (guardedSessionReason != null) {
+              _queueLog(
+                'VPN start probe failed during $guardedSessionReason; keeping tunnel alive '
+                'to preserve long-lived connections. Reason: $probeInfo.',
+              );
+              connected = true;
+              break;
+            }
             lastStartError = s.connectionProbeFailed;
           } else {
             lastStartError = s.vpnNotConnected(finalStatus);
@@ -1279,6 +1308,11 @@ class _HomeScreenState extends State<HomeScreen>
         uri: Uri.https('connectivitycheck.gstatic.com', '/generate_204'),
         allowCertificateMismatch: false,
       ),
+      (
+        uri: Uri.https('www.msftconnecttest.com', '/connecttest.txt'),
+        allowCertificateMismatch: false,
+      ),
+      (uri: Uri.https('chatgpt.com', '/'), allowCertificateMismatch: false),
     ];
 
     final attempts = <_HealthProbeAttempt>[];
@@ -1297,7 +1331,7 @@ class _HomeScreenState extends State<HomeScreen>
         final startedAt = DateTime.now();
         final stopwatch = Stopwatch()..start();
         final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 3)
+          ..connectionTimeout = const Duration(seconds: 6)
           ..badCertificateCallback = endpoint.allowCertificateMismatch
               ? (_, host, _) => host == endpoint.uri.host
               : null
@@ -1307,17 +1341,17 @@ class _HomeScreenState extends State<HomeScreen>
         try {
           final request = await client
               .getUrl(endpoint.uri)
-              .timeout(const Duration(seconds: 3));
+              .timeout(const Duration(seconds: 6));
           request.headers.set(
             HttpHeaders.userAgentHeader,
             'YurichConnect/$_appVersion',
           );
           request.followRedirects = false;
           final response = await request.close().timeout(
-            const Duration(seconds: 4),
+            const Duration(seconds: 8),
           );
           await response.drain<void>().timeout(
-            const Duration(seconds: 2),
+            const Duration(seconds: 4),
             onTimeout: () {},
           );
           attemptLog = _HealthProbeAttempt(
@@ -1532,15 +1566,16 @@ class _HomeScreenState extends State<HomeScreen>
     final probeP99 = _healthProbeP99LatencyMs();
     final probeAttempts = probeResult.attempts.length;
 
-    if (_hasActiveTraffic()) {
-      _healthWatchdogFailures = 2;
+    final guardedSessionReason = await _healthReconnectGuardReason();
+    if (guardedSessionReason != null) {
+      _healthWatchdogFailures = 0;
       _healthWatchdogCooldownUntil = DateTime.now().add(
         _healthWatchdogActiveTrafficFailureWindow,
       );
       _queueLog(
-        'VPN health watchdog probe failed during active traffic: $probeDescription. '
+        'VPN health watchdog probe failed during $guardedSessionReason: $probeDescription. '
         'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}. '
-        'Retrying after traffic cooldown.',
+        'Reconnect skipped to preserve long-lived connections.',
       );
       return;
     }
@@ -1565,10 +1600,27 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    final codexActive = await _hasActiveCodexProcess();
+    if (codexActive) {
+      _healthWatchdogFailures = 0;
+      _healthWatchdogCooldownUntil = DateTime.now().add(
+        _healthWatchdogActiveTrafficFailureWindow,
+      );
+      _queueLog(
+        'Codex WebSocket may be interrupted by VPN reconnect; reconnect skipped. '
+        'Reason: $probeDescription. attempts=$probeAttempts, '
+        'p99=${_formatLatency(probeP99)}.',
+      );
+      return;
+    }
+
     _healthWatchdogRestarting = true;
     _healthWatchdogCooldownUntil = DateTime.now().add(
       _healthWatchdogActiveTrafficFailureWindow,
     );
+    _lastVpnReconnectAt = DateTime.now();
+    _lastVpnReconnectReason = probeDescription;
+    _lastReconnectDuringCodex = codexActive;
     _queueLog(
       'VPN health watchdog restarting tunnel after repeated probe failures: '
       '$probeDescription. attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
@@ -1601,6 +1653,114 @@ class _HomeScreenState extends State<HomeScreen>
       return false;
     }
     return _uplinkBytesPerSecond + _downlinkBytesPerSecond > 2048;
+  }
+
+  Future<String?> _healthReconnectGuardReason() async {
+    if (_hasActiveTraffic()) {
+      return 'active traffic';
+    }
+    if (_codexDirect && await _hasActiveCodexProcess()) {
+      return 'active Codex session';
+    }
+    return null;
+  }
+
+  Future<bool> _hasActiveCodexProcess() async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+    const script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+$codexNames = @('codex.exe', 'Codex.exe', 'openai-codex.exe', 'OpenAI Codex.exe')
+$match = Get-CimInstance Win32_Process | Where-Object {
+  $name = [string]$_.Name
+  $path = [string]$_.ExecutablePath
+  $command = [string]$_.CommandLine
+  ($codexNames -contains $name) -or
+    ($name -ieq 'node.exe' -and (($path -match '(?i)(codex|openai)') -or ($command -match '(?i)(codex|openai)')))
+} | Select-Object -First 1
+if ($null -ne $match) { 'true' } else { 'false' }
+''';
+    try {
+      final result = await Process.run('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ]).timeout(_codexProcessProbeTimeout);
+      return '${result.stdout}'.toLowerCase().contains('true');
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<String> _diagnoseDnsHost(String host) async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final addresses = await InternetAddress.lookup(
+        host,
+      ).timeout(const Duration(seconds: 6));
+      stopwatch.stop();
+      final preview = addresses
+          .take(3)
+          .map((address) => address.address)
+          .join(', ');
+      return 'Codex DNS $host: ok in ${stopwatch.elapsedMilliseconds}ms'
+          '${preview.isEmpty ? '' : ' -> $preview'}.';
+    } on Object catch (error) {
+      stopwatch.stop();
+      return 'Codex DNS $host: failed in ${stopwatch.elapsedMilliseconds}ms: '
+          '${_redactSensitive('$error')}.';
+    }
+  }
+
+  Future<String> _diagnoseTcp443(String host) async {
+    final stopwatch = Stopwatch()..start();
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        host,
+        443,
+        timeout: const Duration(seconds: 8),
+      );
+      stopwatch.stop();
+      return 'Codex TCP $host:443: ok in ${stopwatch.elapsedMilliseconds}ms.';
+    } on Object catch (error) {
+      stopwatch.stop();
+      return 'Codex TCP $host:443: failed in ${stopwatch.elapsedMilliseconds}ms: '
+          '${_redactSensitive('$error')}.';
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  Future<String> _diagnoseCodexWebSocket() async {
+    final stopwatch = Stopwatch()..start();
+    WebSocket? socket;
+    try {
+      socket = await WebSocket.connect(
+        'wss://chatgpt.com/Codex',
+        headers: {HttpHeaders.userAgentHeader: 'YurichConnect/$_appVersion'},
+      ).timeout(const Duration(seconds: 8));
+      stopwatch.stop();
+      return 'Codex WebSocket upgrade: ok in ${stopwatch.elapsedMilliseconds}ms.';
+    } on Object catch (error) {
+      stopwatch.stop();
+      return 'Codex WebSocket upgrade: not established in '
+          '${stopwatch.elapsedMilliseconds}ms: ${_redactSensitive('$error')}. '
+          'If DNS/TCP are ok, ChatGPT may reject unauthenticated diagnostic upgrades.';
+    } finally {
+      unawaited(socket?.close());
+    }
+  }
+
+  String _formatDurationAgo(DateTime timestamp) {
+    final elapsed = DateTime.now().difference(timestamp);
+    if (elapsed.inMinutes >= 1) {
+      return '${elapsed.inMinutes}m';
+    }
+    return '${elapsed.inSeconds}s';
   }
 
   Future<void> _disconnect() async {
@@ -1737,6 +1897,29 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
+  Future<void> _setCodexDirect(bool value) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    if (!_codexDirectSupported) {
+      _showSnack(s.codexDirectTunOnly);
+      return;
+    }
+    await _store.saveCodexDirect(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _codexDirect = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      value
+          ? 'Codex direct mode enabled: ChatGPT/OpenAI domains and Codex executables will bypass the VPN in Windows TUN mode.'
+          : 'Codex direct mode disabled: Codex will follow the regular VPN routing rules.',
+    );
+  }
+
   Future<void> _setAutoStart(bool value) async {
     if (!Platform.isWindows || _windowsSettingsBusy) {
       return;
@@ -1761,6 +1944,50 @@ class _HomeScreenState extends State<HomeScreen>
     } finally {
       if (mounted) {
         setState(() => _windowsSettingsBusy = false);
+      }
+    }
+  }
+
+  Future<void> _runCodexDiagnostics() async {
+    if (_codexDiagnosticsBusy) {
+      return;
+    }
+    setState(() => _codexDiagnosticsBusy = true);
+    final lines = <String>[
+      'Codex diagnostics started. direct=$_codexDirect, supported=$_codexDirectSupported, status=$_status.',
+    ];
+    try {
+      final codexProcessActive = await _hasActiveCodexProcess();
+      lines.add(
+        'Codex process: ${codexProcessActive ? 'active' : 'not detected'}.',
+      );
+      for (final host in const ['chatgpt.com', 'ws.chatgpt.com']) {
+        lines.add(await _diagnoseDnsHost(host));
+      }
+      lines.add(await _diagnoseTcp443('chatgpt.com'));
+      lines.add(await _diagnoseCodexWebSocket());
+      final reconnectAt = _lastVpnReconnectAt;
+      if (reconnectAt == null) {
+        lines.add('VPN reconnect during this app session: none recorded.');
+      } else {
+        lines.add(
+          'Last VPN reconnect: ${_formatDurationAgo(reconnectAt)} ago; '
+          'reason=${_redactSensitive(_lastVpnReconnectReason ?? 'unknown')}; '
+          'during_codex=$_lastReconnectDuringCodex.',
+        );
+      }
+    } on Object catch (error) {
+      lines.add('Codex diagnostics failed: ${_redactSensitive('$error')}');
+    } finally {
+      for (final line in lines) {
+        _queueLog(line);
+      }
+      if (mounted) {
+        setState(() {
+          _codexDiagnosticsBusy = false;
+          _message = s.codexDiagnosticsDone;
+        });
+        _showSnack(s.codexDiagnosticsDone);
       }
     }
   }
@@ -2213,6 +2440,12 @@ class _HomeScreenState extends State<HomeScreen>
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
       'status: $_status',
       'message: ${_redactSensitive(_message)}',
+      'codex_direct: $_codexDirect',
+      'codex_direct_supported: $_codexDirectSupported',
+      if (_lastVpnReconnectAt != null)
+        'last_reconnect: ${_formatDurationAgo(_lastVpnReconnectAt!)} ago; '
+            'reason=${_redactSensitive(_lastVpnReconnectReason ?? 'unknown')}; '
+            'during_codex=$_lastReconnectDuringCodex',
       if (_lastError != null) 'last_error: $_lastError',
       if (profile != null) ...[
         'profile: ${_redactSensitive(profile.name)}',
@@ -2492,9 +2725,12 @@ class _HomeScreenState extends State<HomeScreen>
                       strings: s,
                       autoStart: _autoStart,
                       autoConnect: _autoConnect,
+                      codexDirect: _codexDirect,
+                      codexDirectSupported: _codexDirectSupported,
                       busy: _windowsSettingsBusy,
                       checkingUpdate: _checkingUpdate,
                       installingUpdate: _installingUpdate,
+                      codexDiagnosticsBusy: _codexDiagnosticsBusy,
                       excludedProcessCount:
                           _splitTunnelExcludedProcesses.length,
                       vpnOnlyProcessCount: _vpnOnlyProcesses.length,
@@ -2503,8 +2739,12 @@ class _HomeScreenState extends State<HomeScreen>
                           unawaited(_setAutoStart(value)),
                       onAutoConnectChanged: (value) =>
                           unawaited(_setAutoConnect(value)),
+                      onCodexDirectChanged: (value) =>
+                          unawaited(_setCodexDirect(value)),
                       onEditSplitTunnel: _showSplitTunnelSheet,
                       onEditVpnOnly: _showVpnOnlySheet,
+                      onCodexDiagnostics: () =>
+                          unawaited(_runCodexDiagnostics()),
                       onCheckUpdate: _checkForUpdates,
                       onOpenReleases: () =>
                           _openUrl(WindowsIntegrationService.releasesUrl),
@@ -3530,16 +3770,21 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.strings,
     required this.autoStart,
     required this.autoConnect,
+    required this.codexDirect,
+    required this.codexDirectSupported,
     required this.busy,
     required this.checkingUpdate,
     required this.installingUpdate,
+    required this.codexDiagnosticsBusy,
     required this.excludedProcessCount,
     required this.vpnOnlyProcessCount,
     required this.updateInfo,
     required this.onAutoStartChanged,
     required this.onAutoConnectChanged,
+    required this.onCodexDirectChanged,
     required this.onEditSplitTunnel,
     required this.onEditVpnOnly,
+    required this.onCodexDiagnostics,
     required this.onCheckUpdate,
     required this.onOpenReleases,
     required this.onRepairConnection,
@@ -3548,16 +3793,21 @@ class _WindowsToolsPanel extends StatelessWidget {
   final _Strings strings;
   final bool autoStart;
   final bool autoConnect;
+  final bool codexDirect;
+  final bool codexDirectSupported;
   final bool busy;
   final bool checkingUpdate;
   final bool installingUpdate;
+  final bool codexDiagnosticsBusy;
   final int excludedProcessCount;
   final int vpnOnlyProcessCount;
   final WindowsUpdateInfo? updateInfo;
   final ValueChanged<bool> onAutoStartChanged;
   final ValueChanged<bool> onAutoConnectChanged;
+  final ValueChanged<bool> onCodexDirectChanged;
   final VoidCallback onEditSplitTunnel;
   final VoidCallback onEditVpnOnly;
+  final VoidCallback onCodexDiagnostics;
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenReleases;
   final VoidCallback onRepairConnection;
@@ -3607,6 +3857,18 @@ class _WindowsToolsPanel extends StatelessWidget {
               title: Text(strings.autoConnect),
               subtitle: Text(strings.autoConnectHint),
             ),
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
+              icon: Icons.code_outlined,
+              value: codexDirect,
+              onChanged: codexDirectSupported ? onCodexDirectChanged : null,
+              title: Text(strings.codexDirect),
+              subtitle: Text(
+                codexDirectSupported
+                    ? strings.codexDirectHint
+                    : strings.codexDirectTunOnly,
+              ),
+            ),
             const SizedBox(height: 12),
             _ActionGrid(
               children: [
@@ -3624,6 +3886,16 @@ class _WindowsToolsPanel extends StatelessWidget {
                   onPressed: busy ? null : onRepairConnection,
                   icon: const Icon(Icons.healing_outlined),
                   label: Text(strings.repairConnection),
+                ),
+                _ActionTile(
+                  onPressed: codexDiagnosticsBusy ? null : onCodexDiagnostics,
+                  icon: codexDiagnosticsBusy
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.bug_report_outlined),
+                  label: Text(strings.codexDiagnostics),
                 ),
                 _ActionTile(
                   onPressed: checkingUpdate || installingUpdate
@@ -4077,6 +4349,11 @@ class _Strings {
     required this.autoConnectHint,
     required this.autoConnectEnabled,
     required this.autoConnectDisabled,
+    required this.codexDirect,
+    required this.codexDirectHint,
+    required this.codexDirectTunOnly,
+    required this.codexDiagnostics,
+    required this.codexDiagnosticsDone,
     required this.splitTunnelTitle,
     required this.splitTunnelDescription,
     required this.splitTunnelHint,
@@ -4174,6 +4451,11 @@ class _Strings {
   final String autoConnectHint;
   final String autoConnectEnabled;
   final String autoConnectDisabled;
+  final String codexDirect;
+  final String codexDirectHint;
+  final String codexDirectTunOnly;
+  final String codexDiagnostics;
+  final String codexDiagnosticsDone;
   final String splitTunnelTitle;
   final String splitTunnelDescription;
   final String splitTunnelHint;
@@ -4570,6 +4852,13 @@ class _Strings {
     autoConnectHint: 'После запуска приложения подключает выбранный профиль.',
     autoConnectEnabled: 'Автоподключение включено',
     autoConnectDisabled: 'Автоподключение выключено',
+    codexDirect: 'Codex напрямую',
+    codexDirectHint:
+        'ChatGPT/OpenAI WebSocket и Codex exe идут напрямую, без перезапуска туннеля из-за health-check.',
+    codexDirectTunOnly:
+        'Исключения Codex доступны только в Windows TUN-режиме для обычных профилей.',
+    codexDiagnostics: 'Диагностика Codex',
+    codexDiagnosticsDone: 'Диагностика Codex записана в логи',
     splitTunnelTitle: 'Исключения приложений',
     splitTunnelDescription:
         'Укажи exe-файлы, которые должны идти напрямую, минуя VPN. По одному в строке.',
@@ -4706,6 +4995,13 @@ class _Strings {
     autoConnectHint: 'Connects the selected profile after the app starts.',
     autoConnectEnabled: 'Auto-connect enabled',
     autoConnectDisabled: 'Auto-connect disabled',
+    codexDirect: 'Codex direct',
+    codexDirectHint:
+        'ChatGPT/OpenAI WebSocket and Codex executables go direct, without tunnel restarts from health checks.',
+    codexDirectTunOnly:
+        'Codex exclusions are available only in Windows TUN mode for generated profiles.',
+    codexDiagnostics: 'Codex diagnostics',
+    codexDiagnosticsDone: 'Codex diagnostics written to logs',
     splitTunnelTitle: 'App exclusions',
     splitTunnelDescription:
         'Enter exe files that should go directly and bypass the VPN. One per line.',

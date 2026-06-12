@@ -13,11 +13,9 @@ class ProfileStore {
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
-  static const defaultVpnOnlyProcesses = <String>[
-    'Codex.exe',
-    'codex.exe',
-    'ChatGPT.exe',
-  ];
+  static const _codexDirectKey = 'codexDirect';
+  static const defaultVpnOnlyProcesses = <String>[];
+  static const defaultCodexDirect = true;
 
   Future<List<VpnProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -110,5 +108,15 @@ class ProfileStore {
   Future<void> saveVpnOnlyProcesses(List<String> processes) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_vpnOnlyProcessesKey, processes);
+  }
+
+  Future<bool> loadCodexDirect() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_codexDirectKey) ?? defaultCodexDirect;
+  }
+
+  Future<void> saveCodexDirect(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_codexDirectKey, enabled);
   }
 }
