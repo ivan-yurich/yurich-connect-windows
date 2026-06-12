@@ -11,7 +11,7 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.33";
+    private const string AppVersion = "1.0.34";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
@@ -384,14 +384,64 @@ internal static class Program
             }
 
             var workingDirectory = Path.GetDirectoryName(exePath) ?? InstallDir();
-                var script = $"""
-                $ErrorActionPreference = 'Stop'
-                $action = New-ScheduledTaskAction -Execute {PowerShellQuote(exePath)} -WorkingDirectory {PowerShellQuote(workingDirectory)}
-                $trigger = New-ScheduledTaskTrigger -AtLogOn
-                $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
-                $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-                Register-ScheduledTask -TaskName {PowerShellQuote(StartupTaskName)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-                """;
+            var script = """
+$ErrorActionPreference = 'Stop'
+$taskName = __TASK_NAME__
+$exePath = __EXE_PATH__
+$workingDirectory = __WORKING_DIRECTORY__
+function Escape-Xml([string]$Value) {
+  return [System.Security.SecurityElement]::Escape($Value)
+}
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$exeXml = Escape-Xml $exePath
+$workingDirectoryXml = Escape-Xml $workingDirectory
+$xmlPath = Join-Path $env:TEMP ("YurichConnectStartup_" + [guid]::NewGuid().ToString("N") + ".xml")
+$xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$sid</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$exeXml</Command>
+      <WorkingDirectory>$workingDirectoryXml</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
+try {
+  Set-Content -LiteralPath $xmlPath -Value $xml -Encoding Unicode
+  $createOutput = & schtasks.exe /Create /TN $taskName /XML $xmlPath /F 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "schtasks /Create failed ($LASTEXITCODE): $($createOutput -join [Environment]::NewLine)"
+  }
+} finally {
+  Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
+}
+""";
+            script = script
+                .Replace("__TASK_NAME__", PowerShellQuote(StartupTaskName), StringComparison.Ordinal)
+                .Replace("__EXE_PATH__", PowerShellQuote(exePath), StringComparison.Ordinal)
+                .Replace("__WORKING_DIRECTORY__", PowerShellQuote(workingDirectory), StringComparison.Ordinal);
 
             using var repair = Process.Start(new ProcessStartInfo
             {

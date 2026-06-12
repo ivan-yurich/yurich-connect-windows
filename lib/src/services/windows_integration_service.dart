@@ -143,14 +143,15 @@ try {
     required bool requestElevation,
   }) async {
     final elevated = await _isCurrentProcessElevated();
+    final wrappedScript = _wrapPowerShellScript(script);
     if (elevated) {
       final result = await Process.run('powershell', [
         '-NoProfile',
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        script,
-      ]);
+        wrappedScript,
+      ]).timeout(const Duration(seconds: 45));
       if (result.exitCode != 0) {
         final error = '${result.stderr}${result.stdout}'.trim();
         throw StateError(
@@ -175,7 +176,7 @@ try {
     final file = File(
       '${dir.path}\\startup_${DateTime.now().millisecondsSinceEpoch}.ps1',
     );
-    await file.writeAsString(script, flush: true);
+    await file.writeAsString(_wrapPowerShellScript(script), flush: true);
     try {
       final filePath = _quotePowerShell(file.path);
       final result = await Process.run('powershell', [
@@ -420,6 +421,23 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
     return "'${value.replaceAll("'", "''")}'";
   }
 
+  static String _wrapPowerShellScript(String script) {
+    return '''
+\$ErrorActionPreference = 'Stop'
+try {
+$script
+  exit 0
+} catch {
+  \$message = \$_.Exception.Message
+  if ([string]::IsNullOrWhiteSpace(\$message)) {
+    \$message = \$_.Exception.ToString()
+  }
+  Write-Output \$message
+  exit 1
+}
+''';
+  }
+
   Future<String?> _queryTaskXml(String taskName) async {
     final result = await Process.run('schtasks', [
       '/Query',
@@ -437,9 +455,10 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
     final taskName = _quotePowerShell(_taskName);
     final legacyTaskName = _quotePowerShell(_legacyTaskName);
     return '''
-\$ErrorActionPreference = 'Stop'
-Unregister-ScheduledTask -TaskName $taskName -Confirm:\$false -ErrorAction SilentlyContinue
-Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction SilentlyContinue
+\$taskName = $taskName
+\$legacyTaskName = $legacyTaskName
+& schtasks.exe /Delete /TN \$taskName /F 2>\$null | Out-Null
+& schtasks.exe /Delete /TN \$legacyTaskName /F 2>\$null | Out-Null
 ''';
   }
 
@@ -449,13 +468,84 @@ Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction
     final exe = _quotePowerShell(executable);
     final workingDirectory = _quotePowerShell(File(executable).parent.path);
     return '''
-\$ErrorActionPreference = 'Stop'
-\$action = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $workingDirectory
-\$trigger = New-ScheduledTaskTrigger -AtLogOn
-\$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
-\$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName $taskName -Action \$action -Trigger \$trigger -Principal \$principal -Settings \$settings -Force | Out-Null
-Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:\$false -ErrorAction SilentlyContinue
+\$taskName = $taskName
+\$legacyTaskName = $legacyTaskName
+\$exePath = $exe
+\$workingDirectory = $workingDirectory
+function Escape-Xml([string]\$Value) {
+  return [System.Security.SecurityElement]::Escape(\$Value)
+}
+\$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+\$exeXml = Escape-Xml \$exePath
+\$workingDirectoryXml = Escape-Xml \$workingDirectory
+\$xmlPath = Join-Path \$env:TEMP ("YurichConnectStartup_" + [guid]::NewGuid().ToString("N") + ".xml")
+\$xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>Yurich Connect</Author>
+    <Description>Starts Yurich Connect with highest available privileges at Windows logon.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>\$sid</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>\$exeXml</Command>
+      <WorkingDirectory>\$workingDirectoryXml</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
+try {
+  Set-Content -LiteralPath \$xmlPath -Value \$xml -Encoding Unicode
+  \$createOutput = & schtasks.exe /Create /TN \$taskName /XML \$xmlPath /F 2>&1
+  if (\$LASTEXITCODE -ne 0) {
+    throw "schtasks /Create failed (\$LASTEXITCODE): \$(\$createOutput -join [Environment]::NewLine)"
+  }
+  \$queryOutput = & schtasks.exe /Query /TN \$taskName /XML 2>&1
+  if (\$LASTEXITCODE -ne 0) {
+    throw "schtasks /Query failed (\$LASTEXITCODE): \$(\$queryOutput -join [Environment]::NewLine)"
+  }
+  \$queryText = \$queryOutput -join [Environment]::NewLine
+  if (\$queryText -notmatch '<RunLevel>HighestAvailable</RunLevel>') {
+    throw 'Startup task was created without HighestAvailable run level.'
+  }
+  if (\$queryText -notmatch '<WorkingDirectory>') {
+    throw 'Startup task was created without working directory.'
+  }
+  & schtasks.exe /Delete /TN \$legacyTaskName /F 2>\$null | Out-Null
+} finally {
+  Remove-Item -LiteralPath \$xmlPath -Force -ErrorAction SilentlyContinue
+}
 ''';
   }
 
