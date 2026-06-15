@@ -27,6 +27,7 @@ class WindowsSingBoxEngine implements VpnEngine {
   bool _trafficSocketConnecting = false;
   bool _reportedAdminIssue = false;
   bool _transitioning = false;
+  bool _lastConfigNeedsTun = false;
   int _sessionTotalBytes = 0;
   static const _visualRuntimeDlls = [
     'MSVCP140.dll',
@@ -83,11 +84,30 @@ class WindowsSingBoxEngine implements VpnEngine {
   Future<bool> saveConfig(String config, {String? naiveProxyConfig}) async {
     _config = config;
     _naiveProxyConfig = naiveProxyConfig;
+    _lastConfigNeedsTun = _configNeedsTun(config);
     return config.trim().isNotEmpty;
   }
 
   @override
   Future<String> getConfig() async => _config;
+
+  bool _configNeedsTun(String config) {
+    try {
+      final decoded = jsonDecode(config);
+      if (decoded is! Map) {
+        return false;
+      }
+      final inbounds = decoded['inbounds'];
+      if (inbounds is! List) {
+        return false;
+      }
+      return inbounds.whereType<Map>().any(
+        (inbound) => '${inbound['type']}'.toLowerCase() == 'tun',
+      );
+    } on Object {
+      return false;
+    }
+  }
 
   @override
   Future<bool> startVPN() async {
@@ -116,6 +136,8 @@ class WindowsSingBoxEngine implements VpnEngine {
         configDir,
         _config,
       );
+      final needsTun = _configNeedsTun(effectiveConfig);
+      _lastConfigNeedsTun = needsTun;
       await configFile.writeAsString(effectiveConfig, encoding: utf8);
 
       final needsNaiveProxy = _naiveProxyConfig != null;
@@ -123,6 +145,7 @@ class WindowsSingBoxEngine implements VpnEngine {
         runtimeDir,
         configFile,
         needsNaiveProxy: needsNaiveProxy,
+        needsTun: needsTun,
       );
       if (!preflightOk) {
         if (_status != YurichConnectStatus.adminRequired) {
@@ -147,7 +170,11 @@ class WindowsSingBoxEngine implements VpnEngine {
       }
 
       _appendLog('Starting sing-box ${exe.path}');
-      _appendLog('Windows TUN mode requires administrator privileges.');
+      _appendLog(
+        needsTun
+            ? 'Advanced TUN Mode preflight passed.'
+            : 'Stable Proxy Mode preflight passed.',
+      );
       final process = await Process.start(
         exe.path,
         ['run', '-c', configFile.path],
@@ -250,12 +277,18 @@ class WindowsSingBoxEngine implements VpnEngine {
       await _cleanupTemporaryConfigs(configDir);
       await _flushDnsCache();
 
-      final wintun = File('${runtimeDir.path}\\wintun.dll');
-      if (!await wintun.exists()) {
-        needsReboot = true;
-        _appendLog('Repair warning: wintun.dll is missing.');
+      if (_lastConfigNeedsTun) {
+        final wintun = File('${runtimeDir.path}\\wintun.dll');
+        if (!await wintun.exists()) {
+          needsReboot = true;
+          _appendLog(
+            'Repair warning: wintun.dll is missing for Advanced TUN Mode.',
+          );
+        } else {
+          _appendLog('Repair check: wintun.dll found.');
+        }
       } else {
-        _appendLog('Repair check: wintun.dll found.');
+        _appendLog('Repair check: Stable Proxy Mode does not require Wintun.');
       }
 
       _setStatus(YurichConnectStatus.stopped);
@@ -326,19 +359,21 @@ class WindowsSingBoxEngine implements VpnEngine {
     Directory runtimeDir,
     File configFile, {
     required bool needsNaiveProxy,
+    required bool needsTun,
   }) async {
     _appendLog('Windows preflight check started.');
 
-    if (!await _isAdministrator()) {
+    if (needsTun && !await _isAdministrator()) {
       _setStatus(YurichConnectStatus.adminRequired);
       _appendLog(
-        'Preflight failed: Yurich Connect запущен без прав администратора.',
+        'Preflight failed: Advanced TUN Mode requires administrator rights.',
       );
       if (!_statusController.isClosed) {
         _statusController.add({
           'type': 'alert',
           'code': 'adminRequired',
-          'message': 'Для подключения требуются права администратора.',
+          'message':
+              'Продвинутый TUN-режим требует права администратора. Стабильный proxy-режим работает без UAC.',
         });
       }
       return false;
@@ -347,6 +382,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     final missingRuntime = await _missingRuntimeFiles(
       runtimeDir,
       needsNaiveProxy: needsNaiveProxy,
+      needsTun: needsTun,
     );
     if (missingRuntime.isNotEmpty) {
       _appendLog(
@@ -403,11 +439,12 @@ class WindowsSingBoxEngine implements VpnEngine {
   Future<List<String>> _missingRuntimeFiles(
     Directory runtimeDir, {
     required bool needsNaiveProxy,
+    required bool needsTun,
   }) async {
     final names = [
       'sing-box.exe',
-      'wintun.dll',
       'libcronet.dll',
+      if (needsTun) 'wintun.dll',
       if (needsNaiveProxy) 'naive.exe',
     ];
     final missing = <String>[];
@@ -437,6 +474,7 @@ class WindowsSingBoxEngine implements VpnEngine {
   Future<List<int>> _busyLocalPorts({required bool needsNaiveProxy}) async {
     final ports = <int>[
       SingBoxConfigBuilder.localMixedProxyPort,
+      SingBoxConfigBuilder.localSocksProxyPort,
       SingBoxConfigBuilder.windowsClashApiPort,
       if (needsNaiveProxy) SingBoxConfigBuilder.naiveProxySocksPort,
     ];
@@ -825,7 +863,7 @@ Write-Output \$stopped
         _statusController.add({
           'type': 'alert',
           'message':
-              'Windows не дал доступ к TUN. Запусти Yurich Connect от имени администратора или переустанови свежий установщик.',
+              'Windows не дал доступ к TUN. Перезапусти Yurich Connect от имени администратора только для продвинутого TUN-режима.',
         });
       }
     }
@@ -987,9 +1025,7 @@ Write-Output \$stopped
       return projectRuntime.absolute;
     }
 
-    throw StateError(
-      'Windows runtime не найден. Нужны sing-box.exe и wintun.dll.',
-    );
+    throw StateError('Windows runtime не найден. Нужен sing-box.exe.');
   }
 
   Future<Directory> _configDir() async {

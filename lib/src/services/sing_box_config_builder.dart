@@ -9,7 +9,8 @@ enum NaiveOutboundMode { auto, externalCore, native, httpConnect }
 class SingBoxConfigBuilder {
   static const windowsClashApiPort = 19090;
   static const localMixedProxyPort = 20808;
-  static const naiveProxySocksPort = 20809;
+  static const localSocksProxyPort = 20809;
+  static const naiveProxySocksPort = 20810;
   static const russianGeoIpRuleSet = 'geoip-ru';
   static const russianGeoIpRuleSetUrl =
       'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs';
@@ -64,6 +65,8 @@ class SingBoxConfigBuilder {
     List<String> splitTunnelExcludedProcesses = const [],
     List<String> vpnOnlyProcesses = const [],
     bool codexDirect = false,
+    bool chatGptThroughVpn = true,
+    bool windowsTunMode = false,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -86,6 +89,12 @@ class SingBoxConfigBuilder {
     final usesNaiveProxyCore =
         target == SingBoxConfigTarget.windows &&
         proxyOutbound['type'] == 'socks';
+    final useWindowsTun =
+        target == SingBoxConfigTarget.windows && windowsTunMode;
+    final codexWebDomainsDirect =
+        target == SingBoxConfigTarget.windows &&
+        codexDirect &&
+        !chatGptThroughVpn;
     final rejectQuicUdp =
         profile.kind == VpnProfileKind.naive ||
         (target == SingBoxConfigTarget.windows &&
@@ -117,8 +126,12 @@ class SingBoxConfigBuilder {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
-      'dns': _dnsConfig(target, codexDirect: codexDirect),
-      'inbounds': [_tunInbound(target), _mixedInbound()],
+      'dns': _dnsConfig(
+        target,
+        codexWebDomainsDirect: codexWebDomainsDirect,
+        windowsTunMode: useWindowsTun,
+      ),
+      'inbounds': _inbounds(target, windowsTunMode: useWindowsTun),
       'outbounds': [
         proxyOutbound,
         {'type': 'direct', 'tag': 'direct'},
@@ -126,15 +139,16 @@ class SingBoxConfigBuilder {
       'route': {
         'rules': [
           {'action': 'sniff'},
-          {
-            'type': 'logical',
-            'mode': 'or',
-            'rules': [
-              {'protocol': 'dns'},
-              {'port': 53},
-            ],
-            'action': 'hijack-dns',
-          },
+          if (target != SingBoxConfigTarget.windows || useWindowsTun)
+            {
+              'type': 'logical',
+              'mode': 'or',
+              'rules': [
+                {'protocol': 'dns'},
+                {'port': 53},
+              ],
+              'action': 'hijack-dns',
+            },
           if (usesNaiveProxyCore)
             {
               'process_name': ['naive.exe'],
@@ -146,7 +160,7 @@ class SingBoxConfigBuilder {
             if (excludedProcesses.isNotEmpty)
               {'process_name': excludedProcesses, 'outbound': 'direct'},
           ],
-          if (target == SingBoxConfigTarget.windows && codexDirect)
+          if (codexWebDomainsDirect)
             {
               'domain': codexDirectDomains,
               'domain_suffix': codexDirectDomainSuffixes,
@@ -163,10 +177,11 @@ class SingBoxConfigBuilder {
             if (forcedProxyProcesses.isNotEmpty)
               {'process_name': forcedProxyProcesses, 'outbound': 'proxy'},
             {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
-            {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
+            if (useWindowsTun)
+              {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
           ],
         ],
-        if (target == SingBoxConfigTarget.windows)
+        if (useWindowsTun)
           'rule_set': [
             {
               'type': 'remote',
@@ -197,6 +212,25 @@ class SingBoxConfigBuilder {
     }
 
     return const JsonEncoder.withIndent('  ').convert(config);
+  }
+
+  List<Map<String, dynamic>> _inbounds(
+    SingBoxConfigTarget target, {
+    required bool windowsTunMode,
+  }) {
+    if (target == SingBoxConfigTarget.android) {
+      return [_tunInbound(target), _mixedInbound()];
+    }
+
+    if (target == SingBoxConfigTarget.windows) {
+      return [
+        if (windowsTunMode) _tunInbound(target),
+        _mixedInbound(),
+        _socksInbound(),
+      ];
+    }
+
+    return [_mixedInbound()];
   }
 
   Map<String, dynamic> _tunInbound(SingBoxConfigTarget target) {
@@ -234,9 +268,19 @@ class SingBoxConfigBuilder {
     };
   }
 
+  Map<String, dynamic> _socksInbound() {
+    return {
+      'type': 'socks',
+      'tag': 'socks-in',
+      'listen': '127.0.0.1',
+      'listen_port': localSocksProxyPort,
+    };
+  }
+
   Map<String, dynamic> _dnsConfig(
     SingBoxConfigTarget target, {
-    required bool codexDirect,
+    required bool codexWebDomainsDirect,
+    required bool windowsTunMode,
   }) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
@@ -277,7 +321,7 @@ class SingBoxConfigBuilder {
             'action': 'route',
             'server': 'local-dns',
           },
-          if (codexDirect)
+          if (codexWebDomainsDirect)
             {
               'domain': codexDirectDomains,
               'domain_suffix': codexDirectDomainSuffixes,
@@ -292,7 +336,8 @@ class SingBoxConfigBuilder {
         ],
       'strategy': 'ipv4_only',
       'cache_capacity': target == SingBoxConfigTarget.windows ? 32768 : 8192,
-      'reverse_mapping': true,
+      'reverse_mapping':
+          target != SingBoxConfigTarget.windows || windowsTunMode,
       'final': 'global-dns',
     };
   }

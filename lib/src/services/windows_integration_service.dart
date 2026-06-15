@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../branding.dart';
+import 'sing_box_config_builder.dart';
 
 class WindowsUpdateInfo {
   const WindowsUpdateInfo({
@@ -41,15 +42,28 @@ class WindowsIntegrationService {
 
   static const _taskName = YurichBranding.appName;
   static const _legacyTaskName = 'Aurum VPN';
-  static const _startupDelayIso8601 = 'PT0S';
+  static const _runKeyPath =
+      r'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';
+  static const _internetSettingsKey =
+      r'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';
+  static const _proxyBackupEnableName = 'YurichConnectProxyBackupEnable';
+  static const _proxyBackupServerName = 'YurichConnectProxyBackupServer';
+  static const _systemProxyServer =
+      'http=127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort};'
+      'https=127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort};'
+      'socks=127.0.0.1:${SingBoxConfigBuilder.localSocksProxyPort}';
 
   Future<bool> isAutoStartEnabled() async {
     if (!Platform.isWindows) {
       return false;
     }
-    final xml =
-        await _queryTaskXml(_taskName) ?? await _queryTaskXml(_legacyTaskName);
-    return xml != null && isAutoStartTaskHealthyXml(xml);
+    final command = await _readAutoStartRunValue();
+    if (command == null || command.isEmpty) {
+      return false;
+    }
+    return _normalizedAutoStartCommand(
+      command,
+    ).contains(_normalizedAutoStartCommand(Platform.resolvedExecutable));
   }
 
   Future<void> repairAutoStartIfNeeded() async {
@@ -58,23 +72,16 @@ class WindowsIntegrationService {
     }
 
     final currentXml = await _queryTaskXml(_taskName);
-    if (currentXml != null &&
-        isAutoStartTaskInstalledXml(currentXml) &&
-        !isAutoStartTaskHealthyXml(currentXml)) {
-      try {
-        await setAutoStart(true, requestElevation: false);
-      } on Object {
-        // The app may be opened without elevation. In that case the UI should
-        // keep working and let the user reinstall or toggle startup later.
-      }
-    }
-
     final legacyXml = await _queryTaskXml(_legacyTaskName);
-    if (legacyXml != null && isAutoStartTaskInstalledXml(legacyXml)) {
+    final hasLegacyTask =
+        (currentXml != null && isAutoStartTaskInstalledXml(currentXml)) ||
+        (legacyXml != null && isAutoStartTaskInstalledXml(legacyXml));
+    if (hasLegacyTask) {
       try {
         await setAutoStart(true, requestElevation: false);
       } on Object {
-        // Same best-effort behavior as the regular startup repair.
+        // Best-effort migration: the app should keep working even if Windows
+        // denies removal of an old elevated scheduled task.
       }
     }
   }
@@ -124,87 +131,95 @@ try {
     }
 
     if (!enabled) {
-      await _runStartupTaskScript(
-        _deleteStartupTaskScript(),
-        requestElevation: requestElevation,
-      );
+      await _deleteAutoStartRunValue();
+      await _deleteLegacyStartupTasks();
       return;
     }
 
     final executable = Platform.resolvedExecutable;
-    await _runStartupTaskScript(
-      _createStartupTaskScript(executable),
-      requestElevation: requestElevation,
-    );
+    await _writeAutoStartRunValue(executable);
+    await _deleteLegacyStartupTasks();
   }
 
-  Future<void> _runStartupTaskScript(
-    String script, {
-    required bool requestElevation,
-  }) async {
-    final elevated = await _isCurrentProcessElevated();
-    final wrappedScript = _wrapPowerShellScript(script);
-    if (elevated) {
-      final result = await Process.run('powershell', [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        wrappedScript,
-      ]).timeout(const Duration(seconds: 45));
-      if (result.exitCode != 0) {
-        final error = '${result.stderr}${result.stdout}'.trim();
-        throw StateError(
-          error.isEmpty ? 'Could not update startup task.' : error,
-        );
-      }
+  Future<bool> isSystemProxyEnabled() async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+    final script =
+        '''
+\$enable = Get-ItemPropertyValue -Path ${_quotePowerShell(_internetSettingsKey)} -Name ProxyEnable -ErrorAction SilentlyContinue
+\$server = Get-ItemPropertyValue -Path ${_quotePowerShell(_internetSettingsKey)} -Name ProxyServer -ErrorAction SilentlyContinue
+Write-Output "\$enable|\$server"
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 8),
+    );
+    if (result.exitCode != 0) {
+      return false;
+    }
+    final text = '${result.stdout}'.trim();
+    final separator = text.indexOf('|');
+    if (separator < 0) {
+      return false;
+    }
+    final enabled = text.substring(0, separator).trim() == '1';
+    final server = text.substring(separator + 1).trim();
+    return enabled && server == _systemProxyServer;
+  }
+
+  Future<void> setSystemProxyEnabled(bool enabled) async {
+    if (!Platform.isWindows) {
       return;
     }
-
-    if (!requestElevation) {
-      throw StateError('Administrator rights are required.');
-    }
-
-    await _runPowerShellScriptAsAdmin(script);
+    final key = _quotePowerShell(_internetSettingsKey);
+    final server = _quotePowerShell(_systemProxyServer);
+    final backupEnable = _quotePowerShell(_proxyBackupEnableName);
+    final backupServer = _quotePowerShell(_proxyBackupServerName);
+    final script = enabled
+        ? '''
+New-Item -Path $key -Force | Out-Null
+\$currentEnable = Get-ItemPropertyValue -Path $key -Name ProxyEnable -ErrorAction SilentlyContinue
+\$currentServer = Get-ItemPropertyValue -Path $key -Name ProxyServer -ErrorAction SilentlyContinue
+if (\$currentServer -ne $server) {
+  \$currentEnableValue = 0
+  if (\$null -ne \$currentEnable) { \$currentEnableValue = [int]\$currentEnable }
+  New-ItemProperty -Path $key -Name $backupEnable -PropertyType DWord -Value \$currentEnableValue -Force | Out-Null
+  if (\$null -ne \$currentServer) {
+    New-ItemProperty -Path $key -Name $backupServer -PropertyType String -Value \$currentServer -Force | Out-Null
+  } else {
+    Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyContinue
   }
-
-  Future<void> _runPowerShellScriptAsAdmin(String script) async {
-    final dir = Directory('${Directory.systemTemp.path}\\YurichConnect');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    final file = File(
-      '${dir.path}\\startup_${DateTime.now().millisecondsSinceEpoch}.ps1',
+}
+New-ItemProperty -Path $key -Name ProxyEnable -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $key -Name ProxyServer -PropertyType String -Value $server -Force | Out-Null
+'''
+        : '''
+New-Item -Path $key -Force | Out-Null
+\$backupEnableValue = Get-ItemPropertyValue -Path $key -Name $backupEnable -ErrorAction SilentlyContinue
+\$backupServerValue = Get-ItemPropertyValue -Path $key -Name $backupServer -ErrorAction SilentlyContinue
+if (\$null -ne \$backupEnableValue) {
+  New-ItemProperty -Path $key -Name ProxyEnable -PropertyType DWord -Value ([int]\$backupEnableValue) -Force | Out-Null
+} else {
+  New-ItemProperty -Path $key -Name ProxyEnable -PropertyType DWord -Value 0 -Force | Out-Null
+}
+if (-not [string]::IsNullOrWhiteSpace([string]\$backupServerValue)) {
+  New-ItemProperty -Path $key -Name ProxyServer -PropertyType String -Value \$backupServerValue -Force | Out-Null
+} else {
+  Remove-ItemProperty -Path $key -Name ProxyServer -Force -ErrorAction SilentlyContinue
+}
+Remove-ItemProperty -Path $key -Name $backupEnable -Force -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyContinue
+''';
+    final result = await _runPowerShell(
+      '${_proxyChangeType()}\n$script\n${_notifyProxyChangedScript()}',
+      timeout: const Duration(seconds: 12),
     );
-    await file.writeAsString(_wrapPowerShellScript(script), flush: true);
-    try {
-      final filePath = _quotePowerShell(file.path);
-      final result = await Process.run('powershell', [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        '''
-\$ErrorActionPreference = 'Stop'
-\$process = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$filePath) -Verb RunAs -Wait -PassThru
-if (\$null -eq \$process) { exit 1 }
-exit \$process.ExitCode
-''',
-      ]);
-      if (result.exitCode != 0) {
-        final error = '${result.stderr}${result.stdout}'.trim();
-        throw StateError(
-          error.isEmpty
-              ? 'Windows UAC did not allow startup task update.'
-              : error,
-        );
-      }
-    } finally {
-      try {
-        await file.delete();
-      } on Object {
-        // Best effort cleanup.
-      }
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not update Windows system proxy.' : error,
+      );
     }
   }
 
@@ -303,6 +318,7 @@ exit \$process.ExitCode
     final target = File(
       '${Directory.systemTemp.path}\\YurichConnect_Update_$safeVersion\\$fileName',
     );
+    final partial = File('${target.path}.download');
     if (!await target.parent.exists()) {
       await target.parent.create(recursive: true);
     }
@@ -319,8 +335,33 @@ exit \$process.ExitCode
         throw StateError('GitHub asset returned HTTP ${response.statusCode}.');
       }
 
-      await response.pipe(target.openWrite());
+      await response.pipe(partial.openWrite());
+      final expectedSize = update.installerSize;
+      final actualSize = await partial.length();
+      if (expectedSize != null && actualSize != expectedSize) {
+        throw StateError(
+          'Downloaded installer size mismatch: $actualSize of $expectedSize bytes.',
+        );
+      }
+      if (actualSize < 1024 * 1024) {
+        throw StateError(
+          'Downloaded installer is too small: $actualSize bytes.',
+        );
+      }
+      if (await target.exists()) {
+        await target.delete();
+      }
+      await partial.rename(target.path);
       return target;
+    } on Object {
+      try {
+        if (await partial.exists()) {
+          await partial.delete();
+        }
+      } on Object {
+        // Best-effort cleanup of an incomplete update payload.
+      }
+      rethrow;
     } finally {
       client.close(force: true);
     }
@@ -404,13 +445,10 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
       }
     }
     for (final asset in parsed) {
-      if (asset.name.toLowerCase() == 'aurumvpn_setup.exe') {
-        return asset;
-      }
-    }
-    for (final asset in parsed) {
       final name = asset.name.toLowerCase();
-      if (name.endsWith('.exe') && name.contains('setup')) {
+      if (name.endsWith('.exe') &&
+          name.contains('setup') &&
+          name.contains('yurich')) {
         return asset;
       }
     }
@@ -421,8 +459,16 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
     return "'${value.replaceAll("'", "''")}'";
   }
 
-  static String _wrapPowerShellScript(String script) {
-    return '''
+  Future<ProcessResult> _runPowerShell(
+    String script, {
+    Duration timeout = const Duration(seconds: 20),
+  }) {
+    return Process.run('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '''
 \$ErrorActionPreference = 'Stop'
 try {
 $script
@@ -435,6 +481,100 @@ $script
   Write-Output \$message
   exit 1
 }
+''',
+    ]).timeout(timeout);
+  }
+
+  Future<String?> _readAutoStartRunValue() async {
+    final script =
+        '''
+\$value = Get-ItemPropertyValue -Path ${_quotePowerShell(_runKeyPath)} -Name ${_quotePowerShell(_taskName)} -ErrorAction SilentlyContinue
+if (\$null -ne \$value) { Write-Output \$value }
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 8),
+    );
+    if (result.exitCode != 0) {
+      return null;
+    }
+    return '${result.stdout}'.trim();
+  }
+
+  Future<void> _writeAutoStartRunValue(String executable) async {
+    final key = _quotePowerShell(_runKeyPath);
+    final name = _quotePowerShell(_taskName);
+    final value = _quotePowerShell('"$executable"');
+    final script =
+        '''
+New-Item -Path $key -Force | Out-Null
+New-ItemProperty -Path $key -Name $name -PropertyType String -Value $value -Force | Out-Null
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 12),
+    );
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not update Windows startup.' : error,
+      );
+    }
+  }
+
+  Future<void> _deleteAutoStartRunValue() async {
+    final script =
+        '''
+Remove-ItemProperty -Path ${_quotePowerShell(_runKeyPath)} -Name ${_quotePowerShell(_taskName)} -Force -ErrorAction SilentlyContinue
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 8),
+    );
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not remove Windows startup.' : error,
+      );
+    }
+  }
+
+  Future<void> _deleteLegacyStartupTasks() async {
+    for (final taskName in const [_taskName, _legacyTaskName]) {
+      try {
+        await Process.run('schtasks', [
+          '/Delete',
+          '/TN',
+          taskName,
+          '/F',
+        ]).timeout(const Duration(seconds: 8));
+      } on Object {
+        // Old elevated task removal is best-effort from a regular process.
+      }
+    }
+  }
+
+  static String _normalizedAutoStartCommand(String value) {
+    return value.replaceAll('"', '').trim().replaceAll('/', '\\').toLowerCase();
+  }
+
+  static String _proxyChangeType() {
+    return '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class YurichWinInet {
+  [DllImport("wininet.dll", SetLastError = true)]
+  public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
+}
+"@
+''';
+  }
+
+  static String _notifyProxyChangedScript() {
+    return '''
+[YurichWinInet]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
+[YurichWinInet]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null
 ''';
   }
 
@@ -451,128 +591,13 @@ $script
     return '${result.stdout}${result.stderr}';
   }
 
-  static String _deleteStartupTaskScript() {
-    final taskName = _quotePowerShell(_taskName);
-    final legacyTaskName = _quotePowerShell(_legacyTaskName);
-    return '''
-\$taskName = $taskName
-\$legacyTaskName = $legacyTaskName
-& schtasks.exe /Delete /TN \$taskName /F 2>\$null | Out-Null
-& schtasks.exe /Delete /TN \$legacyTaskName /F 2>\$null | Out-Null
-''';
-  }
-
-  static String _createStartupTaskScript(String executable) {
-    final taskName = _quotePowerShell(_taskName);
-    final legacyTaskName = _quotePowerShell(_legacyTaskName);
-    final exe = _quotePowerShell(executable);
-    final workingDirectory = _quotePowerShell(File(executable).parent.path);
-    return '''
-\$taskName = $taskName
-\$legacyTaskName = $legacyTaskName
-\$exePath = $exe
-\$workingDirectory = $workingDirectory
-function Escape-Xml([string]\$Value) {
-  return [System.Security.SecurityElement]::Escape(\$Value)
-}
-\$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-\$exeXml = Escape-Xml \$exePath
-\$workingDirectoryXml = Escape-Xml \$workingDirectory
-\$xmlPath = Join-Path \$env:TEMP ("YurichConnectStartup_" + [guid]::NewGuid().ToString("N") + ".xml")
-\$xml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Author>Yurich Connect</Author>
-    <Description>Starts Yurich Connect with highest available privileges at Windows logon.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>\$sid</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>5</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>\$exeXml</Command>
-      <WorkingDirectory>\$workingDirectoryXml</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"@
-try {
-  Set-Content -LiteralPath \$xmlPath -Value \$xml -Encoding Unicode
-  \$createOutput = & schtasks.exe /Create /TN \$taskName /XML \$xmlPath /F 2>&1
-  if (\$LASTEXITCODE -ne 0) {
-    throw "schtasks /Create failed (\$LASTEXITCODE): \$(\$createOutput -join [Environment]::NewLine)"
-  }
-  \$queryOutput = & schtasks.exe /Query /TN \$taskName /XML 2>&1
-  if (\$LASTEXITCODE -ne 0) {
-    throw "schtasks /Query failed (\$LASTEXITCODE): \$(\$queryOutput -join [Environment]::NewLine)"
-  }
-  \$queryText = \$queryOutput -join [Environment]::NewLine
-  if (\$queryText -notmatch '<RunLevel>HighestAvailable</RunLevel>') {
-    throw 'Startup task was created without HighestAvailable run level.'
-  }
-  if (\$queryText -notmatch '<WorkingDirectory>') {
-    throw 'Startup task was created without working directory.'
-  }
-  & schtasks.exe /Delete /TN \$legacyTaskName /F 2>\$null | Out-Null
-} finally {
-  Remove-Item -LiteralPath \$xmlPath -Force -ErrorAction SilentlyContinue
-}
-''';
-  }
-
   static bool isAutoStartTaskInstalledXml(String xml) {
     final normalized = xml.toLowerCase();
     return normalized.contains('<runlevel>highestavailable</runlevel>');
   }
 
   static bool isAutoStartTaskHealthyXml(String xml) {
-    final normalized = xml.toLowerCase();
-    final delays =
-        RegExp(r'<delay>\s*([^<]+?)\s*</delay>', caseSensitive: false)
-            .allMatches(normalized)
-            .map((match) => (match[1] ?? '').trim())
-            .where((delay) => delay.isNotEmpty);
-    final hasUnsupportedDelay = delays.any(
-      (delay) => delay != _startupDelayIso8601.toLowerCase(),
-    );
-    return isAutoStartTaskInstalledXml(xml) &&
-        !hasUnsupportedDelay &&
-        normalized.contains('<workingdirectory>') &&
-        !normalized.contains(
-          '<disallowstartifonbatteries>true</disallowstartifonbatteries>',
-        ) &&
-        !normalized.contains(
-          '<stopifgoingonbatteries>true</stopifgoingonbatteries>',
-        );
+    return false;
   }
 
   static int compareReleaseVersions(String left, String right) {

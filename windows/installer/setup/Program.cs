@@ -11,7 +11,7 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.35";
+    private const string AppVersion = "1.0.37";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
@@ -99,7 +99,7 @@ internal static class Program
                 exePath,
                 installDir);
             RegisterUninstall(installDir, exePath);
-            RepairStartupTaskIfEnabled(exePath);
+            RemoveLegacyStartupTasks();
             return exePath;
         }
         finally
@@ -370,128 +370,17 @@ internal static class Program
         key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
     }
 
-    private static void RepairStartupTaskIfEnabled(string exePath)
+    private static void RemoveLegacyStartupTasks()
     {
         try
         {
-            var currentXml = QueryTaskXml(StartupTaskName);
-            var legacyXml = QueryTaskXml(LegacyStartupTaskName);
-            var shouldRepair =
-                IsElevatedTask(currentXml) || IsElevatedTask(legacyXml);
-            if (!shouldRepair)
-            {
-                return;
-            }
-
-            var workingDirectory = Path.GetDirectoryName(exePath) ?? InstallDir();
-            var script = """
-$ErrorActionPreference = 'Stop'
-$taskName = __TASK_NAME__
-$exePath = __EXE_PATH__
-$workingDirectory = __WORKING_DIRECTORY__
-function Escape-Xml([string]$Value) {
-  return [System.Security.SecurityElement]::Escape($Value)
-}
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$exeXml = Escape-Xml $exePath
-$workingDirectoryXml = Escape-Xml $workingDirectory
-$xmlPath = Join-Path $env:TEMP ("YurichConnectStartup_" + [guid]::NewGuid().ToString("N") + ".xml")
-$xml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>$sid</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>$exeXml</Command>
-      <WorkingDirectory>$workingDirectoryXml</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"@
-try {
-  Set-Content -LiteralPath $xmlPath -Value $xml -Encoding Unicode
-  $createOutput = & schtasks.exe /Create /TN $taskName /XML $xmlPath /F 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    throw "schtasks /Create failed ($LASTEXITCODE): $($createOutput -join [Environment]::NewLine)"
-  }
-} finally {
-  Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
-}
-""";
-            script = script
-                .Replace("__TASK_NAME__", PowerShellQuote(StartupTaskName), StringComparison.Ordinal)
-                .Replace("__EXE_PATH__", PowerShellQuote(exePath), StringComparison.Ordinal)
-                .Replace("__WORKING_DIRECTORY__", PowerShellQuote(workingDirectory), StringComparison.Ordinal);
-
-            using var repair = Process.Start(new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                ArgumentList =
-                {
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    script,
-                },
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            });
-            repair?.WaitForExit(10000);
+            DeleteTask(StartupTaskName);
             DeleteTask(LegacyStartupTaskName);
         }
         catch
         {
-            // Startup repair is best-effort. Install should still complete.
+            // Removing old startup tasks is best-effort. Install should still complete.
         }
-    }
-
-    private static string? QueryTaskXml(string taskName)
-    {
-        using var query = Process.Start(new ProcessStartInfo
-        {
-            FileName = "schtasks.exe",
-            Arguments = $"/Query /TN \"{taskName}\" /XML",
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        });
-        if (query is null)
-        {
-            return null;
-        }
-
-        var xml = query.StandardOutput.ReadToEnd();
-        query.WaitForExit(5000);
-        return query.ExitCode == 0 ? xml : null;
-    }
-
-    private static bool IsElevatedTask(string? xml)
-    {
-        return xml?.Contains("<RunLevel>HighestAvailable</RunLevel>", StringComparison.OrdinalIgnoreCase) == true;
     }
 
     private static void DeleteTask(string taskName)
@@ -508,8 +397,4 @@ try {
         delete?.WaitForExit(5000);
     }
 
-    private static string PowerShellQuote(string value)
-    {
-        return "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
-    }
 }

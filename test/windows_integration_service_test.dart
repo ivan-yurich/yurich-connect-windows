@@ -2,8 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/services/windows_integration_service.dart';
 
 void main() {
-  group('WindowsIntegrationService auto-start task XML', () {
-    test('accepts elevated immediate task that can run on battery', () {
+  group('WindowsIntegrationService legacy auto-start task XML', () {
+    test('detects elevated immediate task as installed legacy startup', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -29,10 +29,14 @@ void main() {
 </Task>
 ''';
 
-      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
+      expect(
+        WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
+        isTrue,
+      );
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
     });
 
-    test('accepts elevated immediate task without startup delay field', () {
+    test('detects elevated immediate task without startup delay field', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -53,14 +57,14 @@ void main() {
 </Task>
 ''';
 
-      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
       expect(
         WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
         isTrue,
       );
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
     });
 
-    test('rejects old task with non-zero startup delay', () {
+    test('detects old task with non-zero startup delay', () {
       const xml = r'''
 <Task>
   <Principals>

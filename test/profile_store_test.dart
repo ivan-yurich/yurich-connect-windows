@@ -9,6 +9,7 @@ void main() {
       final store = ProfileStore();
 
       expect(await store.loadCodexDirect(), isTrue);
+      expect(await store.loadChatGptThroughVpn(), isTrue);
       expect(await store.loadVpnOnlyProcesses(), isEmpty);
     });
 
@@ -19,6 +20,15 @@ void main() {
       await store.saveCodexDirect(false);
 
       expect(await store.loadCodexDirect(), isFalse);
+    });
+
+    test('saves ChatGPT website routing preference', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveChatGptThroughVpn(false);
+
+      expect(await store.loadChatGptThroughVpn(), isFalse);
     });
   });
 

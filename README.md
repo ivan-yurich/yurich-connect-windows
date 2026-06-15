@@ -1,288 +1,161 @@
 # Yurich Connect for Windows
 
-**Yurich Connect** is the Windows app in the Yurich ecosystem. The Windows build
-is distributed as **Yurich Desktop**, uses **Yurich Core** on top of sing-box and
-Wintun, and supports **Yurich ID** subscriptions.
+Yurich Connect is a Windows VPN/proxy client powered by Yurich Core, sing-box,
+NaiveProxy, Hysteria, and optional Wintun.
 
-Brand map:
+## English
 
-- Brand: `Yurich`
-- App: `Yurich Connect`
-- Panel: `Yurich Panel`
-- Core: `Yurich Core`
-- DNS: `Yurich DNS`
-- Windows: `Yurich Desktop`
-- Android: `Yurich Mobile`
-- Subscription: `Yurich ID`
-- Site: `Yurich Cloud`
+### Modes
 
-## Features
+- **Stable Proxy Mode** is the default and recommended mode. It does not use
+  TUN, Wintun, or administrator rights. It starts a local mixed proxy at
+  `127.0.0.1:20808` and a SOCKS proxy at `127.0.0.1:20809`.
+- **Advanced TUN Mode** is optional beta mode for all-app routing. It can use
+  TUN, Wintun, DNS hijack, split routing, and administrator rights.
 
-- Flutter Desktop client for Windows.
-- sing-box TUN mode with Wintun.
-- VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Yurich ID and raw
-  sing-box JSON import.
-- HTML subscription import for panel pages that contain raw links.
-- Server latency panel with TCP ping for every imported profile.
-- Auto-start with Windows through Task Scheduler with highest privileges.
-- Auto-connect to the selected profile.
-- Split tunneling by excluded `.exe` process names.
-- Fast Yurich DNS mode for browser bursts with many tabs and mixed Russian and
-  foreign sites.
-- GitHub Releases update checks and in-app installer download.
-- Traffic counters through the sing-box Clash API.
-- Safe diagnostics with masked UUIDs, passwords, tokens and subscription URLs.
-
-## Install
+### Install
 
 1. Download `YurichConnect_Setup.exe` from GitHub Releases.
-2. Run it as administrator.
-3. Allow Windows UAC.
-4. After installation, choose whether to launch Yurich Connect immediately.
+2. Run the installer.
+3. Start Yurich Connect normally.
+4. Import a Yurich ID subscription, QR content, or a single profile link.
+5. Connect in Stable Proxy Mode first.
+6. Enable Windows system proxy only when you want apps to use
+   `127.0.0.1:20808` / `127.0.0.1:20809`.
 
-Portable users should extract `YurichConnect_Windows_Portable.zip` first and run
-`START_YURICH_CONNECT.cmd`. Do not run the app directly from inside the ZIP
-viewer.
+### ChatGPT And Codex Routing
 
-## Why Administrator Rights Are Required
+Yurich Connect separates ChatGPT website routing from Codex CLI routing:
 
-Yurich Desktop uses Windows TUN routing through Wintun. Creating the network
-interface and routes requires administrator privileges. Without elevation,
-Yurich Core cannot start TUN mode and Windows may show `Access is denied`.
+- **ChatGPT website through VPN** is enabled by default, so `chatgpt.com` and
+  OpenAI web assets use the current VPN/proxy route.
+- **Codex CLI direct** can be enabled separately for Codex executables when a
+  long-running Codex session should bypass reconnect-sensitive routing.
 
-The installer and `START_YURICH_CONNECT.cmd` launch `YurichConnect.exe` through
-UAC when needed.
+### Why Administrator Rights May Appear
 
-## Visual C++ Runtime
+Stable Proxy Mode does not need administrator rights. Administrator rights are
+only needed for the installer and for Advanced TUN Mode, because Windows must
+create a TUN/Wintun network interface and routes.
 
-The Windows payload includes these DLL files next to `YurichConnect.exe`:
+### If The App Does Not Start
 
-- `MSVCP140.dll`
-- `VCRUNTIME140.dll`
-- `VCRUNTIME140_1.dll`
+- Install Microsoft Visual C++ Redistributable 2015-2022 x64:
+  <https://aka.ms/vs/17/release/vc_redist.x64.exe>
+- Reinstall the latest `YurichConnect_Setup.exe`.
+- Open logs from the app and send a diagnostics report.
 
-If Windows still reports missing runtime files, install Microsoft Visual C++
-Redistributable 2015-2022 x64:
+### Logs And Diagnostics
 
-https://aka.ms/vs/17/release/vc_redist.x64.exe
+Logs are stored under `%APPDATA%\Yurich Connect\logs`:
 
-## If The App Does Not Start
+- `yurich.log`
+- `sing-box.log`
+- `naive.log`
 
-- Start it from the installed folder or with `START_YURICH_CONNECT.cmd`.
-- Do not run it directly from inside a ZIP archive.
-- Check that `runtime/sing-box.exe`, `runtime/naive.exe`,
-  `runtime/wintun.dll`, `runtime/libcronet.dll` and the Visual C++ DLL files are
-  present.
-- Open **Yurich Core logs** inside the app.
-- Send a diagnostics report to the developer.
+Diagnostics are created under `%APPDATA%\Yurich Connect\diagnostics` as
+`report.zip`. The report masks UUIDs, passwords, tokens, private keys,
+subscription URLs, and proxy links.
 
-## Yurich DNS And Many Browser Tabs
+### Updates
 
-Yurich Desktop uses local system DNS for fast resolution, then routes traffic
-through sing-box rules:
+The app checks GitHub Releases for newer Windows builds. Update downloads are
+written to a temporary `.download` file first, checked, and only then renamed to
+the final installer file.
 
-- Russian domains such as `.ru`, `.рф`, `.su` and selected Russian services go
-  direct.
-- Russian GeoIP routes go direct when `geoip-ru.srs` is available.
-- Foreign destinations go through VPN.
-- PTR, SRV, HTTPS and SVCB DNS bursts are resolved locally to avoid 10-second
-  DNS queues when Chrome opens many tabs across multiple profiles.
+### Autostart
 
-This avoids making Yurich DNS depend on a saturated VPN tunnel while preserving
-VPN routing for foreign traffic.
+Autostart uses the current user's Windows Run registry key. It does not create
+an elevated Scheduled Task by default.
 
-## Logs And Diagnostics
+### Uninstall
 
-Logs are written to:
+Use Windows Settings or the uninstaller. The uninstaller removes application
+files, shortcuts, uninstall entries, old startup tasks, and runtime processes
+that belong to Yurich Connect. User profiles are not removed without explicit
+confirmation.
 
-```text
-%APPDATA%\Yurich Connect\logs\yurich.log
-%APPDATA%\Yurich Connect\logs\sing-box.log
-%APPDATA%\Yurich Connect\logs\naive.log
-```
+### Windows Defender
 
-Diagnostics are written to:
+Unsigned VPN/proxy tools may trigger Defender warnings. Download only from the
+official GitHub Releases page, keep the installer name unchanged, and send a
+diagnostics report if Windows blocks startup.
 
-```text
-%APPDATA%\Yurich Connect\diagnostics\report.zip
-```
+## Русский
 
-Reports mask UUIDs, passwords, tokens, VLESS links, NaiveProxy links,
-Hysteria links and Yurich ID URLs.
+### Режимы
 
-Old `%APPDATA%\Aurum VPN` files are copied into `%APPDATA%\Yurich Connect` on
-first launch when the new folder does not exist.
+- **Стабильный proxy-режим** включён по умолчанию и рекомендован для обычной
+  работы. Он не использует TUN, Wintun и права администратора. Поднимает mixed
+  proxy на `127.0.0.1:20808` и SOCKS proxy на `127.0.0.1:20809`.
+- **Продвинутый TUN-режим** отдельный beta-режим для маршрутизации всех
+  приложений. Он может использовать TUN, Wintun, DNS hijack, split routing и
+  права администратора.
 
-## Uninstall
-
-Use Windows **Apps & Features**, or run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\Yurich Connect\uninstall_yurich_connect.ps1"
-```
-
-The uninstall script asks for confirmation, removes only the `Yurich Connect`
-application folder, removes shortcuts and uninstall registry entries, and stops
-only `YurichConnect.exe`, `AurumVPN.exe`, `sing-box.exe` and `naive.exe`
-processes launched from the application folder.
-
-## Windows Defender
-
-The app bundles networking tools and creates a VPN interface, so Windows
-Defender or SmartScreen may warn about a new unsigned build. Download only from
-the official GitHub Releases page, verify the SHA-256 hash, and allow the app
-only if the hash matches the release notes.
-
-## Build
-
-```powershell
-flutter pub get
-flutter analyze
-flutter test
-flutter build windows --release --split-debug-info=build\symbols\windows
-powershell -NoProfile -ExecutionPolicy Bypass -File windows\qa\smoke_windows.ps1
-```
-
-The smoke-test checks Flutter analysis, tests, release build, installer payload,
-portable archive contents, required runtime files, Visual C++ DLL files, and
-absence of local development paths or secrets in public artifacts.
-
-## Release Files
-
-Publish generated files on GitHub Releases instead of committing them:
-
-- `YurichConnect_Setup.exe`
-- `YurichConnect_Windows_Portable.zip`
-
----
-
-# Yurich Connect для Windows
-
-**Yurich Connect** - приложение Windows в экосистеме Yurich. Windows-сборка
-называется **Yurich Desktop**, использует **Yurich Core** поверх sing-box и
-Wintun, а подписки называются **Yurich ID**.
-
-Карта бренда:
-
-- Бренд: `Yurich`
-- Приложение: `Yurich Connect`
-- Панель: `Yurich Panel`
-- Ядро: `Yurich Core`
-- DNS: `Yurich DNS`
-- Windows: `Yurich Desktop`
-- Android: `Yurich Mobile`
-- Подписка: `Yurich ID`
-- Сайт: `Yurich Cloud`
-
-## Возможности
-
-- Flutter Desktop клиент для Windows.
-- Yurich Core/sing-box в TUN-режиме через Wintun.
-- Импорт VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, Yurich ID и raw
-  sing-box JSON.
-- Импорт HTML-страниц панели, если внутри есть raw-ссылки.
-- Блок пинга серверов: TCP-проверка каждого импортированного профиля.
-- Автостарт с Windows через планировщик задач с высшими правами.
-- Автоподключение выбранного профиля.
-- Split tunneling через исключения `.exe` процессов.
-- Быстрый Yurich DNS для браузера с большим количеством вкладок.
-- Проверка обновлений через GitHub Releases.
-- Счётчики трафика через sing-box Clash API.
-- Диагностика с маскировкой UUID, паролей, токенов и URL подписок.
-
-## Установка
+### Установка
 
 1. Скачай `YurichConnect_Setup.exe` из GitHub Releases.
-2. Запусти установщик от имени администратора.
-3. Разреши Windows UAC.
-4. После установки можно сразу запустить Yurich Connect.
+2. Запусти установщик.
+3. Открой Yurich Connect обычным способом.
+4. Добавь Yurich ID подписку, QR-текст или отдельную ссылку профиля.
+5. Сначала подключись в стабильном proxy-режиме.
+6. Включай системный proxy Windows только если нужно направить приложения на
+   `127.0.0.1:20808` / `127.0.0.1:20809`.
 
-Portable-версию сначала распакуй из `YurichConnect_Windows_Portable.zip`, затем
-запусти `START_YURICH_CONNECT.cmd`. Не запускай приложение прямо из ZIP.
+### Маршрутизация ChatGPT и Codex
 
-## Почему нужны права администратора
+Yurich Connect разделяет сайт ChatGPT и Codex CLI:
 
-Yurich Desktop использует Windows TUN через Wintun. Для создания сетевого
-интерфейса и маршрутов нужны права администратора. Без них Yurich Core не
-сможет запустить TUN, а Windows может показать `Access is denied`.
+- **ChatGPT сайт через VPN** включён по умолчанию, поэтому `chatgpt.com` и
+  web-ресурсы OpenAI идут через текущий VPN/proxy маршрут.
+- **Codex CLI напрямую** можно включить отдельно для процессов Codex, если
+  длинная Codex-сессия должна идти напрямую и не зависеть от reconnect-логики.
 
-Установщик и `START_YURICH_CONNECT.cmd` запускают `YurichConnect.exe` через UAC,
-если прав не хватает.
+### Почему могут понадобиться права администратора
 
-## Visual C++ Runtime
+Стабильный proxy-режим не требует права администратора. Права нужны только
+установщику и продвинутому TUN-режиму, потому что Windows должна создать
+TUN/Wintun интерфейс и маршруты.
 
-В Windows payload рядом с `YurichConnect.exe` добавлены:
+### Если приложение не запускается
 
-- `MSVCP140.dll`
-- `VCRUNTIME140.dll`
-- `VCRUNTIME140_1.dll`
+- Установи Microsoft Visual C++ Redistributable 2015-2022 x64:
+  <https://aka.ms/vs/17/release/vc_redist.x64.exe>
+- Переустанови свежий `YurichConnect_Setup.exe`.
+- Открой логи в приложении и сформируй диагностический отчёт.
 
-Если Windows всё равно пишет, что runtime отсутствует, установи Microsoft
-Visual C++ Redistributable 2015-2022 x64:
+### Логи и диагностика
 
-https://aka.ms/vs/17/release/vc_redist.x64.exe
+Логи лежат в `%APPDATA%\Yurich Connect\logs`:
 
-## Если приложение не запускается
+- `yurich.log`
+- `sing-box.log`
+- `naive.log`
 
-- Запускай из установленной папки или через `START_YURICH_CONNECT.cmd`.
-- Не запускай приложение прямо из ZIP.
-- Проверь наличие `runtime/sing-box.exe`, `runtime/naive.exe`,
-  `runtime/wintun.dll`, `runtime/libcronet.dll` и Visual C++ DLL.
-- Открой **Логи Yurich Core** внутри приложения.
-- Отправь диагностический отчёт разработчику.
+Диагностика создаётся в `%APPDATA%\Yurich Connect\diagnostics` как
+`report.zip`. В отчёте маскируются UUID, пароли, токены, private keys, ссылки
+подписок и proxy-ссылки.
 
-## Yurich DNS и много вкладок браузера
+### Обновления
 
-Yurich Desktop использует локальный системный DNS для быстрого резолва, а потом
-маршрутизирует трафик правилами sing-box:
+Приложение проверяет GitHub Releases. Обновление сначала скачивается во
+временный `.download` файл, проверяется и только потом переименовывается в
+финальный установщик.
 
-- Российские домены `.ru`, `.рф`, `.su` и выбранные российские сервисы идут
-  напрямую.
-- Российские GeoIP маршруты идут напрямую, если доступен `geoip-ru.srs`.
-- Иностранные адреса идут через VPN.
-- PTR, SRV, HTTPS и SVCB DNS-залпы обрабатываются локально, чтобы Chrome с
-  несколькими профилями и большим числом вкладок не создавал очередь DNS timeout
-  примерно на 10 секунд.
+### Автостарт
 
-Так Yurich DNS не зависит от загруженного VPN-туннеля, но маршрутизация
-иностранного трафика сохраняется через VPN.
+Автостарт использует пользовательский Windows Run registry key. По умолчанию
+elevated Scheduled Task не создаётся.
 
-## Логи и диагностика
+### Удаление
 
-Логи лежат здесь:
+Удаляй приложение через параметры Windows или uninstaller. Удаляются файлы
+приложения, ярлыки, uninstall-записи, старые startup tasks и процессы runtime,
+которые принадлежат Yurich Connect. Пользовательские профили не удаляются без
+явного подтверждения.
 
-```text
-%APPDATA%\Yurich Connect\logs\yurich.log
-%APPDATA%\Yurich Connect\logs\sing-box.log
-%APPDATA%\Yurich Connect\logs\naive.log
-```
+### Windows Defender
 
-Диагностика:
-
-```text
-%APPDATA%\Yurich Connect\diagnostics\report.zip
-```
-
-Отчёт маскирует UUID, пароли, токены, VLESS-ссылки, NaiveProxy-ссылки,
-Hysteria-ссылки и Yurich ID URL.
-
-Старые файлы из `%APPDATA%\Aurum VPN` копируются в `%APPDATA%\Yurich Connect`
-при первом запуске, если новая папка ещё не создана.
-
-## Удаление
-
-Используй **Приложения и возможности** Windows или запусти:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\Yurich Connect\uninstall_yurich_connect.ps1"
-```
-
-Скрипт удаления просит подтверждение, удаляет только папку `Yurich Connect`,
-ярлыки и записи uninstall. Он останавливает только процессы `YurichConnect.exe`,
-`AurumVPN.exe`, `sing-box.exe` и `naive.exe`, запущенные из папки приложения.
-
-## Windows Defender
-
-Приложение содержит сетевые компоненты и создаёт VPN-интерфейс, поэтому Windows
-Defender или SmartScreen могут ругаться на новую неподписанную сборку. Скачивай
-установщик только из официальных GitHub Releases и сверяй SHA-256 из релиза.
+Неподписанные VPN/proxy инструменты иногда вызывают предупреждения Defender.
+Скачивай установщик только из официальных GitHub Releases, не меняй имя файла и
+отправь диагностический отчёт, если Windows блокирует запуск.

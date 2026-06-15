@@ -4,6 +4,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/vpn_profile.dart';
 
+enum WindowsConnectionMode {
+  stableProxy('stableProxy'),
+  advancedTun('advancedTun');
+
+  const WindowsConnectionMode(this.code);
+
+  final String code;
+
+  static WindowsConnectionMode fromCode(String? code) {
+    return values.firstWhere(
+      (mode) => mode.code == code,
+      orElse: () => WindowsConnectionMode.stableProxy,
+    );
+  }
+}
+
 class ProfileStore {
   static const _profilesKey = 'profiles';
   static const _selectedProfileKey = 'selectedProfileId';
@@ -14,8 +30,12 @@ class ProfileStore {
       'splitTunnelExcludedProcesses';
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
   static const _codexDirectKey = 'codexDirect';
+  static const _chatGptThroughVpnKey = 'chatGptThroughVpn';
+  static const _windowsConnectionModeKey = 'windowsConnectionMode';
   static const defaultVpnOnlyProcesses = <String>[];
   static const defaultCodexDirect = true;
+  static const defaultChatGptThroughVpn = true;
+  static const defaultWindowsConnectionMode = WindowsConnectionMode.stableProxy;
 
   Future<List<VpnProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -118,5 +138,27 @@ class ProfileStore {
   Future<void> saveCodexDirect(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_codexDirectKey, enabled);
+  }
+
+  Future<bool> loadChatGptThroughVpn() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_chatGptThroughVpnKey) ?? defaultChatGptThroughVpn;
+  }
+
+  Future<void> saveChatGptThroughVpn(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_chatGptThroughVpnKey, enabled);
+  }
+
+  Future<WindowsConnectionMode> loadWindowsConnectionMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return WindowsConnectionMode.fromCode(
+      prefs.getString(_windowsConnectionModeKey),
+    );
+  }
+
+  Future<void> saveWindowsConnectionMode(WindowsConnectionMode mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_windowsConnectionModeKey, mode.code);
   }
 }

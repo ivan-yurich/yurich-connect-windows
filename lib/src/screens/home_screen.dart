@@ -31,7 +31,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.35';
+const _appVersion = '1.0.37';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _statusPanelHeight = 228.0;
@@ -154,11 +154,14 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoStart = false;
   bool _autoConnect = false;
   bool _codexDirect = ProfileStore.defaultCodexDirect;
+  bool _chatGptThroughVpn = ProfileStore.defaultChatGptThroughVpn;
+  WindowsConnectionMode _windowsConnectionMode =
+      ProfileStore.defaultWindowsConnectionMode;
+  bool _systemProxyEnabled = false;
   bool _autoConnectAttempted = false;
   bool _isWindowsAdmin = !Platform.isWindows;
   bool _showAllProfiles = false;
   _ProfileFilter _profileFilter = _ProfileFilter.all;
-  bool _healthWatchdogRestarting = false;
   int _healthWatchdogFailures = 0;
   DateTime? _healthWatchdogCooldownUntil;
   bool _quitFromTray = false;
@@ -201,6 +204,12 @@ class _HomeScreenState extends State<HomeScreen>
         _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
         profile.kind != VpnProfileKind.singBoxConfig;
   }
+
+  bool get _advancedTunMode =>
+      _windowsConnectionMode == WindowsConnectionMode.advancedTun;
+
+  String get _windowsConnectionModeName =>
+      _advancedTunMode ? s.advancedTunModeTitle : s.stableProxyModeTitle;
 
   bool get _connected =>
       _status == YurichConnectStatus.started ||
@@ -380,6 +389,8 @@ class _HomeScreenState extends State<HomeScreen>
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final autoConnect = await _store.loadAutoConnect();
     final codexDirect = await _store.loadCodexDirect();
+    final chatGptThroughVpn = await _store.loadChatGptThroughVpn();
+    final windowsConnectionMode = await _store.loadWindowsConnectionMode();
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
     final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
@@ -406,6 +417,9 @@ class _HomeScreenState extends State<HomeScreen>
     final autoStart = Platform.isWindows
         ? await _windowsIntegration.isAutoStartEnabled()
         : false;
+    final systemProxyEnabled = Platform.isWindows
+        ? await _windowsIntegration.isSystemProxyEnabled()
+        : false;
     if (!mounted) {
       return;
     }
@@ -420,6 +434,9 @@ class _HomeScreenState extends State<HomeScreen>
       _selectedProfileId = resolvedSelectedId;
       _autoConnect = autoConnect;
       _codexDirect = codexDirect;
+      _chatGptThroughVpn = chatGptThroughVpn;
+      _windowsConnectionMode = windowsConnectionMode;
+      _systemProxyEnabled = systemProxyEnabled;
       _autoStart = autoStart;
       _isWindowsAdmin = isWindowsAdmin;
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
@@ -970,7 +987,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    if (Platform.isWindows && !_isWindowsAdmin) {
+    if (Platform.isWindows && _advancedTunMode && !_isWindowsAdmin) {
       await _showAdminRequiredDialog();
       return;
     }
@@ -1072,6 +1089,8 @@ class _HomeScreenState extends State<HomeScreen>
         splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
         vpnOnlyProcesses: _vpnOnlyProcesses,
         codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
+        chatGptThroughVpn: _chatGptThroughVpn,
+        windowsTunMode: _advancedTunMode,
       );
       final naiveProxyConfig =
           _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
@@ -1535,7 +1554,6 @@ class _HomeScreenState extends State<HomeScreen>
     if (!mounted ||
         !Platform.isWindows ||
         _busy ||
-        _healthWatchdogRestarting ||
         _status != YurichConnectStatus.started) {
       return;
     }
@@ -1593,13 +1611,6 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    final profile = _selectedProfile;
-    if (profile == null) {
-      _healthWatchdogFailures = 0;
-      _healthWatchdogCooldownUntil = null;
-      return;
-    }
-
     final codexActive = await _hasActiveCodexProcess();
     if (codexActive) {
       _healthWatchdogFailures = 0;
@@ -1614,35 +1625,23 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    _healthWatchdogRestarting = true;
     _healthWatchdogCooldownUntil = DateTime.now().add(
       _healthWatchdogActiveTrafficFailureWindow,
     );
-    _lastVpnReconnectAt = DateTime.now();
     _lastVpnReconnectReason = probeDescription;
     _lastReconnectDuringCodex = codexActive;
+    _healthWatchdogFailures = 0;
     _queueLog(
-      'VPN health watchdog restarting tunnel after repeated probe failures: '
-      '$probeDescription. attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
+      'VPN health watchdog diagnostic-only: repeated probe failures detected, '
+      'but reconnect is skipped to preserve active WebSocket/browser sessions. '
+      'Reason: $probeDescription. attempts=$probeAttempts, '
+      'p99=${_formatLatency(probeP99)}. User action is required for restart.',
     );
     if (mounted) {
       setState(() {
-        _status = YurichConnectStatus.reconnecting;
-        _message = s.reconnecting;
+        _message = s.healthWatchdogWarning;
+        _lastError = s.healthWatchdogWarning;
       });
-    }
-    await _runBusy(() async {
-      await _stopVpnCore(updateMessage: false);
-      await Future<void>.delayed(const Duration(seconds: 2));
-      if (mounted) {
-        await _startVpnCore(profile);
-      }
-    }, message: 'Проверка сети провалилась, перезапускаю VPN...');
-
-    _healthWatchdogRestarting = false;
-    _healthWatchdogFailures = 0;
-    if (mounted && _status == YurichConnectStatus.started) {
-      _startHealthWatchdog(warmup: const Duration(seconds: 45));
     }
   }
 
@@ -1915,9 +1914,85 @@ if ($null -ne $match) { 'true' } else { 'false' }
     });
     _queueLog(
       value
-          ? 'Codex direct mode enabled: ChatGPT/OpenAI domains and Codex executables will bypass the VPN in Windows TUN mode.'
+          ? 'Codex CLI direct mode enabled: Codex executables bypass regular VPN routing where Windows process rules are available. ChatGPT web routing is controlled separately.'
           : 'Codex direct mode disabled: Codex will follow the regular VPN routing rules.',
     );
+  }
+
+  Future<void> _setChatGptThroughVpn(bool value) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    await _store.saveChatGptThroughVpn(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _chatGptThroughVpn = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      value
+          ? 'ChatGPT web routing set to VPN/proxy. chatgpt.com and OpenAI web assets will not be bypassed by Codex direct mode.'
+          : 'ChatGPT web routing set to direct. OpenAI web domains may bypass the VPN.',
+    );
+  }
+
+  Future<void> _setAdvancedTunMode(bool value) async {
+    if (!Platform.isWindows || _windowsSettingsBusy) {
+      return;
+    }
+    final mode = value
+        ? WindowsConnectionMode.advancedTun
+        : WindowsConnectionMode.stableProxy;
+    await _store.saveWindowsConnectionMode(mode);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _windowsConnectionMode = mode;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+      if (!value && _status == YurichConnectStatus.adminRequired) {
+        _status = YurichConnectStatus.stopped;
+        _lastError = null;
+      }
+    });
+    _queueLog(
+      value
+          ? 'Advanced TUN Mode enabled by user. Administrator rights may be required on connect.'
+          : 'Stable Proxy Mode enabled by user. TUN and Wintun are disabled.',
+    );
+    if (value && !_isWindowsAdmin) {
+      _showSnack(s.advancedTunNeedsAdmin);
+    }
+  }
+
+  Future<void> _setSystemProxy(bool value) async {
+    if (!Platform.isWindows || _windowsSettingsBusy) {
+      return;
+    }
+    setState(() => _windowsSettingsBusy = true);
+    try {
+      await _windowsIntegration.setSystemProxyEnabled(value);
+      final enabled = await _windowsIntegration.isSystemProxyEnabled();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _systemProxyEnabled = enabled;
+        _message = enabled ? s.systemProxyEnabled : s.systemProxyDisabled;
+      });
+    } on Object catch (e) {
+      final enabled = await _windowsIntegration.isSystemProxyEnabled();
+      if (mounted) {
+        setState(() => _systemProxyEnabled = enabled);
+        _showSnack('${s.systemProxyFailed}: ${_redactSensitive('$e')}');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _windowsSettingsBusy = false);
+      }
+    }
   }
 
   Future<void> _setAutoStart(bool value) async {
@@ -1954,7 +2029,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     }
     setState(() => _codexDiagnosticsBusy = true);
     final lines = <String>[
-      'Codex diagnostics started. direct=$_codexDirect, supported=$_codexDirectSupported, status=$_status.',
+      'Codex diagnostics started. cli_direct=$_codexDirect, chatgpt_through_vpn=$_chatGptThroughVpn, supported=$_codexDirectSupported, status=$_status.',
     ];
     try {
       final codexProcessActive = await _hasActiveCodexProcess();
@@ -2437,11 +2512,16 @@ if ($null -ne $match) { 'true' } else { 'false' }
       '$_appName diagnostic',
       'app_version: $_appVersion',
       'config_target: ${_vpnEngine.configTarget.name}',
+      'windows_connection_mode: ${_windowsConnectionMode.code}',
+      'system_proxy_enabled: $_systemProxyEnabled',
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
       'status: $_status',
       'message: ${_redactSensitive(_message)}',
       'codex_direct: $_codexDirect',
       'codex_direct_supported: $_codexDirectSupported',
+      'chatgpt_through_vpn: $_chatGptThroughVpn',
+      'split_tunnel_direct_apps: ${_formatProcessList(_splitTunnelExcludedProcesses)}',
+      'vpn_only_apps: ${_formatProcessList(_vpnOnlyProcesses)}',
       if (_lastVpnReconnectAt != null)
         'last_reconnect: ${_formatDurationAgo(_lastVpnReconnectAt!)} ago; '
             'reason=${_redactSensitive(_lastVpnReconnectReason ?? 'unknown')}; '
@@ -2474,6 +2554,13 @@ if ($null -ne $match) { 'true' } else { 'false' }
     return lines.join('\n');
   }
 
+  String _formatProcessList(List<String> processes) {
+    if (processes.isEmpty) {
+      return 'none';
+    }
+    return processes.map(_redactSensitive).join(', ');
+  }
+
   String _summarizeSingBoxConfig(
     String config, {
     required SingBoxConfigTarget target,
@@ -2498,6 +2585,12 @@ if ($null -ne $match) { 'true' } else { 'false' }
             inbound['listen'] == '127.0.0.1' &&
             inbound['listen_port'] == SingBoxConfigBuilder.localMixedProxyPort,
       );
+      final hasSocksProxy = inbounds.any(
+        (inbound) =>
+            inbound['type'] == 'socks' &&
+            inbound['listen'] == '127.0.0.1' &&
+            inbound['listen_port'] == SingBoxConfigBuilder.localSocksProxyPort,
+      );
       final outbounds = ((map['outbounds'] as List?) ?? const [])
           .whereType<Map>()
           .map((item) => item.cast<String, dynamic>())
@@ -2520,6 +2613,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       );
       return [
         'target=${target.name}',
+        'mode=${tun.isEmpty ? 'stable_proxy' : 'advanced_tun'}',
         'proxy=${proxy['type'] ?? 'unknown'}',
         'dns=$dnsFinal/${dnsServer['type'] ?? 'unknown'}',
         if (hasFakeDns) 'fake_dns=true',
@@ -2531,6 +2625,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
         if (proxy['type'] == 'socks') 'mode=naive-core',
         if (proxy['type'] != 'http') 'quic=${proxy['quic'] ?? 'auto'}',
         'mixed_proxy=$hasMixedProxy',
+        'socks_proxy=$hasSocksProxy',
       ].join('; ');
     } on Object {
       return 'target=${target.name}; raw/custom config';
@@ -2723,10 +2818,14 @@ if ($null -ne $match) { 'true' } else { 'false' }
                     const SizedBox(height: 14),
                     _WindowsToolsPanel(
                       strings: s,
+                      connectionModeName: _windowsConnectionModeName,
+                      advancedTunMode: _advancedTunMode,
+                      systemProxyEnabled: _systemProxyEnabled,
                       autoStart: _autoStart,
                       autoConnect: _autoConnect,
                       codexDirect: _codexDirect,
                       codexDirectSupported: _codexDirectSupported,
+                      chatGptThroughVpn: _chatGptThroughVpn,
                       busy: _windowsSettingsBusy,
                       checkingUpdate: _checkingUpdate,
                       installingUpdate: _installingUpdate,
@@ -2735,12 +2834,18 @@ if ($null -ne $match) { 'true' } else { 'false' }
                           _splitTunnelExcludedProcesses.length,
                       vpnOnlyProcessCount: _vpnOnlyProcesses.length,
                       updateInfo: _updateInfo,
+                      onAdvancedTunModeChanged: (value) =>
+                          unawaited(_setAdvancedTunMode(value)),
+                      onSystemProxyChanged: (value) =>
+                          unawaited(_setSystemProxy(value)),
                       onAutoStartChanged: (value) =>
                           unawaited(_setAutoStart(value)),
                       onAutoConnectChanged: (value) =>
                           unawaited(_setAutoConnect(value)),
                       onCodexDirectChanged: (value) =>
                           unawaited(_setCodexDirect(value)),
+                      onChatGptThroughVpnChanged: (value) =>
+                          unawaited(_setChatGptThroughVpn(value)),
                       onEditSplitTunnel: _showSplitTunnelSheet,
                       onEditVpnOnly: _showVpnOnlySheet,
                       onCodexDiagnostics: () =>
@@ -3768,10 +3873,14 @@ enum _ServerLatencyState { ok, failed, unavailable }
 class _WindowsToolsPanel extends StatelessWidget {
   const _WindowsToolsPanel({
     required this.strings,
+    required this.connectionModeName,
+    required this.advancedTunMode,
+    required this.systemProxyEnabled,
     required this.autoStart,
     required this.autoConnect,
     required this.codexDirect,
     required this.codexDirectSupported,
+    required this.chatGptThroughVpn,
     required this.busy,
     required this.checkingUpdate,
     required this.installingUpdate,
@@ -3779,9 +3888,12 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.excludedProcessCount,
     required this.vpnOnlyProcessCount,
     required this.updateInfo,
+    required this.onAdvancedTunModeChanged,
+    required this.onSystemProxyChanged,
     required this.onAutoStartChanged,
     required this.onAutoConnectChanged,
     required this.onCodexDirectChanged,
+    required this.onChatGptThroughVpnChanged,
     required this.onEditSplitTunnel,
     required this.onEditVpnOnly,
     required this.onCodexDiagnostics,
@@ -3791,10 +3903,14 @@ class _WindowsToolsPanel extends StatelessWidget {
   });
 
   final _Strings strings;
+  final String connectionModeName;
+  final bool advancedTunMode;
+  final bool systemProxyEnabled;
   final bool autoStart;
   final bool autoConnect;
   final bool codexDirect;
   final bool codexDirectSupported;
+  final bool chatGptThroughVpn;
   final bool busy;
   final bool checkingUpdate;
   final bool installingUpdate;
@@ -3802,9 +3918,12 @@ class _WindowsToolsPanel extends StatelessWidget {
   final int excludedProcessCount;
   final int vpnOnlyProcessCount;
   final WindowsUpdateInfo? updateInfo;
+  final ValueChanged<bool> onAdvancedTunModeChanged;
+  final ValueChanged<bool> onSystemProxyChanged;
   final ValueChanged<bool> onAutoStartChanged;
   final ValueChanged<bool> onAutoConnectChanged;
   final ValueChanged<bool> onCodexDirectChanged;
+  final ValueChanged<bool> onChatGptThroughVpnChanged;
   final VoidCallback onEditSplitTunnel;
   final VoidCallback onEditVpnOnly;
   final VoidCallback onCodexDiagnostics;
@@ -3843,6 +3962,28 @@ class _WindowsToolsPanel extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             _SettingsSwitchRow(
+              icon: advancedTunMode
+                  ? Icons.admin_panel_settings_outlined
+                  : Icons.speed_outlined,
+              value: advancedTunMode,
+              onChanged: busy ? null : onAdvancedTunModeChanged,
+              title: Text(connectionModeName),
+              subtitle: Text(
+                advancedTunMode
+                    ? strings.advancedTunModeHint
+                    : strings.stableProxyModeHint,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
+              icon: Icons.public_outlined,
+              value: systemProxyEnabled,
+              onChanged: busy ? null : onSystemProxyChanged,
+              title: Text(strings.systemProxy),
+              subtitle: Text(strings.systemProxyHint),
+            ),
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
               icon: Icons.rocket_launch_outlined,
               value: autoStart,
               onChanged: busy ? null : onAutoStartChanged,
@@ -3868,6 +4009,14 @@ class _WindowsToolsPanel extends StatelessWidget {
                     ? strings.codexDirectHint
                     : strings.codexDirectTunOnly,
               ),
+            ),
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
+              icon: Icons.smart_toy_outlined,
+              value: chatGptThroughVpn,
+              onChanged: busy ? null : onChatGptThroughVpnChanged,
+              title: Text(strings.chatGptThroughVpn),
+              subtitle: Text(strings.chatGptThroughVpnHint),
             ),
             const SizedBox(height: 12),
             _ActionGrid(
@@ -4340,6 +4489,17 @@ class _Strings {
     required this.logs,
     required this.noLogs,
     required this.windowsTools,
+    required this.stableProxyModeTitle,
+    required this.stableProxyModeHint,
+    required this.advancedTunModeTitle,
+    required this.advancedTunModeHint,
+    required this.advancedTunNeedsAdmin,
+    required this.systemProxy,
+    required this.systemProxyHint,
+    required this.systemProxyEnabled,
+    required this.systemProxyDisabled,
+    required this.systemProxyFailed,
+    required this.healthWatchdogWarning,
     required this.autoStart,
     required this.autoStartHint,
     required this.autoStartEnabled,
@@ -4352,6 +4512,8 @@ class _Strings {
     required this.codexDirect,
     required this.codexDirectHint,
     required this.codexDirectTunOnly,
+    required this.chatGptThroughVpn,
+    required this.chatGptThroughVpnHint,
     required this.codexDiagnostics,
     required this.codexDiagnosticsDone,
     required this.splitTunnelTitle,
@@ -4442,6 +4604,17 @@ class _Strings {
   final String logs;
   final String noLogs;
   final String windowsTools;
+  final String stableProxyModeTitle;
+  final String stableProxyModeHint;
+  final String advancedTunModeTitle;
+  final String advancedTunModeHint;
+  final String advancedTunNeedsAdmin;
+  final String systemProxy;
+  final String systemProxyHint;
+  final String systemProxyEnabled;
+  final String systemProxyDisabled;
+  final String systemProxyFailed;
+  final String healthWatchdogWarning;
   final String autoStart;
   final String autoStartHint;
   final String autoStartEnabled;
@@ -4454,6 +4627,8 @@ class _Strings {
   final String codexDirect;
   final String codexDirectHint;
   final String codexDirectTunOnly;
+  final String chatGptThroughVpn;
+  final String chatGptThroughVpnHint;
   final String codexDiagnostics;
   final String codexDiagnosticsDone;
   final String splitTunnelTitle;
@@ -4686,9 +4861,9 @@ class _Strings {
 
   String get adminRightsRequiredBody => switch (this) {
     _Strings.en =>
-      'Yurich Connect uses Windows TUN/Wintun mode. Restart the app as administrator and try connecting again.',
+      'Advanced TUN Mode uses Windows TUN/Wintun. Restart the app as administrator or switch back to Stable Proxy Mode.',
     _ =>
-      'Yurich Connect использует режим Windows TUN/Wintun. Перезапустите приложение от имени администратора и подключитесь снова.',
+      'Продвинутый TUN-режим использует Windows TUN/Wintun. Перезапустите приложение от имени администратора или вернитесь в стабильный proxy-режим.',
   };
 
   String get restartAsAdmin => switch (this) {
@@ -4763,7 +4938,7 @@ class _Strings {
     vpnStoppedUnexpectedly: 'VPN остановлен неожиданно',
     openLogsMessage: 'VPN остановлен. Открой логи Yurich Core.',
     languageChanged: 'Язык переключён',
-    windowsEdition: 'Yurich Desktop',
+    windowsEdition: 'Yurich Connect',
     addProfile: 'Добавить профиль',
     importHint: 'https://sub... или vless://... или hysteria2://...',
     importAction: 'Импорт',
@@ -4798,7 +4973,7 @@ class _Strings {
     dnsCountryValue: 'Yurich DNS + split',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Yurich Desktop: Yurich DNS обрабатывается локально для быстрого старта вкладок, российские домены и GeoIP RU идут напрямую, остальное через VPN.',
+        'Yurich Connect: стабильный proxy-режим работает без TUN и UAC, а продвинутый TUN включается отдельно.',
     endpointLabel: 'Сервер',
     connect: 'Подключить',
     disconnect: 'Отключить',
@@ -4841,10 +5016,26 @@ class _Strings {
     ],
     logs: 'Логи Yurich Core',
     noLogs: 'Логов пока нет.',
-    windowsTools: 'Yurich Desktop',
+    windowsTools: 'Yurich Connect',
+    stableProxyModeTitle: 'Стабильный proxy-режим',
+    stableProxyModeHint:
+        'Рекомендовано: без TUN, Wintun и прав администратора. Mixed 127.0.0.1:20808 и SOCKS 127.0.0.1:20809.',
+    advancedTunModeTitle: 'Продвинутый TUN-режим',
+    advancedTunModeHint:
+        'Beta: режим для всех приложений через TUN/Wintun. Может потребовать запуск от имени администратора.',
+    advancedTunNeedsAdmin:
+        'Для продвинутого TUN-режима при подключении могут понадобиться права администратора.',
+    systemProxy: 'Системный proxy Windows',
+    systemProxyHint:
+        'Включает Windows proxy на 127.0.0.1:20808 и SOCKS 127.0.0.1:20809. Ядро должно быть подключено.',
+    systemProxyEnabled: 'Системный proxy включён',
+    systemProxyDisabled: 'Системный proxy выключен',
+    systemProxyFailed: 'Не удалось изменить системный proxy',
+    healthWatchdogWarning:
+        'Проверка сети видит сбой, но VPN не перезапущен автоматически. Проверь логи или нажми “Починить подключение”.',
     autoStart: 'Автостарт с Windows',
     autoStartHint:
-        'Запускает Yurich Connect при входе в Windows через планировщик задач с высшими правами.',
+        'Запускает Yurich Connect при входе в Windows обычным пользователем без UAC.',
     autoStartEnabled: 'Автостарт включён',
     autoStartDisabled: 'Автостарт выключен',
     autoStartFailed: 'Не удалось изменить автостарт',
@@ -4852,11 +5043,14 @@ class _Strings {
     autoConnectHint: 'После запуска приложения подключает выбранный профиль.',
     autoConnectEnabled: 'Автоподключение включено',
     autoConnectDisabled: 'Автоподключение выключено',
-    codexDirect: 'Codex напрямую',
+    codexDirect: 'Codex CLI напрямую',
     codexDirectHint:
-        'ChatGPT/OpenAI WebSocket и Codex exe идут напрямую, без перезапуска туннеля из-за health-check.',
+        'Только процессы Codex идут напрямую. Сайт ChatGPT управляется отдельным переключателем ниже.',
     codexDirectTunOnly:
-        'Исключения Codex доступны только в Windows TUN-режиме для обычных профилей.',
+        'Исключения Codex доступны для обычных профилей Yurich Connect.',
+    chatGptThroughVpn: 'ChatGPT сайт через VPN',
+    chatGptThroughVpnHint:
+        'Рекомендовано: chatgpt.com, OpenAI web assets и авторизация идут через текущий VPN/proxy, а не напрямую.',
     codexDiagnostics: 'Диагностика Codex',
     codexDiagnosticsDone: 'Диагностика Codex записана в логи',
     splitTunnelTitle: 'Исключения приложений',
@@ -4907,7 +5101,7 @@ class _Strings {
     vpnStoppedUnexpectedly: 'VPN stopped unexpectedly',
     openLogsMessage: 'VPN stopped. Open Yurich Core logs.',
     languageChanged: 'Language changed',
-    windowsEdition: 'Yurich Desktop',
+    windowsEdition: 'Yurich Connect',
     addProfile: 'Add profile',
     importHint: 'https://sub... or vless://... or hysteria2://...',
     importAction: 'Import',
@@ -4941,7 +5135,7 @@ class _Strings {
     dnsCountryValue: 'Yurich DNS + split',
     mobileReady: 'Wi‑Fi / LTE',
     mobileNetworkAdvice:
-        'Yurich Desktop: Yurich DNS is resolved locally for fast tab startup, Russian domains and GeoIP RU go direct, and everything else uses the VPN.',
+        'Yurich Connect: Stable Proxy Mode runs without TUN or UAC, and Advanced TUN is opt-in.',
     endpointLabel: 'Server',
     connect: 'Connect',
     disconnect: 'Disconnect',
@@ -4984,10 +5178,26 @@ class _Strings {
     ],
     logs: 'Yurich Core logs',
     noLogs: 'No logs yet.',
-    windowsTools: 'Yurich Desktop',
+    windowsTools: 'Yurich Connect',
+    stableProxyModeTitle: 'Stable Proxy Mode',
+    stableProxyModeHint:
+        'Recommended: no TUN, Wintun, or administrator rights. Mixed 127.0.0.1:20808 and SOCKS 127.0.0.1:20809.',
+    advancedTunModeTitle: 'Advanced TUN Mode',
+    advancedTunModeHint:
+        'Beta: all-app routing through TUN/Wintun. Administrator rights may be required.',
+    advancedTunNeedsAdmin:
+        'Advanced TUN Mode may require administrator rights when connecting.',
+    systemProxy: 'Windows system proxy',
+    systemProxyHint:
+        'Enables Windows proxy on 127.0.0.1:20808 and SOCKS 127.0.0.1:20809. The core should be connected.',
+    systemProxyEnabled: 'System proxy enabled',
+    systemProxyDisabled: 'System proxy disabled',
+    systemProxyFailed: 'Could not change system proxy',
+    healthWatchdogWarning:
+        'Network health check sees a failure, but VPN was not restarted automatically. Check logs or use Repair connection.',
     autoStart: 'Start with Windows',
     autoStartHint:
-        'Starts Yurich Connect on Windows sign-in via Task Scheduler with highest privileges.',
+        'Starts Yurich Connect at Windows sign-in as the current user without UAC.',
     autoStartEnabled: 'Startup enabled',
     autoStartDisabled: 'Startup disabled',
     autoStartFailed: 'Could not change startup',
@@ -4995,11 +5205,14 @@ class _Strings {
     autoConnectHint: 'Connects the selected profile after the app starts.',
     autoConnectEnabled: 'Auto-connect enabled',
     autoConnectDisabled: 'Auto-connect disabled',
-    codexDirect: 'Codex direct',
+    codexDirect: 'Codex CLI direct',
     codexDirectHint:
-        'ChatGPT/OpenAI WebSocket and Codex executables go direct, without tunnel restarts from health checks.',
+        'Only Codex executables go direct. ChatGPT website routing is controlled by the switch below.',
     codexDirectTunOnly:
-        'Codex exclusions are available only in Windows TUN mode for generated profiles.',
+        'Codex exclusions are available for regular Yurich Connect profiles.',
+    chatGptThroughVpn: 'ChatGPT website through VPN',
+    chatGptThroughVpnHint:
+        'Recommended: chatgpt.com, OpenAI web assets, and auth use the current VPN/proxy instead of direct routing.',
     codexDiagnostics: 'Codex diagnostics',
     codexDiagnosticsDone: 'Codex diagnostics written to logs',
     splitTunnelTitle: 'App exclusions',

@@ -6,7 +6,7 @@ class YurichBranding {
   static const panelName = 'Yurich Panel';
   static const coreName = 'Yurich Core';
   static const dnsName = 'Yurich DNS';
-  static const desktopName = 'Yurich Desktop';
+  static const desktopName = appName;
   static const mobileName = 'Yurich Mobile';
   static const subscriptionName = 'Yurich ID';
   static const siteName = 'Yurich Cloud';
