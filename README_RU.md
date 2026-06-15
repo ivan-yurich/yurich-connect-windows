@@ -1,33 +1,83 @@
 # Yurich Connect для Windows
 
-**Yurich Connect** - Windows-клиент Yurich Desktop для подключения через Yurich Core, sing-box, NaiveProxy и Wintun.
+**Yurich Connect** - Windows-клиент экосистемы Yurich для стабильного доступа к зарубежным сервисам, подпискам Yurich ID и ручным VPN/proxy-профилям.
 
-## Возможности
+Приложение работает на Windows 10/11 и использует **Yurich Core** на базе sing-box, NaiveProxy, Hysteria и, при необходимости, Wintun.
 
-- VLESS Reality и VLESS TLS.
-- NaiveProxy через sing-box или bundled `naive.exe`.
-- Hysteria и Hysteria2.
-- Импорт профилей по ссылке, подписке, QR, буферу обмена и вручную.
-- Windows TUN/Wintun режим.
-- Split tunneling по `.exe` файлам.
-- Постоянный VPN для выбранных приложений.
-- Автостарт с Windows и автоподключение выбранного профиля.
-- Проверка обновлений через GitHub Releases.
-- Диагностика, логи и отчёт с маскировкой секретов.
+## Главное
+
+- **Stable Proxy Mode** - режим по умолчанию без TUN, Wintun и прав администратора.
+- **Advanced TUN Mode** - отдельный продвинутый режим для полного системного туннеля, Wintun, DNS hijack и split routing.
+- Импорт **Yurich ID** подписок с несколькими серверами и профилями.
+- Поддержка VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2 и raw sing-box JSON.
+- Отдельная логика для ChatGPT, OpenAI и Codex-сессий.
+- Диагностика, логи и безопасный отчёт с маскировкой секретов.
 - Installer и portable-сборка.
 
-## Установка
+## Stable Proxy Mode
 
-1. Скачайте `YurichConnect_Setup.exe` из GitHub Releases.
-2. Запустите установщик.
-3. Разрешите Windows UAC.
-4. После установки запустите Yurich Connect.
+Stable Proxy Mode - основной режим для обычного пользователя.
 
-Portable-версия: распакуйте `YurichConnect_Windows_Portable.zip`, откройте папку `Yurich Connect` и запустите `YurichConnect.exe` или `START_YURICH_CONNECT.cmd`.
+Он не создаёт TUN-интерфейс, не использует Wintun и не требует запуска от имени администратора. Вместо этого Yurich Connect поднимает локальные proxy-точки:
 
-## Почему нужны права администратора
+- mixed proxy: `127.0.0.1:20808`
+- SOCKS proxy: `127.0.0.1:20809`
 
-Yurich Connect использует Windows TUN/Wintun. Для создания сетевого интерфейса и маршрутов Windows нужны права администратора. Если приложение запущено без прав, оно покажет окно с кнопкой **Перезапустить от имени администратора**.
+Этот режим меньше вмешивается в сетевую систему Windows, поэтому лучше подходит для ежедневной работы, браузеров, Codex, ChatGPT, IDE и приложений с долгими WebSocket-соединениями.
+
+Системный proxy Windows можно включить отдельным переключателем, когда нужно направить обычные приложения через Yurich Connect.
+
+## Advanced TUN Mode
+
+Advanced TUN Mode - продвинутый сценарий.
+
+Он нужен, если требуется направить через VPN весь системный трафик, использовать split routing, перехват DNS или правила по приложениям на уровне TUN.
+
+Этот режим может требовать:
+
+- Wintun;
+- права администратора;
+- создание сетевого интерфейса;
+- изменение маршрутов Windows;
+- более внимательную диагностику при нестабильной сети.
+
+Если нет явной причины использовать полный TUN, начинайте со Stable Proxy Mode.
+
+## Yurich ID и импорт подписок
+
+Yurich Connect умеет импортировать не только одну ссылку профиля, но и подписку, внутри которой может быть несколько серверов.
+
+Поддерживаются:
+
+- Yurich ID subscription URL;
+- VLESS Reality;
+- VLESS TLS;
+- NaiveProxy;
+- Hysteria 1;
+- Hysteria 2;
+- raw sing-box JSON;
+- HTML-страницы панели, если внутри есть raw-ссылки на профили.
+
+После импорта приложение показывает профили списком, проверяет ping серверов и позволяет выбрать подходящее подключение.
+
+## ChatGPT, OpenAI и Codex
+
+В Windows-версии отдельно разведены маршруты для сайта ChatGPT и Codex CLI.
+
+- **ChatGPT сайт через VPN** включён по умолчанию: `chatgpt.com` и web-ресурсы OpenAI идут через текущий VPN/proxy маршрут.
+- **Codex CLI напрямую** можно включить отдельно: процессы Codex обходят чувствительные reconnect-маршруты, когда это нужно для долгих сессий.
+
+Для стабильности Codex/OpenAI-сессий Yurich Connect:
+
+- не перезапускает туннель из-за одного health-check timeout;
+- проверяет несколько endpoint;
+- не делает быстрый цикл `start -> timeout -> stop -> start`;
+- смягчает reconnect watchdog во время активного трафика;
+- не сбрасывает долгие WebSocket-соединения без крайней необходимости;
+- пишет в логи историю probe/reconnect;
+- содержит диагностику DNS, TCP 443, WebSocket upgrade и reconnect history.
+
+Это важно для OpenAI Codex, ChatGPT, IDE, браузеров и любых сервисов, где соединение должно жить долго.
 
 ## Логи и диагностика
 
@@ -37,13 +87,92 @@ Yurich Connect использует Windows TUN/Wintun. Для создания 
 - `%APPDATA%\Yurich Connect\logs\sing-box.log`
 - `%APPDATA%\Yurich Connect\logs\naive.log`
 
-Диагностический отчёт сохраняется в:
+Диагностический отчёт создаётся здесь:
 
 - `%APPDATA%\Yurich Connect\diagnostics\report.zip`
 
-UUID, пароли, токены, ссылки подписок и ключи маскируются автоматически.
+В отчёте автоматически маскируются:
+
+- UUID;
+- пароли;
+- токены;
+- private keys;
+- `vless://` ссылки;
+- `naive+https://` ссылки;
+- `hysteria://` и `hysteria2://` ссылки;
+- Yurich ID subscription URL.
+
+Диагностику можно отправить разработчику без раскрытия приватных ключей и подписок.
+
+## Установка
+
+Рекомендуемый способ:
+
+1. Откройте официальный раздел GitHub Releases.
+2. Скачайте `YurichConnect_Setup.exe`.
+3. Запустите установщик.
+4. После установки откройте Yurich Connect.
+5. Импортируйте Yurich ID подписку или отдельный профиль.
+6. Сначала подключитесь в Stable Proxy Mode.
+
+Portable-версия:
+
+1. Скачайте `YurichConnect_Windows_Portable.zip`.
+2. Обязательно распакуйте архив.
+3. Откройте папку `Yurich Connect`.
+4. Запустите `START_YURICH_CONNECT.cmd` или `YurichConnect.exe`.
+
+Не запускайте portable-версию прямо из ZIP-просмотрщика Windows.
+
+## Почему могут понадобиться права администратора
+
+Stable Proxy Mode не требует прав администратора.
+
+Права администратора нужны только для установщика и Advanced TUN Mode, потому что Windows должна создать сетевой интерфейс Wintun и системные маршруты.
+
+## Если приложение не запускается
+
+Проверьте:
+
+- установлен ли Microsoft Visual C++ Redistributable 2015-2022 x64;
+- есть ли файлы `sing-box.exe`, `naive.exe`, `wintun.dll`, `libcronet.dll` в runtime;
+- не заблокировал ли запуск Windows Defender или SmartScreen;
+- есть ли ошибки в `%APPDATA%\Yurich Connect\logs\yurich.log`.
+
+Visual C++ Runtime:
+
+<https://aka.ms/vs/17/release/vc_redist.x64.exe>
 
 ## Если пропал интернет
 
-Откройте Yurich Connect и нажмите **Починить подключение**. Приложение остановит свои процессы, очистит временные конфиги и выполнит flush DNS. Профили и подписки не удаляются.
+Откройте Yurich Connect и нажмите **Починить подключение**.
 
+Приложение остановит свои процессы, очистит временные конфиги, восстановит proxy-настройки Windows и выполнит flush DNS. Профили и подписки не удаляются.
+
+## Обновления
+
+Yurich Connect проверяет Windows-релизы на GitHub Releases.
+
+Обновление скачивается во временный `.download` файл, проверяется и только потом переименовывается в финальный установщик. Это защищает от битых загрузок и частично скачанных файлов.
+
+## Удаление
+
+Installer-версия удаляется через параметры Windows или uninstaller из папки установки.
+
+Portable-версия удаляется вручную: закройте приложение, отключите VPN и удалите распакованную папку. Пользовательские данные остаются в `%APPDATA%\Yurich Connect`, пока вы сами их не удалите.
+
+## Windows Defender и SmartScreen
+
+Yurich Connect содержит сетевые компоненты и может создавать VPN-интерфейс в Advanced TUN Mode. Новая неподписанная сборка может вызвать предупреждение Windows Defender или SmartScreen.
+
+Скачивайте установщик только из официальных GitHub Releases и сверяйте SHA-256 из релиза. Если Windows блокирует запуск, сформируйте диагностический отчёт и отправьте его разработчику.
+
+## Ребрендинг
+
+Старое название **Aurum VPN** больше не используется для Windows-продукта. Актуальное название:
+
+- бренд: Yurich;
+- приложение: Yurich Connect;
+- Windows-клиент: Yurich Desktop;
+- ядро: Yurich Core;
+- подписка: Yurich ID.
