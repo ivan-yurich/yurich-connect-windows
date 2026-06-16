@@ -26,6 +26,7 @@ class ProfileStore {
   static const _languageKey = 'languageCode';
   static const _autoConnectKey = 'autoConnect';
   static const _subscriptionSourcesKey = 'subscriptionSources';
+  static const _deletedProfileIdsKey = 'deletedProfileIds';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
@@ -108,6 +109,41 @@ class ProfileStore {
             .toList()
           ..sort();
     await prefs.setStringList(_subscriptionSourcesKey, normalized);
+  }
+
+  Future<Set<String>> loadDeletedProfileIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getStringList(_deletedProfileIdsKey) ?? const [])
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
+  }
+
+  Future<void> saveDeletedProfileIds(Iterable<String> ids) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized =
+        ids.map((id) => id.trim()).where((id) => id.isNotEmpty).toSet().toList()
+          ..sort();
+    await prefs.setStringList(_deletedProfileIdsKey, normalized);
+  }
+
+  Future<void> markProfileDeleted(String id) async {
+    final deletedIds = await loadDeletedProfileIds();
+    deletedIds.add(id);
+    await saveDeletedProfileIds(deletedIds);
+  }
+
+  Future<void> restoreProfiles(Iterable<String> ids) async {
+    final restoreIds = ids
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    if (restoreIds.isEmpty) {
+      return;
+    }
+    final deletedIds = await loadDeletedProfileIds();
+    deletedIds.removeAll(restoreIds);
+    await saveDeletedProfileIds(deletedIds);
   }
 
   Future<List<String>> loadSplitTunnelExcludedProcesses() async {

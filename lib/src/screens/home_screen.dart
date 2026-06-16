@@ -168,6 +168,7 @@ class _HomeScreenState extends State<HomeScreen>
   List<String> _splitTunnelExcludedProcesses = const [];
   List<String> _vpnOnlyProcesses = ProfileStore.defaultVpnOnlyProcesses;
   List<String> _subscriptionSources = const [];
+  Set<String> _deletedProfileIds = const {};
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
   DateTime? _serverLatencyLastUpdated;
@@ -384,7 +385,17 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _load() async {
-    final profiles = await _store.loadProfiles();
+    var profiles = await _store.loadProfiles();
+    final deletedProfileIds = await _store.loadDeletedProfileIds();
+    if (deletedProfileIds.isNotEmpty) {
+      final visibleProfiles = profiles
+          .where((profile) => !deletedProfileIds.contains(profile.id))
+          .toList();
+      if (visibleProfiles.length != profiles.length) {
+        profiles = visibleProfiles;
+        await _store.saveProfiles(profiles);
+      }
+    }
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final autoConnect = await _store.loadAutoConnect();
@@ -442,6 +453,7 @@ class _HomeScreenState extends State<HomeScreen>
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
       _vpnOnlyProcesses = vpnOnlyProcesses;
       _subscriptionSources = subscriptionSources;
+      _deletedProfileIds = deletedProfileIds;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -737,11 +749,16 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _importText(String text) async {
     await _runBusy(() async {
       final subscriptionSource = _normalizeSubscriptionSource(text);
-      final imported = await _importer.importFromText(text);
+      final imported = _tagSubscriptionProfiles(
+        await _importer.importFromText(text),
+        subscriptionSource,
+      );
       if (imported.isEmpty) {
         throw ProfileImportException(s.nothingToImport);
       }
 
+      final deletedProfileIds = Set<String>.of(_deletedProfileIds)
+        ..removeAll(imported.map((profile) => profile.id));
       final subscriptionSources = subscriptionSource == null
           ? _subscriptionSources
           : _mergeSubscriptionSources([
@@ -755,6 +772,7 @@ class _HomeScreenState extends State<HomeScreen>
 
       await _store.saveProfiles(merged);
       await _store.saveSelectedProfileId(imported.first.id);
+      await _store.saveDeletedProfileIds(deletedProfileIds);
       if (subscriptionSource != null) {
         await _store.saveSubscriptionSources(subscriptionSources);
       }
@@ -766,6 +784,7 @@ class _HomeScreenState extends State<HomeScreen>
       setState(() {
         _profiles = merged;
         _subscriptionSources = subscriptionSources;
+        _deletedProfileIds = deletedProfileIds;
         _selectedProfileId = imported.first.id;
         _serverLatencyLastUpdated = null;
         _message = s.imported(imported.length);
@@ -798,10 +817,21 @@ class _HomeScreenState extends State<HomeScreen>
 
     final imported = <VpnProfile>[];
     final errors = <String>[];
+    var skippedDeletedProfiles = 0;
     try {
       for (final source in sources) {
         try {
-          imported.addAll(await _importer.importFromText(source));
+          final fetched = _tagSubscriptionProfiles(
+            await _importer.importFromText(source),
+            source,
+          );
+          for (final profile in fetched) {
+            if (_deletedProfileIds.contains(profile.id)) {
+              skippedDeletedProfiles += 1;
+              continue;
+            }
+            imported.add(profile);
+          }
         } on Object catch (error) {
           errors.add(
             '${_redactSensitive(source)}: ${_redactSensitive('$error')}',
@@ -810,19 +840,25 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       if (imported.isEmpty) {
-        final message = errors.isEmpty ? s.nothingToImport : errors.first;
-        throw ProfileImportException(message);
+        if (_profiles.isEmpty || errors.isNotEmpty) {
+          final message = errors.isEmpty ? s.nothingToImport : errors.first;
+          throw ProfileImportException(message);
+        }
+        _queueLog(
+          'Subscription refresh skipped $skippedDeletedProfiles manually deleted profiles.',
+        );
       }
 
       final merged = <String, VpnProfile>{
-        for (final profile in _profiles) profile.id: profile,
+        for (final profile in _profiles)
+          if (!_deletedProfileIds.contains(profile.id)) profile.id: profile,
         for (final profile in imported) profile.id: profile,
       }.values.toList();
       final selectedProfileId =
           _selectedProfileId != null &&
               merged.any((profile) => profile.id == _selectedProfileId)
           ? _selectedProfileId
-          : imported.first.id;
+          : (merged.isEmpty ? null : merged.first.id);
 
       await _store.saveProfiles(merged);
       await _store.saveSelectedProfileId(selectedProfileId);
@@ -2284,11 +2320,25 @@ if ($null -ne $match) { 'true' } else { 'false' }
     List<VpnProfile> profiles,
   ) {
     return _mergeSubscriptionSources(
-      profiles
-          .map((profile) => profile.originalInput)
-          .map(_normalizeSubscriptionSource)
-          .whereType<String>(),
+      profiles.expand(
+        (profile) => [profile.subscriptionSource, profile.originalInput]
+            .whereType<String>()
+            .map(_normalizeSubscriptionSource)
+            .whereType<String>(),
+      ),
     );
+  }
+
+  List<VpnProfile> _tagSubscriptionProfiles(
+    List<VpnProfile> profiles,
+    String? subscriptionSource,
+  ) {
+    if (subscriptionSource == null) {
+      return profiles;
+    }
+    return profiles
+        .map((profile) => profile.withSubscriptionSource(subscriptionSource))
+        .toList();
   }
 
   List<String> _mergeSubscriptionSources(Iterable<String> sources) {
@@ -2337,13 +2387,23 @@ if ($null -ne $match) { 'true' } else { 'false' }
     final nextSelectedId = deletingSelected
         ? (next.isEmpty ? null : next.first.id)
         : _selectedProfileId;
+    final deletedProfileIds = Set<String>.of(_deletedProfileIds)
+      ..add(profile.id);
+    final subscriptionSources = _subscriptionSourcesAfterProfileDelete(
+      profile,
+      next,
+    );
     await _store.saveProfiles(next);
     await _store.saveSelectedProfileId(nextSelectedId);
+    await _store.saveDeletedProfileIds(deletedProfileIds);
+    await _store.saveSubscriptionSources(subscriptionSources);
     if (!mounted) {
       return;
     }
     setState(() {
       _profiles = next;
+      _subscriptionSources = subscriptionSources;
+      _deletedProfileIds = deletedProfileIds;
       _selectedProfileId = nextSelectedId;
       _serverLatencyLastUpdated = null;
       _serverLatencies = Map<String, _ServerLatencyResult>.of(_serverLatencies)
@@ -2354,6 +2414,38 @@ if ($null -ne $match) { 'true' } else { 'false' }
       unawaited(_refreshServerLatencies());
     }
     unawaited(_refreshTrayMenu());
+  }
+
+  List<String> _subscriptionSourcesAfterProfileDelete(
+    VpnProfile deletedProfile,
+    List<VpnProfile> remainingProfiles,
+  ) {
+    if (remainingProfiles.isEmpty) {
+      return const [];
+    }
+
+    final deletedSource = _normalizeSubscriptionSource(
+      deletedProfile.subscriptionSource ?? '',
+    );
+    if (deletedSource == null) {
+      return _subscriptionSources;
+    }
+
+    final sourceStillHasProfiles = remainingProfiles.any((profile) {
+      final source = _normalizeSubscriptionSource(
+        profile.subscriptionSource ?? '',
+      );
+      return source == deletedSource;
+    });
+    if (sourceStillHasProfiles) {
+      return _subscriptionSources;
+    }
+
+    return _subscriptionSources
+        .where(
+          (source) => _normalizeSubscriptionSource(source) != deletedSource,
+        )
+        .toList();
   }
 
   Future<void> _copySelected() async {

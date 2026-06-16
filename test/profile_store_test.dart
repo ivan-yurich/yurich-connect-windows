@@ -49,5 +49,25 @@ void main() {
         'https://example.com/sub',
       ]);
     });
+
+    test('saves normalized deleted profile denylist', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveDeletedProfileIds([' profile-b ', '', 'profile-a']);
+      await store.markProfileDeleted('profile-b');
+
+      expect(await store.loadDeletedProfileIds(), {'profile-a', 'profile-b'});
+    });
+
+    test('restores manually imported profiles from denylist', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveDeletedProfileIds(['profile-a', 'profile-b']);
+      await store.restoreProfiles(['profile-a']);
+
+      expect(await store.loadDeletedProfileIds(), {'profile-b'});
+    });
   });
 }
