@@ -39,6 +39,14 @@ class WindowsIntegrationService {
     'api.github.com',
     '/repos/$githubOwner/$githubRepo/releases/latest',
   );
+  static final latestReleaseWeb = Uri.https(
+    'github.com',
+    '/$githubOwner/$githubRepo/releases/latest',
+  );
+  static final latestReleaseAtom = Uri.https(
+    'github.com',
+    '/$githubOwner/$githubRepo/releases.atom',
+  );
 
   static const _taskName = YurichBranding.appName;
   static const _legacyTaskName = 'Aurum VPN';
@@ -242,25 +250,71 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
   }
 
   Future<WindowsUpdateInfo> checkForUpdate(String currentVersion) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final errors = <String>[];
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _checkForUpdateViaApi(
+          currentVersion,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on _TransientUpdateException catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)}: ${error.message}');
+      } on Object catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)}: $error');
+      }
+    }
+
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _checkForUpdateViaAtom(
+          currentVersion,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on Object catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)} atom: $error');
+      }
+    }
+
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _checkForUpdateViaWeb(
+          currentVersion,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on Object catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)} web: $error');
+      }
+    }
+
+    final details = errors.take(3).join('; ');
+    return WindowsUpdateInfo(
+      message: details.isEmpty
+          ? 'GitHub is temporarily unavailable. Try again later.'
+          : 'GitHub is temporarily unavailable. Try again later. Details: $details',
+    );
+  }
+
+  Future<WindowsUpdateInfo> _checkForUpdateViaApi(
+    String currentVersion, {
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy);
     try {
       final request = await client.getUrl(latestReleaseApi);
-      request.headers.set(
-        HttpHeaders.userAgentHeader,
-        'YurichConnect/$currentVersion',
-      );
-      request.headers.set(
-        HttpHeaders.acceptHeader,
-        'application/vnd.github+json',
-      );
+      _setGitHubHeaders(request, currentVersion);
       final response = await request.close().timeout(
-        const Duration(seconds: 10),
+        const Duration(seconds: 12),
       );
       final body = await response.transform(utf8.decoder).join();
 
       if (response.statusCode == HttpStatus.notFound) {
         return const WindowsUpdateInfo(
           message: 'GitHub releases are not published yet.',
+        );
+      }
+      if (response.statusCode >= 500 && response.statusCode < 600) {
+        throw _TransientUpdateException(
+          'GitHub API HTTP ${response.statusCode}',
         );
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -277,36 +331,154 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         return const WindowsUpdateInfo(message: 'Latest release has no tag.');
       }
 
-      final versionComparison = compareReleaseVersions(tag, currentVersion);
-      final available = versionComparison > 0;
-      final latestIsOlder = versionComparison < 0;
-      return WindowsUpdateInfo(
-        available: available,
-        latestIsOlder: latestIsOlder,
+      return _buildUpdateInfo(
         currentVersion: currentVersion,
-        latestVersion: tag,
+        tag: tag,
         releaseUrl: htmlUrl == null || htmlUrl.isEmpty
             ? null
             : Uri.parse(htmlUrl),
-        installerUrl: installerAsset?.downloadUrl,
-        installerName: installerAsset?.name,
-        installerSize: installerAsset?.size,
-        message: available
-            ? 'Update available: $tag'
-            : latestIsOlder
-            ? 'Installed build $currentVersion is newer than GitHub latest $tag.'
-            : 'You are up to date: $tag',
+        installerAsset: installerAsset,
       );
-    } on Object catch (e) {
-      return WindowsUpdateInfo(message: 'Update check failed: $e');
     } finally {
       client.close(force: true);
     }
   }
 
+  Future<WindowsUpdateInfo> _checkForUpdateViaWeb(
+    String currentVersion, {
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy);
+    try {
+      final request = await client.getUrl(latestReleaseWeb);
+      request.followRedirects = false;
+      _setGitHubHeaders(request, currentVersion);
+      request.headers.set(HttpHeaders.acceptHeader, 'text/html, */*');
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      final body = await response.transform(utf8.decoder).join();
+
+      if (response.statusCode >= 500 && response.statusCode < 600) {
+        throw _TransientUpdateException(
+          'GitHub web HTTP ${response.statusCode}',
+        );
+      }
+      if (response.statusCode < 200 || response.statusCode >= 400) {
+        throw StateError('GitHub web returned HTTP ${response.statusCode}.');
+      }
+
+      final location = response.headers.value(HttpHeaders.locationHeader);
+      final tag = releaseTagFromLocation(location) ?? releaseTagFromHtml(body);
+      if (tag == null || tag.isEmpty) {
+        throw StateError('GitHub web latest page has no release tag.');
+      }
+
+      final releaseUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/tag/$tag',
+      );
+      final installerUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe',
+      );
+      return _buildUpdateInfo(
+        currentVersion: currentVersion,
+        tag: tag,
+        releaseUrl: releaseUrl,
+        installerAsset: _ReleaseAsset(
+          name: 'YurichConnect_Setup.exe',
+          downloadUrl: installerUrl,
+          size: null,
+        ),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<WindowsUpdateInfo> _checkForUpdateViaAtom(
+    String currentVersion, {
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy);
+    try {
+      final request = await client.getUrl(latestReleaseAtom);
+      _setGitHubHeaders(request, currentVersion);
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        'application/atom+xml, application/xml, text/xml, */*',
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      final body = await response.transform(utf8.decoder).join();
+
+      if (response.statusCode >= 500 && response.statusCode < 600) {
+        throw _TransientUpdateException(
+          'GitHub atom HTTP ${response.statusCode}',
+        );
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('GitHub atom returned HTTP ${response.statusCode}.');
+      }
+
+      final tag = releaseTagFromAtom(body);
+      if (tag == null || tag.isEmpty) {
+        throw StateError('GitHub atom feed has no release tag.');
+      }
+
+      final releaseUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/tag/$tag',
+      );
+      final installerUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe',
+      );
+      return _buildUpdateInfo(
+        currentVersion: currentVersion,
+        tag: tag,
+        releaseUrl: releaseUrl,
+        installerAsset: _ReleaseAsset(
+          name: 'YurichConnect_Setup.exe',
+          downloadUrl: installerUrl,
+          size: null,
+        ),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  WindowsUpdateInfo _buildUpdateInfo({
+    required String currentVersion,
+    required String tag,
+    required Uri? releaseUrl,
+    required _ReleaseAsset? installerAsset,
+  }) {
+    final versionComparison = compareReleaseVersions(tag, currentVersion);
+    final available = versionComparison > 0;
+    final latestIsOlder = versionComparison < 0;
+    return WindowsUpdateInfo(
+      available: available,
+      latestIsOlder: latestIsOlder,
+      currentVersion: currentVersion,
+      latestVersion: tag,
+      releaseUrl: releaseUrl,
+      installerUrl: installerAsset?.downloadUrl,
+      installerName: installerAsset?.name,
+      installerSize: installerAsset?.size,
+      message: available
+          ? 'Update available: $tag'
+          : latestIsOlder
+          ? 'Installed build $currentVersion is newer than GitHub latest $tag.'
+          : 'You are up to date: $tag',
+    );
+  }
+
   Future<File> downloadInstaller(WindowsUpdateInfo update) async {
-    final url = update.installerUrl;
-    if (url == null) {
+    if (update.installerUrl == null) {
       throw StateError('Latest release has no Windows installer asset.');
     }
 
@@ -323,7 +495,37 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
       await target.parent.create(recursive: true);
     }
 
-    final client = HttpClient()
+    Object? lastError;
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _downloadInstaller(
+          update,
+          target: target,
+          partial: partial,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on Object catch (error) {
+        lastError = error;
+        try {
+          if (await partial.exists()) {
+            await partial.delete();
+          }
+        } on Object {
+          // Best-effort cleanup of an incomplete update payload.
+        }
+      }
+    }
+    throw StateError('Could not download update installer: $lastError');
+  }
+
+  Future<File> _downloadInstaller(
+    WindowsUpdateInfo update, {
+    required File target,
+    required File partial,
+    required bool viaLocalProxy,
+  }) async {
+    final url = update.installerUrl!;
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy)
       ..connectionTimeout = const Duration(seconds: 15);
     try {
       final request = await client.getUrl(url);
@@ -365,6 +567,30 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     } finally {
       client.close(force: true);
     }
+  }
+
+  HttpClient _githubHttpClient({required bool viaLocalProxy}) {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    if (viaLocalProxy) {
+      client.findProxy = (_) =>
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+    }
+    return client;
+  }
+
+  void _setGitHubHeaders(HttpClientRequest request, String currentVersion) {
+    request.headers.set(
+      HttpHeaders.userAgentHeader,
+      'YurichConnect/$currentVersion',
+    );
+    request.headers.set(
+      HttpHeaders.acceptHeader,
+      'application/vnd.github+json',
+    );
+  }
+
+  String _updateRouteLabel(bool viaLocalProxy) {
+    return viaLocalProxy ? 'local VPN proxy' : 'direct';
   }
 
   Future<void> runInstallerAsAdmin(File installer) async {
@@ -626,6 +852,53 @@ public static class YurichWinInet {
     }
     return 0;
   }
+
+  static String? releaseTagFromLocation(String? location) {
+    if (location == null || location.trim().isEmpty) {
+      return null;
+    }
+    final uri = Uri.tryParse(location.trim());
+    if (uri == null) {
+      return null;
+    }
+    return _releaseTagFromPathSegments(uri.pathSegments);
+  }
+
+  static String? releaseTagFromHtml(String html) {
+    final match = RegExp(
+      "/ivan-yurich/yurich-connect-windows/releases/tag/([^\"'<>\\s?#]+)",
+      caseSensitive: false,
+    ).firstMatch(html);
+    if (match == null) {
+      return null;
+    }
+    return Uri.decodeComponent(match.group(1)!);
+  }
+
+  static String? releaseTagFromAtom(String atom) {
+    final linkTag = releaseTagFromHtml(atom);
+    if (linkTag != null) {
+      return linkTag;
+    }
+    final idMatch = RegExp(
+      r'<id>[^<]*/([^/<]+-windows)</id>',
+      caseSensitive: false,
+    ).firstMatch(atom);
+    if (idMatch != null) {
+      return Uri.decodeComponent(idMatch.group(1)!);
+    }
+    return null;
+  }
+
+  static String? _releaseTagFromPathSegments(List<String> segments) {
+    for (var i = 0; i < segments.length - 2; i++) {
+      if (segments[i] == 'releases' && segments[i + 1] == 'tag') {
+        final tag = segments[i + 2].trim();
+        return tag.isEmpty ? null : Uri.decodeComponent(tag);
+      }
+    }
+    return null;
+  }
 }
 
 class _ReleaseAsset {
@@ -651,4 +924,13 @@ class _ReleaseAsset {
       size: (json['size'] as num?)?.round(),
     );
   }
+}
+
+class _TransientUpdateException implements Exception {
+  const _TransientUpdateException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }

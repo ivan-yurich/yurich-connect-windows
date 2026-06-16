@@ -208,4 +208,47 @@ void main() {
       );
     });
   });
+
+  group('WindowsIntegrationService release web fallback', () {
+    test('extracts latest release tag from redirect location', () {
+      expect(
+        WindowsIntegrationService.releaseTagFromLocation(
+          'https://github.com/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.38-windows',
+        ),
+        'v1.0.38-windows',
+      );
+      expect(
+        WindowsIntegrationService.releaseTagFromLocation(
+          '/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.39-windows',
+        ),
+        'v1.0.39-windows',
+      );
+    });
+
+    test('extracts latest release tag from GitHub html', () {
+      expect(
+        WindowsIntegrationService.releaseTagFromHtml(
+          '<a href="/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.40-windows">latest</a>',
+        ),
+        'v1.0.40-windows',
+      );
+    });
+
+    test('extracts latest release tag from GitHub atom feed', () {
+      const atom = '''
+<feed>
+  <entry>
+    <id>tag:github.com,2008:Repository/1246885860/v1.0.41-windows</id>
+    <link rel="alternate" type="text/html" href="https://github.com/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.41-windows"/>
+    <title>Yurich Connect for Windows v1.0.41</title>
+  </entry>
+</feed>
+''';
+
+      expect(
+        WindowsIntegrationService.releaseTagFromAtom(atom),
+        'v1.0.41-windows',
+      );
+    });
+  });
 }
