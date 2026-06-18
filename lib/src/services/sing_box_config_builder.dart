@@ -333,7 +333,6 @@ class SingBoxConfigBuilder {
           'server_port': 443,
           'path': '/dns-query',
           'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
-          'detour': 'direct',
         },
       if (target == SingBoxConfigTarget.android)
         {

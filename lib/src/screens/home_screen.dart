@@ -33,7 +33,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.40';
+const _appVersion = '1.0.41';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;

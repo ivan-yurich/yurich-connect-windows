@@ -631,7 +631,7 @@ void main() {
         (server) =>
             server['tag'] == 'bootstrap-dns' &&
             server['type'] == 'https' &&
-            server['detour'] == 'direct',
+            !server.containsKey('detour'),
       ),
       isTrue,
     );
