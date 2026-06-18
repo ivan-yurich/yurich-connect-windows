@@ -28,7 +28,11 @@ class WindowsSingBoxEngine implements VpnEngine {
   bool _reportedAdminIssue = false;
   bool _transitioning = false;
   bool _lastConfigNeedsTun = false;
+  int _runtimeFailureCount = 0;
+  DateTime? _lastRuntimeFailureAt;
+  String? _lastRuntimeFailureReason;
   int _sessionTotalBytes = 0;
+  final Map<String, bool> _configCheckCache = {};
   static const _visualRuntimeDlls = [
     'MSVCP140.dll',
     'VCRUNTIME140.dll',
@@ -111,6 +115,7 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   @override
   Future<bool> startVPN() async {
+    final startStopwatch = Stopwatch()..start();
     if (_process != null) {
       _appendLog(
         'Start skipped: sing-box is already tracked with PID $_processPid.',
@@ -126,9 +131,14 @@ class WindowsSingBoxEngine implements VpnEngine {
     _setStatus(YurichConnectStatus.starting);
     _reportedAdminIssue = false;
     try {
+      await _applyRuntimeBackoff();
       final runtimeDir = await _runtimeDir();
       final configDir = await _configDir();
+      final staleStopwatch = Stopwatch()..start();
       await _stopStaleRuntimeProcesses(runtimeDir);
+      _appendLog(
+        'Startup stale process cleanup finished in ${staleStopwatch.elapsedMilliseconds}ms.',
+      );
 
       final configFile = File('${configDir.path}\\config.json');
       final effectiveConfig = await _prepareConfigWithGeoIpFallback(
@@ -190,6 +200,9 @@ class WindowsSingBoxEngine implements VpnEngine {
       unawaited(
         process.exitCode.then((code) async {
           _appendLog('sing-box exited with code $code');
+          if (_status != YurichConnectStatus.stopping) {
+            _recordRuntimeFailure('sing-box', code);
+          }
           if (_process == process) {
             _process = null;
             _processPid = null;
@@ -202,9 +215,13 @@ class WindowsSingBoxEngine implements VpnEngine {
         }),
       );
 
-      await Future<void>.delayed(const Duration(milliseconds: 900));
+      await Future<void>.delayed(const Duration(milliseconds: 450));
       if (_process == process) {
+        _resetRuntimeBackoff();
         _setStatus(YurichConnectStatus.started);
+        _appendLog(
+          'Windows VPN start completed in ${startStopwatch.elapsedMilliseconds}ms.',
+        );
         return true;
       }
 
@@ -222,23 +239,90 @@ class WindowsSingBoxEngine implements VpnEngine {
       return false;
     } finally {
       _transitioning = false;
+      if (_status != YurichConnectStatus.started) {
+        _appendLog(
+          'Windows VPN start finished with status $_status in ${startStopwatch.elapsedMilliseconds}ms.',
+        );
+      }
+    }
+  }
+
+  Future<bool> prepareConfigForStart() async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final runtimeDir = await _runtimeDir();
+      final configDir = await _configDir();
+      final configFile = File('${configDir.path}\\config.json');
+      final effectiveConfig = await _prepareConfigWithGeoIpFallback(
+        runtimeDir,
+        configDir,
+        _config,
+      );
+      _lastConfigNeedsTun = _configNeedsTun(effectiveConfig);
+      await configFile.writeAsString(effectiveConfig, encoding: utf8);
+
+      final exe = File('${runtimeDir.path}\\sing-box.exe');
+      if (!await exe.exists()) {
+        _appendLog('Warm config check failed: sing-box.exe не найден.');
+        return false;
+      }
+
+      final ok = await _checkConfig(exe, configFile, runtimeDir);
+      _appendLog(
+        'Warm config check ${ok ? 'passed' : 'failed'} in ${stopwatch.elapsedMilliseconds}ms.',
+      );
+      return ok;
+    } on Object catch (e) {
+      _appendLog(
+        'Warm config check failed in ${stopwatch.elapsedMilliseconds}ms: $e',
+      );
+      return false;
     }
   }
 
   @override
-  Future<bool> stopVPN() async {
+  Future<bool> stopVPN() {
+    return _stopVPN(
+      gracefulTimeout: const Duration(seconds: 5),
+      killTimeout: const Duration(seconds: 3),
+      stopStaleWhenUntracked: true,
+    );
+  }
+
+  Future<bool> stopVPNFast() {
+    return _stopVPN(
+      gracefulTimeout: const Duration(milliseconds: 1200),
+      killTimeout: const Duration(milliseconds: 800),
+      stopStaleWhenUntracked: false,
+    );
+  }
+
+  Future<bool> _stopVPN({
+    required Duration gracefulTimeout,
+    required Duration killTimeout,
+    required bool stopStaleWhenUntracked,
+  }) async {
+    final stopwatch = Stopwatch()..start();
     if (_transitioning && _status == YurichConnectStatus.starting) {
       _appendLog('Stop requested while VPN is starting; waiting for cleanup.');
     }
     final process = _process;
     if (process == null) {
-      try {
-        await _stopStaleRuntimeProcesses(await _runtimeDir());
-      } on Object {
-        // Best-effort cleanup for untracked processes after app restarts.
+      if (stopStaleWhenUntracked) {
+        try {
+          await _stopStaleRuntimeProcesses(await _runtimeDir());
+        } on Object {
+          // Best-effort cleanup for untracked processes after app restarts.
+        }
       }
-      await _stopNaiveProxy();
+      await _stopNaiveProxy(
+        gracefulTimeout: gracefulTimeout,
+        killTimeout: killTimeout,
+      );
       _setStatus(YurichConnectStatus.stopped);
+      _appendLog(
+        'Windows VPN stop completed without tracked process in ${stopwatch.elapsedMilliseconds}ms.',
+      );
       return true;
     }
 
@@ -246,21 +330,27 @@ class WindowsSingBoxEngine implements VpnEngine {
     _appendLog('Stopping sing-box...');
     process.kill();
     try {
-      await process.exitCode.timeout(const Duration(seconds: 5));
+      await process.exitCode.timeout(gracefulTimeout);
     } on TimeoutException {
       _appendLog('sing-box did not exit in time; killing PID $_processPid.');
       process.kill(ProcessSignal.sigkill);
       try {
-        await process.exitCode.timeout(const Duration(seconds: 3));
+        await process.exitCode.timeout(killTimeout);
       } on TimeoutException {
         _appendLog('sing-box kill timeout for PID $_processPid.');
       }
     }
     _process = null;
     _processPid = null;
-    await _stopNaiveProxy();
+    await _stopNaiveProxy(
+      gracefulTimeout: gracefulTimeout,
+      killTimeout: killTimeout,
+    );
     _stopTrafficTicker();
     _setStatus(YurichConnectStatus.stopped);
+    _appendLog(
+      'Windows VPN stop completed in ${stopwatch.elapsedMilliseconds}ms.',
+    );
     return true;
   }
 
@@ -322,6 +412,61 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
   }
 
+  Future<void> _applyRuntimeBackoff() async {
+    final lastFailureAt = _lastRuntimeFailureAt;
+    if (lastFailureAt == null || _runtimeFailureCount <= 0) {
+      return;
+    }
+
+    final delay = _runtimeBackoffDelay(_runtimeFailureCount);
+    final elapsed = DateTime.now().difference(lastFailureAt);
+    final remaining = delay - elapsed;
+    if (remaining <= Duration.zero) {
+      return;
+    }
+
+    _appendLog(
+      'Runtime backoff active for ${remaining.inMilliseconds}ms after '
+      '${_lastRuntimeFailureReason ?? 'runtime failure'}.',
+    );
+    await Future<void>.delayed(remaining);
+  }
+
+  Duration _runtimeBackoffDelay(int failureCount) {
+    if (failureCount <= 1) {
+      return const Duration(seconds: 1);
+    }
+    if (failureCount == 2) {
+      return const Duration(seconds: 3);
+    }
+    return const Duration(seconds: 10);
+  }
+
+  void _recordRuntimeFailure(String component, int exitCode) {
+    if (exitCode == 0) {
+      return;
+    }
+    _runtimeFailureCount = (_runtimeFailureCount + 1).clamp(1, 6).toInt();
+    _lastRuntimeFailureAt = DateTime.now();
+    _lastRuntimeFailureReason = '$component process_exit code=$exitCode';
+    _appendLog(
+      'Runtime failure recorded: $_lastRuntimeFailureReason; '
+      'next start backoff=${_runtimeBackoffDelay(_runtimeFailureCount).inSeconds}s.',
+    );
+  }
+
+  void _resetRuntimeBackoff() {
+    if (_runtimeFailureCount == 0 &&
+        _lastRuntimeFailureAt == null &&
+        _lastRuntimeFailureReason == null) {
+      return;
+    }
+    _runtimeFailureCount = 0;
+    _lastRuntimeFailureAt = null;
+    _lastRuntimeFailureReason = null;
+    _appendLog('Runtime backoff cleared after successful start.');
+  }
+
   Future<void> _cleanupTemporaryConfigs(Directory configDir) async {
     final names = ['config.json', 'naive.json', 'geoip-ru.srs.download'];
     for (final name in names) {
@@ -361,13 +506,19 @@ class WindowsSingBoxEngine implements VpnEngine {
     required bool needsNaiveProxy,
     required bool needsTun,
   }) async {
+    final stopwatch = Stopwatch()..start();
     _appendLog('Windows preflight check started.');
+
+    bool fail(String message) {
+      _appendLog(message);
+      _appendLog(
+        'Windows preflight check failed in ${stopwatch.elapsedMilliseconds}ms.',
+      );
+      return false;
+    }
 
     if (needsTun && !await _isAdministrator()) {
       _setStatus(YurichConnectStatus.adminRequired);
-      _appendLog(
-        'Preflight failed: Advanced TUN Mode requires administrator rights.',
-      );
       if (!_statusController.isClosed) {
         _statusController.add({
           'type': 'alert',
@@ -376,7 +527,9 @@ class WindowsSingBoxEngine implements VpnEngine {
               'Продвинутый TUN-режим требует права администратора. Стабильный proxy-режим работает без UAC.',
         });
       }
-      return false;
+      return fail(
+        'Preflight failed: Advanced TUN Mode requires administrator rights.',
+      );
     }
 
     final missingRuntime = await _missingRuntimeFiles(
@@ -385,34 +538,33 @@ class WindowsSingBoxEngine implements VpnEngine {
       needsTun: needsTun,
     );
     if (missingRuntime.isNotEmpty) {
-      _appendLog(
+      return fail(
         'Preflight failed: отсутствуют runtime-файлы: ${missingRuntime.join(', ')}.',
       );
-      return false;
     }
 
     final missingVisualRuntime = await _missingVisualRuntimeDlls();
     if (missingVisualRuntime.isNotEmpty) {
-      _appendLog(
+      return fail(
         'Preflight failed: отсутствуют Microsoft Visual C++ Runtime DLL: ${missingVisualRuntime.join(', ')}. Установи Microsoft Visual C++ Redistributable 2015-2022 x64: https://aka.ms/vs/17/release/vc_redist.x64.exe',
       );
-      return false;
     }
 
     final busyPorts = await _busyLocalPorts(needsNaiveProxy: needsNaiveProxy);
     if (busyPorts.isNotEmpty) {
-      _appendLog(
+      return fail(
         'Preflight failed: заняты локальные порты ${busyPorts.join(', ')}. Закрой другой прокси/VPN или перезапусти Windows.',
       );
-      return false;
     }
 
     final exe = File('${runtimeDir.path}\\sing-box.exe');
     if (!await _checkConfig(exe, configFile, runtimeDir)) {
-      return false;
+      return fail('Preflight failed: sing-box config check failed.');
     }
 
-    _appendLog('Windows preflight check passed.');
+    _appendLog(
+      'Windows preflight check passed in ${stopwatch.elapsedMilliseconds}ms.',
+    );
     return true;
   }
 
@@ -643,7 +795,17 @@ class WindowsSingBoxEngine implements VpnEngine {
     File configFile,
     Directory runtimeDir,
   ) async {
+    final stopwatch = Stopwatch()..start();
     try {
+      final fingerprint = await _configCheckFingerprint(exe, configFile);
+      final cached = _configCheckCache[fingerprint];
+      if (cached == true) {
+        _appendLog(
+          'sing-box config check cache hit in ${stopwatch.elapsedMilliseconds}ms.',
+        );
+        return true;
+      }
+
       final result = await Process.run(
         exe.path,
         ['check', '-c', configFile.path],
@@ -652,8 +814,16 @@ class WindowsSingBoxEngine implements VpnEngine {
       ).timeout(const Duration(seconds: 12));
       final output = '${result.stdout}${result.stderr}'.trim();
       if (result.exitCode == 0) {
+        _configCheckCache[fingerprint] = true;
+        if (_configCheckCache.length > 24) {
+          _configCheckCache.remove(_configCheckCache.keys.first);
+        }
+        _appendLog(
+          'sing-box config check passed in ${stopwatch.elapsedMilliseconds}ms.',
+        );
         return true;
       }
+      _configCheckCache.remove(fingerprint);
       _appendLog(
         output.isEmpty
             ? 'sing-box config check failed with code ${result.exitCode}'
@@ -665,6 +835,24 @@ class WindowsSingBoxEngine implements VpnEngine {
       _emitUserAlert('Конфиг повреждён. Импортируйте профиль заново.');
     }
     return false;
+  }
+
+  Future<String> _configCheckFingerprint(File exe, File configFile) async {
+    final exeStat = await exe.stat();
+    final config = await configFile.readAsString(encoding: utf8);
+    final raw =
+        '${_fnv1a64(config)}|${exeStat.size}|${exeStat.modified.millisecondsSinceEpoch}';
+    return _fnv1a64(raw);
+  }
+
+  String _fnv1a64(String value) {
+    var hash = 0xcbf29ce484222325;
+    const prime = 0x100000001b3;
+    for (final byte in utf8.encode(value)) {
+      hash ^= byte;
+      hash = (hash * prime) & 0xFFFFFFFFFFFFFFFF;
+    }
+    return hash.toRadixString(16).padLeft(16, '0');
   }
 
   String _friendlyConfigError(String output) {
@@ -806,17 +994,21 @@ Write-Output \$stopped
           _naiveProcessPid = null;
         }
         if (_process != null && _status != YurichConnectStatus.stopping) {
+          _recordRuntimeFailure('naive', code);
           _appendLog('NaiveProxy core stopped while VPN was running.');
           _process?.kill();
         }
       }),
     );
 
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await Future<void>.delayed(const Duration(milliseconds: 350));
     return _naiveProcess == process;
   }
 
-  Future<void> _stopNaiveProxy() async {
+  Future<void> _stopNaiveProxy({
+    Duration gracefulTimeout = const Duration(seconds: 4),
+    Duration killTimeout = const Duration(seconds: 2),
+  }) async {
     final process = _naiveProcess;
     if (process == null) {
       _naiveProcessPid = null;
@@ -825,14 +1017,14 @@ Write-Output \$stopped
     _appendLog('Stopping NaiveProxy core PID $_naiveProcessPid...');
     process.kill();
     try {
-      await process.exitCode.timeout(const Duration(seconds: 4));
+      await process.exitCode.timeout(gracefulTimeout);
     } on TimeoutException {
       _appendLog(
         'NaiveProxy did not exit in time; killing PID $_naiveProcessPid.',
       );
       process.kill(ProcessSignal.sigkill);
       try {
-        await process.exitCode.timeout(const Duration(seconds: 2));
+        await process.exitCode.timeout(killTimeout);
       } on TimeoutException {
         _appendLog('NaiveProxy kill timeout for PID $_naiveProcessPid.');
       }
@@ -934,7 +1126,7 @@ Write-Output \$stopped
     }
     _trafficSocketConnecting = true;
     try {
-      await Future<void>.delayed(const Duration(milliseconds: 650));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
       if (_process == null) {
         return;
       }

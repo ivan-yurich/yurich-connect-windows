@@ -13,11 +13,13 @@ import 'package:window_manager/window_manager.dart';
 import '../models/vpn_profile.dart';
 import '../branding.dart';
 import '../services/profile_importer.dart';
+import '../services/profile_failover.dart';
 import '../services/profile_store.dart';
 import '../services/secret_redactor.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vpn_engine.dart';
 import '../services/windows_integration_service.dart';
+import '../services/windows_sing_box_engine.dart';
 import 'qr_scan_screen.dart';
 
 const _gold = Color(0xFF15B8FF);
@@ -34,6 +36,7 @@ const _supportEmail = 'ai@ivan-it.net';
 const _appVersion = '1.0.39';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
+const _maxProfileFailoverAttempts = 3;
 const _statusPanelHeight = 228.0;
 const _healthWatchdogTick = Duration(seconds: 45);
 const _healthWatchdogStartupGrace = Duration(seconds: 75);
@@ -155,6 +158,8 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoConnect = false;
   bool _codexDirect = ProfileStore.defaultCodexDirect;
   bool _chatGptThroughVpn = ProfileStore.defaultChatGptThroughVpn;
+  bool _developerMode = ProfileStore.defaultDeveloperMode;
+  bool _dnsOnlyThroughVpn = ProfileStore.defaultDnsOnlyThroughVpn;
   WindowsConnectionMode _windowsConnectionMode =
       ProfileStore.defaultWindowsConnectionMode;
   bool _systemProxyEnabled = false;
@@ -171,16 +176,20 @@ class _HomeScreenState extends State<HomeScreen>
   Set<String> _deletedProfileIds = const {};
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
+  Map<String, ProfileRuntimeStats> _profileRuntimeStats = const {};
   DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
   bool _refreshingSubscriptions = false;
   bool _codexDiagnosticsBusy = false;
+  bool _terminalDiagnosticsBusy = false;
+  bool _dnsDiagnosticsBusy = false;
   String? _dismissedUpdateVersion;
   String? _lastConfigSummary;
   DateTime? _lastVpnReconnectAt;
   String? _lastVpnReconnectReason;
   bool _lastReconnectDuringCodex = false;
   final List<_HealthProbeAttempt> _healthProbeHistory = [];
+  final Map<String, List<int>> _stageTimings = {};
   final _logs = <String>[];
   final _pendingLogs = <String>[];
 
@@ -401,10 +410,13 @@ class _HomeScreenState extends State<HomeScreen>
     final autoConnect = await _store.loadAutoConnect();
     final codexDirect = await _store.loadCodexDirect();
     final chatGptThroughVpn = await _store.loadChatGptThroughVpn();
+    final developerMode = await _store.loadDeveloperMode();
+    final dnsOnlyThroughVpn = await _store.loadDnsOnlyThroughVpn();
     final windowsConnectionMode = await _store.loadWindowsConnectionMode();
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
     final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
+    final profileRuntimeStats = await _store.loadProfileRuntimeStats();
     var subscriptionSources = await _store.loadSubscriptionSources();
     final inferredSubscriptionSources = _extractSubscriptionSourcesFromProfiles(
       profiles,
@@ -446,6 +458,8 @@ class _HomeScreenState extends State<HomeScreen>
       _autoConnect = autoConnect;
       _codexDirect = codexDirect;
       _chatGptThroughVpn = chatGptThroughVpn;
+      _developerMode = developerMode;
+      _dnsOnlyThroughVpn = dnsOnlyThroughVpn;
       _windowsConnectionMode = windowsConnectionMode;
       _systemProxyEnabled = systemProxyEnabled;
       _autoStart = autoStart;
@@ -454,6 +468,7 @@ class _HomeScreenState extends State<HomeScreen>
       _vpnOnlyProcesses = vpnOnlyProcesses;
       _subscriptionSources = subscriptionSources;
       _deletedProfileIds = deletedProfileIds;
+      _profileRuntimeStats = profileRuntimeStats;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -549,6 +564,7 @@ class _HomeScreenState extends State<HomeScreen>
 
       final status = event['status'] as String?;
       if (status != null && mounted) {
+        var unexpectedStop = false;
         setState(() {
           _status = status;
           if (status == YurichConnectStatus.started) {
@@ -573,10 +589,17 @@ class _HomeScreenState extends State<HomeScreen>
           if (status == YurichConnectStatus.stopped &&
               !_stoppingByUser &&
               !ignoreStopped) {
+            unexpectedStop = true;
             _lastError = s.vpnStoppedUnexpectedly;
             _message = s.openLogsMessage;
           }
         });
+        if (unexpectedStop) {
+          final profile = _selectedProfile;
+          if (profile != null) {
+            unawaited(_recordProfileRuntimeFailure(profile, 'process_exit'));
+          }
+        }
         unawaited(_refreshTrayMenu());
       }
     });
@@ -1008,8 +1031,15 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     await _runBusy(() async {
-      await _stopVpnCore(updateMessage: false);
-      await _startVpnCore(profile);
+      final stopwatch = Stopwatch()..start();
+      await _prepareProfileConfigForStart(profile);
+      await _stopVpnForProfileSwitch();
+      await _startVpnCore(profile, fastReconnect: true);
+      stopwatch.stop();
+      _recordStageTiming('profile_switch.total', stopwatch.elapsed);
+      _queueLog(
+        'Profile switched to ${profile.name} in ${stopwatch.elapsedMilliseconds}ms.',
+      );
     }, message: s.switchingProfile);
   }
 
@@ -1029,9 +1059,150 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     await _runBusy(
-      () => _startVpnCore(profile),
+      () => _connectWithFailover(profile),
       message: s.connectingTo(profile.name),
     );
+  }
+
+  Future<void> _connectWithFailover(VpnProfile preferred) async {
+    if (!_checkingServerLatency) {
+      await _refreshServerLatencies();
+    }
+
+    final candidates = _connectCandidateProfiles(preferred);
+    Object? lastError;
+    for (var index = 0; index < candidates.length; index += 1) {
+      final candidate = candidates[index];
+      final attemptNumber = index + 1;
+      if (candidate.id != preferred.id || index > 0) {
+        final message = _failoverTryingMessage(
+          candidate,
+          attemptNumber,
+          candidates.length,
+        );
+        _queueLog(message);
+        if (mounted) {
+          setState(() => _message = message);
+        }
+      }
+
+      if (index > 0) {
+        await Future<void>.delayed(
+          Duration(milliseconds: index == 1 ? 1200 : 3000),
+        );
+      }
+
+      try {
+        await _startVpnCore(candidate, fastReconnect: index > 0);
+        if (candidate.id != preferred.id) {
+          final message = _failoverConnectedMessage(candidate);
+          _queueLog(message);
+          if (mounted) {
+            setState(() => _message = message);
+            _showSnack(message);
+          }
+        }
+        return;
+      } on Object catch (error) {
+        lastError = error;
+        _queueLog(
+          'Profile connect failed [${candidate.name}] '
+          '$attemptNumber/${candidates.length}: '
+          '${_redactSensitive('$error')}',
+        );
+      }
+    }
+
+    await _store.saveSelectedProfileId(preferred.id);
+    if (mounted) {
+      setState(() => _selectedProfileId = preferred.id);
+    }
+    throw StateError('${lastError ?? s.vpnStartFailed}');
+  }
+
+  List<VpnProfile> _connectCandidateProfiles(VpnProfile preferred) {
+    final latencySnapshots = _profileLatencySnapshots();
+    final ranked = rankProfilesForFailover(
+      profiles: _profiles,
+      preferred: preferred,
+      runtimeStats: _profileRuntimeStats,
+      latencies: latencySnapshots,
+    );
+    if (ranked.isEmpty) {
+      return [preferred];
+    }
+
+    final best = ranked.first;
+    final useBest = shouldAutoSelectBestProfile(
+      preferred: preferred,
+      best: best,
+      runtimeStats: _profileRuntimeStats,
+      latencies: latencySnapshots,
+    );
+    final preferredScore = profileFailoverScore(
+      profile: preferred,
+      preferred: preferred,
+      runtimeStats: _profileRuntimeStats[preferred.id],
+      latency: latencySnapshots[preferred.id],
+    );
+
+    final ordered = <VpnProfile>[];
+    void add(VpnProfile profile) {
+      if (!ordered.any((item) => item.id == profile.id)) {
+        ordered.add(profile);
+      }
+    }
+
+    if (useBest) {
+      add(best.profile);
+      if (preferredScore > -1000) {
+        add(preferred);
+      }
+      _queueLog(
+        'Auto-selected better profile: ${_redactSensitive(best.profile.name)} '
+        'score=${best.score}; preferred=${_redactSensitive(preferred.name)}.',
+      );
+    } else {
+      add(preferred);
+    }
+
+    for (final candidate in ranked) {
+      add(candidate.profile);
+      if (ordered.length >= _maxProfileFailoverAttempts) {
+        break;
+      }
+    }
+    return ordered.take(_maxProfileFailoverAttempts).toList();
+  }
+
+  Map<String, ProfileLatencySnapshot> _profileLatencySnapshots() {
+    return _serverLatencies.map((profileId, latency) {
+      final snapshot = switch (latency.state) {
+        _ServerLatencyState.ok => ProfileLatencySnapshot.ok(
+          latency.milliseconds ?? 9999,
+        ),
+        _ServerLatencyState.failed => const ProfileLatencySnapshot.failed(),
+        _ServerLatencyState.unavailable =>
+          const ProfileLatencySnapshot.unavailable(),
+      };
+      return MapEntry(profileId, snapshot);
+    });
+  }
+
+  String _failoverTryingMessage(VpnProfile profile, int attempt, int total) {
+    final score = _profileRuntimeStats[profile.id]?.score;
+    final scoreLabel = score == null ? '' : ' score=$score';
+    if (_isRu(s)) {
+      return 'Пробую резервный профиль ${profile.name} ($attempt/$total)$scoreLabel';
+    }
+    return 'Trying fallback profile ${profile.name} ($attempt/$total)$scoreLabel';
+  }
+
+  String _failoverConnectedMessage(VpnProfile profile) {
+    if (_isRu(s)) {
+      return 'Подключено через резервный профиль: ${profile.name}';
+    }
+    return 'Connected through fallback profile: ${profile.name}';
   }
 
   Future<void> _showAdminRequiredDialog() async {
@@ -1090,15 +1261,120 @@ class _HomeScreenState extends State<HomeScreen>
     exit(0);
   }
 
-  Future<void> _startVpnCore(VpnProfile profile) async {
+  Future<void> _prepareProfileConfigForStart(VpnProfile profile) async {
+    if (!Platform.isWindows ||
+        _vpnEngine.configTarget != SingBoxConfigTarget.windows) {
+      return;
+    }
+    final stopwatch = Stopwatch()..start();
+    _validateProfileForStart(profile);
+    final plan = _connectionPlans(profile).first;
+    final config = _configBuilder.build(
+      profile,
+      target: _vpnEngine.configTarget,
+      naiveMode: plan.naiveMode,
+      splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
+      vpnOnlyProcesses: _vpnOnlyProcesses,
+      codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
+      chatGptThroughVpn: _chatGptThroughVpn,
+      developerMode: _developerMode,
+      dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
+      windowsTunMode: _advancedTunMode,
+    );
+    final naiveProxyConfig =
+        profile.kind == VpnProfileKind.naive &&
+            plan.naiveMode == NaiveOutboundMode.externalCore
+        ? _configBuilder.buildNaiveProxyConfig(profile)
+        : null;
+    final saved = await _vpnEngine.saveConfig(
+      config,
+      naiveProxyConfig: naiveProxyConfig,
+    );
+    if (!saved) {
+      throw StateError(s.configSaveFailed);
+    }
+
+    final engine = _vpnEngine;
+    if (engine is WindowsSingBoxEngine) {
+      final ok = await engine.prepareConfigForStart();
+      _recordStageTiming(
+        'profile_switch.warm_config_check',
+        stopwatch.elapsed,
+        detail: 'profile=${_redactSensitive(profile.name)} plan=${plan.label}',
+      );
+      if (!ok) {
+        throw StateError(s.configSaveFailed);
+      }
+    }
+  }
+
+  Future<void> _startVpnCore(
+    VpnProfile profile, {
+    bool fastReconnect = false,
+  }) async {
+    final totalStopwatch = Stopwatch()..start();
+    try {
+      await _startVpnCoreImpl(profile, fastReconnect: fastReconnect);
+      final stats = await _store.recordProfileRuntimeSuccess(
+        profile.id,
+        totalStopwatch.elapsed,
+      );
+      if (mounted) {
+        setState(() {
+          _profileRuntimeStats = Map<String, ProfileRuntimeStats>.of(
+            _profileRuntimeStats,
+          )..[profile.id] = stats;
+        });
+      }
+      _recordStageTiming(
+        'profile_start.total',
+        totalStopwatch.elapsed,
+        detail:
+            'profile=${_redactSensitive(profile.name)} score=${stats.score}',
+      );
+    } on Object catch (error) {
+      final reason = _classifyStartFailure(error);
+      final stats = await _store.recordProfileRuntimeFailure(
+        profile.id,
+        reason,
+      );
+      if (mounted) {
+        setState(() {
+          _profileRuntimeStats = Map<String, ProfileRuntimeStats>.of(
+            _profileRuntimeStats,
+          )..[profile.id] = stats;
+        });
+      }
+      _recordStageTiming(
+        'profile_start.failed',
+        totalStopwatch.elapsed,
+        detail:
+            'profile=${_redactSensitive(profile.name)} reason=$reason score=${stats.score}',
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> _startVpnCoreImpl(
+    VpnProfile profile, {
+    bool fastReconnect = false,
+  }) async {
     _validateProfileForStart(profile);
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
     final status = await _refreshVpnStatus();
     if (status != YurichConnectStatus.stopped) {
-      await _stopVpnCore(updateMessage: false);
+      final stopStopwatch = Stopwatch()..start();
+      if (fastReconnect) {
+        await _stopVpnForProfileSwitch();
+      } else {
+        await _stopVpnCore(updateMessage: false);
+      }
+      _recordStageTiming('profile_start.pre_stop', stopStopwatch.elapsed);
     }
 
-    await Future<void>.delayed(const Duration(milliseconds: 1400));
+    await Future<void>.delayed(
+      Duration(milliseconds: fastReconnect ? 150 : 1400),
+    );
 
     _pendingLogs.clear();
     _logs.clear();
@@ -1126,6 +1402,8 @@ class _HomeScreenState extends State<HomeScreen>
         vpnOnlyProcesses: _vpnOnlyProcesses,
         codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
         chatGptThroughVpn: _chatGptThroughVpn,
+        developerMode: _developerMode,
+        dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
         windowsTunMode: _advancedTunMode,
       );
       final naiveProxyConfig =
@@ -1163,7 +1441,13 @@ class _HomeScreenState extends State<HomeScreen>
           });
         }
 
+        final engineStartStopwatch = Stopwatch()..start();
         final started = await _vpnEngine.startVPN();
+        _recordStageTiming(
+          'profile_start.engine_start',
+          engineStartStopwatch.elapsed,
+          detail: 'plan=${plan.label}',
+        );
         if (started) {
           final finalStatus = await _waitForVpnStatus({
             YurichConnectStatus.started,
@@ -1182,12 +1466,14 @@ class _HomeScreenState extends State<HomeScreen>
               break;
             }
             final probeInfo = _healthProbeDescription(probeResult.lastFailure);
+            final p95Latency = _healthProbeP95LatencyMs();
             final p99Latency = _healthProbeP99LatencyMs();
             final attemptCount = probeResult.attempts.length;
             lastProbeFailureReason = probeInfo;
             _queueLog(
               'VPN start probe failed for ${plan.label}: $probeInfo. '
-              'attempts=$attemptCount, p99=${_formatLatency(p99Latency)}.',
+              'attempts=$attemptCount, p95=${_formatLatency(p95Latency)}, '
+              'p99=${_formatLatency(p99Latency)}.',
             );
             final guardedSessionReason = await _healthReconnectGuardReason();
             if (guardedSessionReason != null) {
@@ -1211,8 +1497,14 @@ class _HomeScreenState extends State<HomeScreen>
             'VPN start retry [attempt=$attempt/2 · ${plan.label}]: '
             '${_redactSensitive('$lastStartError')}',
           );
-          await _stopVpnCore(updateMessage: false);
-          await Future<void>.delayed(const Duration(milliseconds: 1600));
+          if (fastReconnect) {
+            await _stopVpnForProfileSwitch();
+          } else {
+            await _stopVpnCore(updateMessage: false);
+          }
+          await Future<void>.delayed(
+            Duration(milliseconds: fastReconnect ? 650 : 1600),
+          );
           await _vpnEngine.saveConfig(
             config,
             naiveProxyConfig: naiveProxyConfig,
@@ -1226,9 +1518,12 @@ class _HomeScreenState extends State<HomeScreen>
         _queueLog(
           'Naive mode fallback: ${plan.label} did not pass probe. '
           '${lastProbeFailureReason == null ? '' : 'Last failure: $lastProbeFailureReason. '}'
+          'p95=${_formatLatency(_healthProbeP95LatencyMs())}, '
           'p99=${_formatLatency(fallbackProbeInfo)}.',
         );
-        await Future<void>.delayed(const Duration(milliseconds: 800));
+        await Future<void>.delayed(
+          Duration(milliseconds: fastReconnect ? 250 : 800),
+        );
       }
     }
 
@@ -1236,7 +1531,9 @@ class _HomeScreenState extends State<HomeScreen>
       throw StateError('${lastStartError ?? s.vpnStartFailed}');
     }
 
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+    await Future<void>.delayed(
+      Duration(milliseconds: fastReconnect ? 100 : 500),
+    );
     await _store.saveSelectedProfileId(profile.id);
     if (mounted) {
       setState(() {
@@ -1354,6 +1651,7 @@ class _HomeScreenState extends State<HomeScreen>
   Future<_HealthProbeResult> _probeLocalMixedProxy({
     bool logFailures = true,
   }) async {
+    final totalStopwatch = Stopwatch()..start();
     final endpoints = <({Uri uri, bool allowCertificateMismatch})>[
       (
         uri: Uri.https('cp.cloudflare.com', '/generate_204'),
@@ -1482,6 +1780,12 @@ class _HomeScreenState extends State<HomeScreen>
         _recordHealthProbeAttempt(attemptLog);
 
         if (attemptLog.success) {
+          _recordStageTiming(
+            'health_probe.total',
+            totalStopwatch.elapsed,
+            detail:
+                'result=success endpoint=${attemptLog.endpoint.host} attempts=${attempts.length}',
+          );
           return _HealthProbeResult(
             success: true,
             attempts: List.unmodifiable(attempts),
@@ -1510,6 +1814,12 @@ class _HomeScreenState extends State<HomeScreen>
         break;
       }
     }
+    _recordStageTiming(
+      'health_probe.total',
+      totalStopwatch.elapsed,
+      detail:
+          'result=${_healthProbeFailureClass(lastFailure)} attempts=${attempts.length}',
+    );
     return _HealthProbeResult(
       success: false,
       attempts: List.unmodifiable(attempts),
@@ -1532,6 +1842,14 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   int _healthProbeP99LatencyMs() {
+    return _healthProbePercentileLatencyMs(99);
+  }
+
+  int _healthProbeP95LatencyMs() {
+    return _healthProbePercentileLatencyMs(95);
+  }
+
+  int _healthProbePercentileLatencyMs(int percentile) {
     final cutoff = DateTime.now().subtract(_healthProbeHistoryWindow);
     final durations =
         _healthProbeHistory
@@ -1543,7 +1861,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (durations.isEmpty) {
       return 0;
     }
-    final index = ((durations.length - 1) * 99 / 100).round();
+    final index = ((durations.length - 1) * percentile / 100).round();
     final safeIndex = index.clamp(0, durations.length - 1).toInt();
     return durations[safeIndex];
   }
@@ -1553,14 +1871,56 @@ class _HomeScreenState extends State<HomeScreen>
       return 'unknown probe issue';
     }
     if (attempt.statusCode != null) {
-      return 'HTTP ${attempt.statusCode} on ${attempt.endpoint.host} '
+      return '[${_healthProbeFailureClass(attempt)}] HTTP ${attempt.statusCode} on ${attempt.endpoint.host} '
           '(probe #${attempt.endpointIndex + 1}-${attempt.attempt})';
     }
     final errorType = attempt.errorType ?? 'error';
     final detail = attempt.errorMessage;
-    return '[$errorType] on ${attempt.endpoint.host} '
+    return '[${_healthProbeFailureClass(attempt)}/$errorType] on ${attempt.endpoint.host} '
         '(probe #${attempt.endpointIndex + 1}-${attempt.attempt})'
         '${detail == null || detail.isEmpty ? '' : ': $detail'}';
+  }
+
+  String _healthProbeFailureClass(_HealthProbeAttempt? attempt) {
+    if (attempt == null) {
+      return 'unknown';
+    }
+    if (attempt.success) {
+      return 'ok';
+    }
+    final errorType = (attempt.errorType ?? '').toLowerCase();
+    final message = (attempt.errorMessage ?? '').toLowerCase();
+    if (attempt.statusCode != null) {
+      return 'http_status';
+    }
+    if (errorType == 'timeout') {
+      return 'proxy_probe_timeout';
+    }
+    if (message.contains('failed host lookup') ||
+        message.contains('nodename') ||
+        message.contains('dns')) {
+      return 'dns';
+    }
+    if (message.contains('connection refused') ||
+        message.contains('connection reset') ||
+        message.contains('connection closed')) {
+      return 'tcp';
+    }
+    if (message.contains('network is unreachable') ||
+        message.contains('no route') ||
+        message.contains('route')) {
+      return 'route';
+    }
+    if (errorType == 'tls') {
+      return 'tls';
+    }
+    if (errorType == 'http') {
+      return 'http';
+    }
+    if (errorType == 'socket') {
+      return 'socket';
+    }
+    return errorType.isEmpty ? 'unknown' : errorType;
   }
 
   String _formatLatency(int ms) => ms <= 0 ? 'n/a' : '${ms}ms';
@@ -1609,6 +1969,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (_healthWatchdogFailures > 0) {
         _queueLog(
           'VPN health watchdog recovered. '
+          'p95=${_formatLatency(_healthProbeP95LatencyMs())}, '
           'p99=${_formatLatency(_healthProbeP99LatencyMs())}.',
         );
       }
@@ -1617,6 +1978,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final probeDescription = _healthProbeDescription(probeResult.lastFailure);
+    final probeP95 = _healthProbeP95LatencyMs();
     final probeP99 = _healthProbeP99LatencyMs();
     final probeAttempts = probeResult.attempts.length;
 
@@ -1628,7 +1990,8 @@ class _HomeScreenState extends State<HomeScreen>
       );
       _queueLog(
         'VPN health watchdog probe failed during $guardedSessionReason: $probeDescription. '
-        'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}. '
+        'attempts=$probeAttempts, p95=${_formatLatency(probeP95)}, '
+        'p99=${_formatLatency(probeP99)}. '
         'Reconnect skipped to preserve long-lived connections.',
       );
       return;
@@ -1638,7 +2001,8 @@ class _HomeScreenState extends State<HomeScreen>
     _queueLog(
       'VPN health watchdog failed $_healthWatchdogFailures/'
       '$_healthWatchdogFailureLimit: $probeDescription. '
-      'attempts=$probeAttempts, p99=${_formatLatency(probeP99)}.',
+      'attempts=$probeAttempts, p95=${_formatLatency(probeP95)}, '
+      'p99=${_formatLatency(probeP99)}.',
     );
     if (_healthWatchdogFailures < _healthWatchdogFailureLimit) {
       _healthWatchdogCooldownUntil = DateTime.now().add(
@@ -1656,7 +2020,7 @@ class _HomeScreenState extends State<HomeScreen>
       _queueLog(
         'Codex WebSocket may be interrupted by VPN reconnect; reconnect skipped. '
         'Reason: $probeDescription. attempts=$probeAttempts, '
-        'p99=${_formatLatency(probeP99)}.',
+        'p95=${_formatLatency(probeP95)}, p99=${_formatLatency(probeP99)}.',
       );
       return;
     }
@@ -1671,7 +2035,8 @@ class _HomeScreenState extends State<HomeScreen>
       'VPN health watchdog diagnostic-only: repeated probe failures detected, '
       'but reconnect is skipped to preserve active WebSocket/browser sessions. '
       'Reason: $probeDescription. attempts=$probeAttempts, '
-      'p99=${_formatLatency(probeP99)}. User action is required for restart.',
+      'p95=${_formatLatency(probeP95)}, p99=${_formatLatency(probeP99)}. '
+      'User action is required for restart.',
     );
     if (mounted) {
       setState(() {
@@ -1730,7 +2095,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     }
   }
 
-  Future<String> _diagnoseDnsHost(String host) async {
+  Future<String> _diagnoseDnsHost(String host, {String label = 'DNS'}) async {
     final stopwatch = Stopwatch()..start();
     try {
       final addresses = await InternetAddress.lookup(
@@ -1741,32 +2106,155 @@ if ($null -ne $match) { 'true' } else { 'false' }
           .take(3)
           .map((address) => address.address)
           .join(', ');
-      return 'Codex DNS $host: ok in ${stopwatch.elapsedMilliseconds}ms'
+      return '$label $host: ok in ${stopwatch.elapsedMilliseconds}ms'
           '${preview.isEmpty ? '' : ' -> $preview'}.';
     } on Object catch (error) {
       stopwatch.stop();
-      return 'Codex DNS $host: failed in ${stopwatch.elapsedMilliseconds}ms: '
+      return '$label $host: failed in ${stopwatch.elapsedMilliseconds}ms: '
           '${_redactSensitive('$error')}.';
     }
   }
 
   Future<String> _diagnoseTcp443(String host) async {
+    return _diagnoseTcpHost(host, 443, label: 'Codex TCP');
+  }
+
+  Future<String> _diagnoseTcpHost(
+    String host,
+    int port, {
+    String label = 'TCP',
+  }) async {
     final stopwatch = Stopwatch()..start();
     Socket? socket;
     try {
       socket = await Socket.connect(
         host,
-        443,
+        port,
         timeout: const Duration(seconds: 8),
       );
       stopwatch.stop();
-      return 'Codex TCP $host:443: ok in ${stopwatch.elapsedMilliseconds}ms.';
+      return '$label $host:$port: ok in ${stopwatch.elapsedMilliseconds}ms.';
     } on Object catch (error) {
       stopwatch.stop();
-      return 'Codex TCP $host:443: failed in ${stopwatch.elapsedMilliseconds}ms: '
+      return '$label $host:$port: failed in ${stopwatch.elapsedMilliseconds}ms: '
           '${_redactSensitive('$error')}.';
     } finally {
       socket?.destroy();
+    }
+  }
+
+  Future<String> _diagnoseExecutable(String name) async {
+    if (!Platform.isWindows) {
+      return 'Executable $name: skipped, not Windows.';
+    }
+    try {
+      final result = await Process.run('where.exe', [
+        name,
+      ]).timeout(const Duration(seconds: 4));
+      final output = '${result.stdout}${result.stderr}'
+          .split(RegExp(r'\r?\n'))
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty)
+          .take(2)
+          .join('; ');
+      if (result.exitCode == 0) {
+        return 'Executable $name: found${output.isEmpty ? '' : ' -> ${_redactSensitive(output)}'}.';
+      }
+      return 'Executable $name: not found.';
+    } on Object catch (error) {
+      return 'Executable $name: check failed: ${_redactSensitive('$error')}.';
+    }
+  }
+
+  Future<String> _diagnoseDohJson(String host, {required bool viaProxy}) async {
+    final stopwatch = Stopwatch()..start();
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    if (viaProxy) {
+      client.findProxy = (_) =>
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+    }
+    try {
+      final request = await client
+          .getUrl(
+            Uri.https('cloudflare-dns.com', '/dns-query', {
+              'name': host,
+              'type': 'A',
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/dns-json');
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'YurichConnect/$_appVersion',
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 8),
+      );
+      final body = await utf8
+          .decodeStream(response)
+          .timeout(const Duration(seconds: 4));
+      stopwatch.stop();
+      final decoded = jsonDecode(body);
+      final answers = decoded is Map
+          ? ((decoded['Answer'] as List?) ?? const [])
+                .whereType<Map>()
+                .map((answer) => '${answer['data'] ?? ''}'.trim())
+                .where((answer) => answer.isNotEmpty)
+                .take(3)
+                .join(', ')
+          : '';
+      return 'DoH ${viaProxy ? 'via proxy' : 'direct'} $host: HTTP ${response.statusCode} '
+          'in ${stopwatch.elapsedMilliseconds}ms'
+          '${answers.isEmpty ? '' : ' -> $answers'}.';
+    } on Object catch (error) {
+      stopwatch.stop();
+      return 'DoH ${viaProxy ? 'via proxy' : 'direct'} $host: failed in '
+          '${stopwatch.elapsedMilliseconds}ms: ${_redactSensitive('$error')}.';
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<String> _diagnoseCloudflareTrace({required bool viaProxy}) async {
+    final stopwatch = Stopwatch()..start();
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    if (viaProxy) {
+      client.findProxy = (_) =>
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+    }
+    try {
+      final request = await client
+          .getUrl(Uri.https('www.cloudflare.com', '/cdn-cgi/trace'))
+          .timeout(const Duration(seconds: 8));
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'YurichConnect/$_appVersion',
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 8),
+      );
+      final body = await utf8
+          .decodeStream(response)
+          .timeout(const Duration(seconds: 4));
+      stopwatch.stop();
+      final values = <String, String>{};
+      for (final line in body.split('\n')) {
+        final index = line.indexOf('=');
+        if (index <= 0) {
+          continue;
+        }
+        values[line.substring(0, index)] = line.substring(index + 1).trim();
+      }
+      final ip = _redactSensitive(values['ip'] ?? 'unknown');
+      final loc = values['loc'] ?? 'unknown';
+      return 'Trace ${viaProxy ? 'via proxy' : 'direct'}: HTTP ${response.statusCode} '
+          'ip=$ip loc=$loc in ${stopwatch.elapsedMilliseconds}ms.';
+    } on Object catch (error) {
+      stopwatch.stop();
+      return 'Trace ${viaProxy ? 'via proxy' : 'direct'}: failed in '
+          '${stopwatch.elapsedMilliseconds}ms: ${_redactSensitive('$error')}.';
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -1832,6 +2320,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
   }
 
   Future<void> _stopVpnCore({bool updateMessage = true}) async {
+    final stopwatch = Stopwatch()..start();
     _stoppingByUser = true;
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
     if (mounted) {
@@ -1867,6 +2356,58 @@ if ($null -ne $match) { 'true' } else { 'false' }
       }
     } finally {
       _stoppingByUser = false;
+      _recordStageTiming('vpn_stop.total', stopwatch.elapsed);
+    }
+  }
+
+  Future<void> _stopVpnForProfileSwitch() async {
+    final stopwatch = Stopwatch()..start();
+    _stoppingByUser = true;
+    _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 10));
+    if (mounted) {
+      setState(() => _lastError = null);
+    }
+    try {
+      final status = await _refreshVpnStatus();
+      if (status != YurichConnectStatus.stopped) {
+        final engine = _vpnEngine;
+        if (engine is WindowsSingBoxEngine) {
+          await engine.stopVPNFast().timeout(
+            const Duration(seconds: 6),
+            onTimeout: () => true,
+          );
+        } else {
+          await engine.stopVPN().timeout(
+            const Duration(seconds: 10),
+            onTimeout: () => true,
+          );
+        }
+        final stoppedStatus = await _waitForVpnStatus({
+          YurichConnectStatus.stopped,
+        }, timeout: const Duration(seconds: 3));
+        if (stoppedStatus != YurichConnectStatus.stopped) {
+          _queueLog(
+            'Fast profile switch stop is still finishing: $stoppedStatus',
+          );
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+
+      if (mounted) {
+        _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 10));
+        setState(() {
+          _status = YurichConnectStatus.stopped;
+          _uplink = '0 B/s';
+          _downlink = '0 B/s';
+          _uplinkBytesPerSecond = 0;
+          _downlinkBytesPerSecond = 0;
+          _sessionTotal = '0 B';
+          _lastError = null;
+        });
+      }
+    } finally {
+      _stoppingByUser = false;
+      _recordStageTiming('profile_switch.stop', stopwatch.elapsed);
     }
   }
 
@@ -1974,6 +2515,44 @@ if ($null -ne $match) { 'true' } else { 'false' }
     );
   }
 
+  Future<void> _setDeveloperMode(bool value) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    await _store.saveDeveloperMode(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _developerMode = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      value
+          ? 'Developer mode enabled: SSH, Git, GitHub CLI, PowerShell, CMD, Windows Terminal and common SSH clients bypass regular VPN routing where Windows process rules are available.'
+          : 'Developer mode disabled: terminal, SSH and Git follow regular VPN routing rules.',
+    );
+  }
+
+  Future<void> _setDnsOnlyThroughVpn(bool value) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    await _store.saveDnsOnlyThroughVpn(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _dnsOnlyThroughVpn = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      value
+          ? 'DNS leak protection enabled: regular domain queries use DoH through VPN/proxy; bootstrap uses Cloudflare DoH directly instead of ISP DNS.'
+          : 'DNS leak protection disabled: Russian/direct domains and direct web exceptions may use local Windows DNS.',
+    );
+  }
+
   Future<void> _setAdvancedTunMode(bool value) async {
     if (!Platform.isWindows || _windowsSettingsBusy) {
       return;
@@ -2073,7 +2652,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
         'Codex process: ${codexProcessActive ? 'active' : 'not detected'}.',
       );
       for (final host in const ['chatgpt.com', 'ws.chatgpt.com']) {
-        lines.add(await _diagnoseDnsHost(host));
+        lines.add(await _diagnoseDnsHost(host, label: 'Codex DNS'));
       }
       lines.add(await _diagnoseTcp443('chatgpt.com'));
       lines.add(await _diagnoseCodexWebSocket());
@@ -2099,6 +2678,102 @@ if ($null -ne $match) { 'true' } else { 'false' }
           _message = s.codexDiagnosticsDone;
         });
         _showSnack(s.codexDiagnosticsDone);
+      }
+    }
+  }
+
+  Future<void> _runTerminalDiagnostics() async {
+    if (_terminalDiagnosticsBusy) {
+      return;
+    }
+    setState(() => _terminalDiagnosticsBusy = true);
+    final lines = <String>[
+      'Terminal diagnostics started. developer_mode=$_developerMode, '
+          'dns_only_through_vpn=$_dnsOnlyThroughVpn, advanced_tun=$_advancedTunMode, '
+          'system_proxy=$_systemProxyEnabled, status=$_status.',
+      _developerMode
+          ? 'Routing expectation: SSH/Git/terminal processes are configured DIRECT in Yurich Connect process rules.'
+          : 'Routing expectation: SSH/Git/terminal processes follow regular VPN routing rules.',
+      _advancedTunMode
+          ? 'Advanced TUN Mode: process rules can steer terminal tools directly.'
+          : 'Stable Proxy Mode: terminal tools go direct unless they explicitly use system proxy/proxy env.',
+    ];
+    try {
+      for (final executable in const [
+        'ssh.exe',
+        'git.exe',
+        'gh.exe',
+        'powershell.exe',
+        'pwsh.exe',
+        'cmd.exe',
+        'wt.exe',
+      ]) {
+        lines.add(await _diagnoseExecutable(executable));
+      }
+      lines.add(await _diagnoseDnsHost('github.com', label: 'Terminal DNS'));
+      lines.add(
+        await _diagnoseTcpHost('github.com', 22, label: 'Terminal TCP'),
+      );
+      lines.add(
+        await _diagnoseTcpHost('github.com', 443, label: 'Terminal TCP'),
+      );
+      lines.add(
+        _developerMode
+            ? 'Terminal route verdict: DIRECT for ssh.exe/git.exe/gh.exe/powershell.exe/cmd.exe/wt.exe after reconnect.'
+            : 'Terminal route verdict: regular VPN rules; enable Developer mode for direct SSH/Git.',
+      );
+    } on Object catch (error) {
+      lines.add('Terminal diagnostics failed: ${_redactSensitive('$error')}');
+    } finally {
+      for (final line in lines) {
+        _queueLog(line);
+      }
+      if (mounted) {
+        setState(() {
+          _terminalDiagnosticsBusy = false;
+          _message = s.terminalDiagnosticsDone;
+        });
+        _showSnack(s.terminalDiagnosticsDone);
+      }
+    }
+  }
+
+  Future<void> _runDnsDiagnostics() async {
+    if (_dnsDiagnosticsBusy) {
+      return;
+    }
+    setState(() => _dnsDiagnosticsBusy = true);
+    final lines = <String>[
+      'DNS diagnostics started. dns_only_through_vpn=$_dnsOnlyThroughVpn, '
+          'connected=$_connected, advanced_tun=$_advancedTunMode, status=$_status.',
+      _dnsOnlyThroughVpn
+          ? 'DNS routing expectation: regular A/AAAA queries use global-dns over proxy; bootstrap uses Cloudflare DoH direct instead of ISP DNS.'
+          : 'DNS routing expectation: selected direct domains may use Windows local DNS.',
+    ];
+    try {
+      lines.add(await _diagnoseDnsHost('github.com', label: 'System DNS'));
+      lines.add(await _diagnoseDnsHost('chatgpt.com', label: 'System DNS'));
+      lines.add(await _diagnoseDohJson('github.com', viaProxy: false));
+      if (_connected) {
+        lines.add(await _diagnoseDohJson('github.com', viaProxy: true));
+        lines.add(await _diagnoseDohJson('chatgpt.com', viaProxy: true));
+        lines.add(await _diagnoseCloudflareTrace(viaProxy: true));
+      } else {
+        lines.add('DoH via proxy: skipped because VPN/proxy is not connected.');
+      }
+      lines.add(await _diagnoseCloudflareTrace(viaProxy: false));
+    } on Object catch (error) {
+      lines.add('DNS diagnostics failed: ${_redactSensitive('$error')}');
+    } finally {
+      for (final line in lines) {
+        _queueLog(line);
+      }
+      if (mounted) {
+        setState(() {
+          _dnsDiagnosticsBusy = false;
+          _message = s.dnsDiagnosticsDone;
+        });
+        _showSnack(s.dnsDiagnosticsDone);
       }
     }
   }
@@ -2397,6 +3072,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     await _store.saveSelectedProfileId(nextSelectedId);
     await _store.saveDeletedProfileIds(deletedProfileIds);
     await _store.saveSubscriptionSources(subscriptionSources);
+    await _store.removeProfileRuntimeStats(profile.id);
     if (!mounted) {
       return;
     }
@@ -2408,6 +3084,9 @@ if ($null -ne $match) { 'true' } else { 'false' }
       _serverLatencyLastUpdated = null;
       _serverLatencies = Map<String, _ServerLatencyResult>.of(_serverLatencies)
         ..remove(profile.id);
+      _profileRuntimeStats = Map<String, ProfileRuntimeStats>.of(
+        _profileRuntimeStats,
+      )..remove(profile.id);
       _message = s.profileDeleted;
     });
     if (_profiles.isNotEmpty) {
@@ -2612,6 +3291,9 @@ if ($null -ne $match) { 'true' } else { 'false' }
       'codex_direct: $_codexDirect',
       'codex_direct_supported: $_codexDirectSupported',
       'chatgpt_through_vpn: $_chatGptThroughVpn',
+      'developer_mode: $_developerMode',
+      'dns_only_through_vpn: $_dnsOnlyThroughVpn',
+      'developer_direct_apps: ${_formatProcessList(SingBoxConfigBuilder.developerDirectProcesses)}',
       'split_tunnel_direct_apps: ${_formatProcessList(_splitTunnelExcludedProcesses)}',
       'vpn_only_apps: ${_formatProcessList(_vpnOnlyProcesses)}',
       if (_lastVpnReconnectAt != null)
@@ -2623,9 +3305,19 @@ if ($null -ne $match) { 'true' } else { 'false' }
         'profile: ${_redactSensitive(profile.name)}',
         'protocol: ${_profileKindLabel(profile.kind)}',
         'endpoint: ${_redactSensitive(profile.endpoint)}',
+        if (_profileRuntimeStats[profile.id] != null)
+          'profile_score: ${_profileRuntimeStats[profile.id]!.score}; '
+              'successes=${_profileRuntimeStats[profile.id]!.successes}; '
+              'failures=${_profileRuntimeStats[profile.id]!.failures}; '
+              'consecutive_failures=${_profileRuntimeStats[profile.id]!.consecutiveFailures}; '
+              'avg_start_ms=${_profileRuntimeStats[profile.id]!.averageStartMs}; '
+              'last_failure=${_redactSensitive(_profileRuntimeStats[profile.id]!.lastFailureReason ?? 'none')}',
+        'failover_candidates: ${_formatFailoverCandidateSummary(profile)}',
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
+      'stage_timings: ${_formatStageTimingSummary()}',
       'health_probe_p99_ms: ${_healthProbeP99LatencyMs()}'
+          '; p95_ms=${_healthProbeP95LatencyMs()}'
           ' (${_healthProbeHistory.length} probes in window)',
       if (_healthProbeHistory.isNotEmpty)
         'health_probe_last: ${_healthProbeDescription(_healthProbeHistory.last)}',
@@ -2644,6 +3336,38 @@ if ($null -ne $match) { 'true' } else { 'false' }
         .map(_redactSensitive);
     lines.addAll(safeLogs.isEmpty ? const ['Логов пока нет.'] : safeLogs);
     return lines.join('\n');
+  }
+
+  String _formatStageTimingSummary() {
+    if (_stageTimings.isEmpty) {
+      return 'none';
+    }
+    return _stageTimings.entries
+        .map(
+          (entry) =>
+              '${entry.key}:p95=${_stageTimingPercentile(entry.key, 95)}ms,p99=${_stageTimingPercentile(entry.key, 99)}ms,n=${entry.value.length}',
+        )
+        .join('; ');
+  }
+
+  String _formatFailoverCandidateSummary(VpnProfile preferred) {
+    final ranked = rankProfilesForFailover(
+      profiles: _profiles,
+      preferred: preferred,
+      runtimeStats: _profileRuntimeStats,
+      latencies: _profileLatencySnapshots(),
+    );
+    if (ranked.isEmpty) {
+      return 'none';
+    }
+    return ranked
+        .take(_maxProfileFailoverAttempts)
+        .map((candidate) {
+          final latency = _serverLatencies[candidate.profile.id];
+          final latencyLabel = latency == null ? 'ping=n/a' : latency.label(s);
+          return '${_redactSensitive(candidate.profile.name)} score=${candidate.score} $latencyLabel';
+        })
+        .join('; ');
   }
 
   String _formatProcessList(List<String> processes) {
@@ -2741,6 +3465,79 @@ if ($null -ne $match) { 'true' } else { 'false' }
         '${time.minute.toString().padLeft(2, '0')}:'
         '${time.second.toString().padLeft(2, '0')}.'
         '${time.millisecond.toString().padLeft(3, '0')}';
+  }
+
+  void _recordStageTiming(String stage, Duration elapsed, {String? detail}) {
+    final samples = _stageTimings.putIfAbsent(stage, () => <int>[]);
+    samples.add(elapsed.inMilliseconds);
+    if (samples.length > 120) {
+      samples.removeRange(0, samples.length - 120);
+    }
+    _queueLog(
+      'Timing $stage=${elapsed.inMilliseconds}ms '
+      'p95=${_stageTimingPercentile(stage, 95)}ms '
+      'p99=${_stageTimingPercentile(stage, 99)}ms'
+      '${detail == null || detail.isEmpty ? '' : ' $detail'}',
+    );
+  }
+
+  int _stageTimingPercentile(String stage, int percentile) {
+    final samples = _stageTimings[stage];
+    if (samples == null || samples.isEmpty) {
+      return 0;
+    }
+    final sorted = [...samples]..sort();
+    final index = ((sorted.length - 1) * percentile / 100).round();
+    return sorted[index.clamp(0, sorted.length - 1).toInt()];
+  }
+
+  String _classifyStartFailure(Object error) {
+    final text = _redactSensitive('$error').toLowerCase();
+    if (text.contains('dns') || text.contains('failed host lookup')) {
+      return 'dns';
+    }
+    if (text.contains('tcp') ||
+        text.contains('connection refused') ||
+        text.contains('connection reset') ||
+        text.contains('connection closed')) {
+      return 'tcp';
+    }
+    if (text.contains('route') || text.contains('network is unreachable')) {
+      return 'route';
+    }
+    if (text.contains('probe')) {
+      return 'proxy_probe';
+    }
+    if (text.contains('sing-box') || text.contains('config')) {
+      return 'config';
+    }
+    if (text.contains('admin') || text.contains('uac')) {
+      return 'admin';
+    }
+    if (text.contains('timeout')) {
+      return 'timeout';
+    }
+    return 'unknown';
+  }
+
+  Future<void> _recordProfileRuntimeFailure(
+    VpnProfile profile,
+    String reason,
+  ) async {
+    final stats = await _store.recordProfileRuntimeFailure(profile.id, reason);
+    _queueLog(
+      'Profile stability updated: ${_redactSensitive(profile.name)} '
+      'score=${stats.score} failures=${stats.failures} '
+      'consecutive=${stats.consecutiveFailures} reason=$reason.',
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _profileRuntimeStats = Map<String, ProfileRuntimeStats>.of(
+        _profileRuntimeStats,
+      )..[profile.id] = stats;
+    });
   }
 
   void _queueLog(String message) {
@@ -2884,6 +3681,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
                     profiles: _profiles,
                     selectedId: selected?.id,
                     serverLatencies: _serverLatencies,
+                    profileRuntimeStats: _profileRuntimeStats,
                     checkingServerLatency: _checkingServerLatency,
                     refreshingSubscriptions: _refreshingSubscriptions,
                     showAllProfiles: _showAllProfiles,
@@ -2915,6 +3713,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
                       systemProxyEnabled: _systemProxyEnabled,
                       autoStart: _autoStart,
                       autoConnect: _autoConnect,
+                      developerMode: _developerMode,
+                      dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
                       codexDirect: _codexDirect,
                       codexDirectSupported: _codexDirectSupported,
                       chatGptThroughVpn: _chatGptThroughVpn,
@@ -2922,6 +3722,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
                       checkingUpdate: _checkingUpdate,
                       installingUpdate: _installingUpdate,
                       codexDiagnosticsBusy: _codexDiagnosticsBusy,
+                      terminalDiagnosticsBusy: _terminalDiagnosticsBusy,
+                      dnsDiagnosticsBusy: _dnsDiagnosticsBusy,
                       excludedProcessCount:
                           _splitTunnelExcludedProcesses.length,
                       vpnOnlyProcessCount: _vpnOnlyProcesses.length,
@@ -2934,6 +3736,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
                           unawaited(_setAutoStart(value)),
                       onAutoConnectChanged: (value) =>
                           unawaited(_setAutoConnect(value)),
+                      onDeveloperModeChanged: (value) =>
+                          unawaited(_setDeveloperMode(value)),
+                      onDnsOnlyThroughVpnChanged: (value) =>
+                          unawaited(_setDnsOnlyThroughVpn(value)),
                       onCodexDirectChanged: (value) =>
                           unawaited(_setCodexDirect(value)),
                       onChatGptThroughVpnChanged: (value) =>
@@ -2942,6 +3748,9 @@ if ($null -ne $match) { 'true' } else { 'false' }
                       onEditVpnOnly: _showVpnOnlySheet,
                       onCodexDiagnostics: () =>
                           unawaited(_runCodexDiagnostics()),
+                      onTerminalDiagnostics: () =>
+                          unawaited(_runTerminalDiagnostics()),
+                      onDnsDiagnostics: () => unawaited(_runDnsDiagnostics()),
                       onCheckUpdate: _checkForUpdates,
                       onOpenReleases: () =>
                           _openUrl(WindowsIntegrationService.releasesUrl),
@@ -3447,6 +4256,7 @@ class _ProfilePanel extends StatelessWidget {
     required this.profiles,
     required this.selectedId,
     required this.serverLatencies,
+    required this.profileRuntimeStats,
     required this.checkingServerLatency,
     required this.refreshingSubscriptions,
     required this.showAllProfiles,
@@ -3467,6 +4277,7 @@ class _ProfilePanel extends StatelessWidget {
   final List<VpnProfile> profiles;
   final String? selectedId;
   final Map<String, _ServerLatencyResult> serverLatencies;
+  final Map<String, ProfileRuntimeStats> profileRuntimeStats;
   final bool checkingServerLatency;
   final bool refreshingSubscriptions;
   final bool showAllProfiles;
@@ -3562,6 +4373,7 @@ class _ProfilePanel extends StatelessWidget {
                 profile: profile,
                 selected: profile.id == selectedId,
                 latency: serverLatencies[profile.id],
+                runtimeStats: profileRuntimeStats[profile.id],
                 checkingLatency: checkingServerLatency,
                 onTap: () => onSelect(profile),
                 onRefreshLatency: onRefreshLatency,
@@ -3688,6 +4500,7 @@ class _ProfileTile extends StatelessWidget {
     required this.profile,
     required this.selected,
     required this.latency,
+    required this.runtimeStats,
     required this.checkingLatency,
     required this.onTap,
     required this.onRefreshLatency,
@@ -3699,6 +4512,7 @@ class _ProfileTile extends StatelessWidget {
   final VpnProfile profile;
   final bool selected;
   final _ServerLatencyResult? latency;
+  final ProfileRuntimeStats? runtimeStats;
   final bool checkingLatency;
   final VoidCallback onTap;
   final VoidCallback onRefreshLatency;
@@ -3717,6 +4531,12 @@ class _ProfileTile extends StatelessWidget {
         ? _goldSoft
         : Colors.redAccent.shade100;
     final expiryLabel = _formatProfileExpiry(profile.expiresAt, strings);
+    final stabilityLabel = _formatProfileStability(runtimeStats, strings);
+    final stabilityColor = runtimeStats == null
+        ? _mutedGold
+        : runtimeStats!.unstable
+        ? Colors.orangeAccent.shade100
+        : const Color(0xFFB8F7D4);
 
     return InkWell(
       onTap: onTap,
@@ -3763,6 +4583,16 @@ class _ProfileTile extends StatelessWidget {
                           fontSize: 12,
                           color: Color(0xFFB8D3EF),
                         ),
+                      ),
+                    ),
+                  if (stabilityLabel != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        stabilityLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12, color: stabilityColor),
                       ),
                     ),
                 ],
@@ -3909,6 +4739,20 @@ String? _formatProfileExpiry(DateTime? expiresAt, _Strings strings) {
   return 'Subscription until $formattedDate ($daysLeft days left)';
 }
 
+String? _formatProfileStability(ProfileRuntimeStats? stats, _Strings strings) {
+  if (stats == null || (stats.successes == 0 && stats.failures == 0)) {
+    return null;
+  }
+  final score = stats.score;
+  final avg = stats.averageStartMs;
+  if (_isRu(strings)) {
+    final prefix = stats.unstable ? 'Нестабильно' : 'Стабильность';
+    return avg > 0 ? '$prefix $score · старт ~$avgмс' : '$prefix $score';
+  }
+  final prefix = stats.unstable ? 'Unstable' : 'Stability';
+  return avg > 0 ? '$prefix $score · start ~${avg}ms' : '$prefix $score';
+}
+
 bool _isRu(_Strings strings) {
   return strings == _Strings.ru;
 }
@@ -3970,6 +4814,8 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.systemProxyEnabled,
     required this.autoStart,
     required this.autoConnect,
+    required this.developerMode,
+    required this.dnsOnlyThroughVpn,
     required this.codexDirect,
     required this.codexDirectSupported,
     required this.chatGptThroughVpn,
@@ -3977,6 +4823,8 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.checkingUpdate,
     required this.installingUpdate,
     required this.codexDiagnosticsBusy,
+    required this.terminalDiagnosticsBusy,
+    required this.dnsDiagnosticsBusy,
     required this.excludedProcessCount,
     required this.vpnOnlyProcessCount,
     required this.updateInfo,
@@ -3984,11 +4832,15 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onSystemProxyChanged,
     required this.onAutoStartChanged,
     required this.onAutoConnectChanged,
+    required this.onDeveloperModeChanged,
+    required this.onDnsOnlyThroughVpnChanged,
     required this.onCodexDirectChanged,
     required this.onChatGptThroughVpnChanged,
     required this.onEditSplitTunnel,
     required this.onEditVpnOnly,
     required this.onCodexDiagnostics,
+    required this.onTerminalDiagnostics,
+    required this.onDnsDiagnostics,
     required this.onCheckUpdate,
     required this.onOpenReleases,
     required this.onRepairConnection,
@@ -4000,6 +4852,8 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool systemProxyEnabled;
   final bool autoStart;
   final bool autoConnect;
+  final bool developerMode;
+  final bool dnsOnlyThroughVpn;
   final bool codexDirect;
   final bool codexDirectSupported;
   final bool chatGptThroughVpn;
@@ -4007,6 +4861,8 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool checkingUpdate;
   final bool installingUpdate;
   final bool codexDiagnosticsBusy;
+  final bool terminalDiagnosticsBusy;
+  final bool dnsDiagnosticsBusy;
   final int excludedProcessCount;
   final int vpnOnlyProcessCount;
   final WindowsUpdateInfo? updateInfo;
@@ -4014,11 +4870,15 @@ class _WindowsToolsPanel extends StatelessWidget {
   final ValueChanged<bool> onSystemProxyChanged;
   final ValueChanged<bool> onAutoStartChanged;
   final ValueChanged<bool> onAutoConnectChanged;
+  final ValueChanged<bool> onDeveloperModeChanged;
+  final ValueChanged<bool> onDnsOnlyThroughVpnChanged;
   final ValueChanged<bool> onCodexDirectChanged;
   final ValueChanged<bool> onChatGptThroughVpnChanged;
   final VoidCallback onEditSplitTunnel;
   final VoidCallback onEditVpnOnly;
   final VoidCallback onCodexDiagnostics;
+  final VoidCallback onTerminalDiagnostics;
+  final VoidCallback onDnsDiagnostics;
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenReleases;
   final VoidCallback onRepairConnection;
@@ -4092,6 +4952,22 @@ class _WindowsToolsPanel extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             _SettingsSwitchRow(
+              icon: Icons.terminal_outlined,
+              value: developerMode,
+              onChanged: busy ? null : onDeveloperModeChanged,
+              title: Text(strings.developerMode),
+              subtitle: Text(strings.developerModeHint),
+            ),
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
+              icon: Icons.dns_outlined,
+              value: dnsOnlyThroughVpn,
+              onChanged: busy ? null : onDnsOnlyThroughVpnChanged,
+              title: Text(strings.dnsOnlyThroughVpn),
+              subtitle: Text(strings.dnsOnlyThroughVpnHint),
+            ),
+            const SizedBox(height: 8),
+            _SettingsSwitchRow(
               icon: Icons.code_outlined,
               value: codexDirect,
               onChanged: codexDirectSupported ? onCodexDirectChanged : null,
@@ -4137,6 +5013,28 @@ class _WindowsToolsPanel extends StatelessWidget {
                         )
                       : const Icon(Icons.bug_report_outlined),
                   label: Text(strings.codexDiagnostics),
+                ),
+                _ActionTile(
+                  onPressed: terminalDiagnosticsBusy
+                      ? null
+                      : onTerminalDiagnostics,
+                  icon: terminalDiagnosticsBusy
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.terminal_outlined),
+                  label: Text(strings.terminalDiagnostics),
+                ),
+                _ActionTile(
+                  onPressed: dnsDiagnosticsBusy ? null : onDnsDiagnostics,
+                  icon: dnsDiagnosticsBusy
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.dns_outlined),
+                  label: Text(strings.dnsDiagnostics),
                 ),
                 _ActionTile(
                   onPressed: checkingUpdate || installingUpdate
@@ -4601,6 +5499,10 @@ class _Strings {
     required this.autoConnectHint,
     required this.autoConnectEnabled,
     required this.autoConnectDisabled,
+    required this.developerMode,
+    required this.developerModeHint,
+    required this.dnsOnlyThroughVpn,
+    required this.dnsOnlyThroughVpnHint,
     required this.codexDirect,
     required this.codexDirectHint,
     required this.codexDirectTunOnly,
@@ -4608,6 +5510,10 @@ class _Strings {
     required this.chatGptThroughVpnHint,
     required this.codexDiagnostics,
     required this.codexDiagnosticsDone,
+    required this.terminalDiagnostics,
+    required this.terminalDiagnosticsDone,
+    required this.dnsDiagnostics,
+    required this.dnsDiagnosticsDone,
     required this.splitTunnelTitle,
     required this.splitTunnelDescription,
     required this.splitTunnelHint,
@@ -4716,6 +5622,10 @@ class _Strings {
   final String autoConnectHint;
   final String autoConnectEnabled;
   final String autoConnectDisabled;
+  final String developerMode;
+  final String developerModeHint;
+  final String dnsOnlyThroughVpn;
+  final String dnsOnlyThroughVpnHint;
   final String codexDirect;
   final String codexDirectHint;
   final String codexDirectTunOnly;
@@ -4723,6 +5633,10 @@ class _Strings {
   final String chatGptThroughVpnHint;
   final String codexDiagnostics;
   final String codexDiagnosticsDone;
+  final String terminalDiagnostics;
+  final String terminalDiagnosticsDone;
+  final String dnsDiagnostics;
+  final String dnsDiagnosticsDone;
   final String splitTunnelTitle;
   final String splitTunnelDescription;
   final String splitTunnelHint;
@@ -5135,6 +6049,12 @@ class _Strings {
     autoConnectHint: 'После запуска приложения подключает выбранный профиль.',
     autoConnectEnabled: 'Автоподключение включено',
     autoConnectDisabled: 'Автоподключение выключено',
+    developerMode: 'Режим разработчика',
+    developerModeHint:
+        'SSH, Git, GitHub CLI, PowerShell, CMD и Windows Terminal идут напрямую, чтобы VPN не ломал доступ к серверам.',
+    dnsOnlyThroughVpn: 'DNS только через VPN',
+    dnsOnlyThroughVpnHint:
+        'Обычные DNS-запросы идут через Yurich Core и DoH поверх VPN/proxy. Bootstrap использует Cloudflare DoH без DNS провайдера.',
     codexDirect: 'Codex CLI напрямую',
     codexDirectHint:
         'Только процессы Codex идут напрямую. Сайт ChatGPT управляется отдельным переключателем ниже.',
@@ -5145,6 +6065,10 @@ class _Strings {
         'Рекомендовано: chatgpt.com, OpenAI web assets и авторизация идут через текущий VPN/proxy, а не напрямую.',
     codexDiagnostics: 'Диагностика Codex',
     codexDiagnosticsDone: 'Диагностика Codex записана в логи',
+    terminalDiagnostics: 'Диагностика терминала',
+    terminalDiagnosticsDone: 'Диагностика терминала записана в логи',
+    dnsDiagnostics: 'Диагностика DNS',
+    dnsDiagnosticsDone: 'Диагностика DNS записана в логи',
     splitTunnelTitle: 'Исключения приложений',
     splitTunnelDescription:
         'Укажи exe-файлы, которые должны идти напрямую, минуя VPN. По одному в строке.',
@@ -5297,6 +6221,12 @@ class _Strings {
     autoConnectHint: 'Connects the selected profile after the app starts.',
     autoConnectEnabled: 'Auto-connect enabled',
     autoConnectDisabled: 'Auto-connect disabled',
+    developerMode: 'Developer mode',
+    developerModeHint:
+        'SSH, Git, GitHub CLI, PowerShell, CMD, and Windows Terminal go direct so VPN does not break server access.',
+    dnsOnlyThroughVpn: 'DNS only through VPN',
+    dnsOnlyThroughVpnHint:
+        'Regular DNS queries use Yurich Core and DoH over VPN/proxy. Bootstrap uses Cloudflare DoH without ISP DNS.',
     codexDirect: 'Codex CLI direct',
     codexDirectHint:
         'Only Codex executables go direct. ChatGPT website routing is controlled by the switch below.',
@@ -5307,6 +6237,10 @@ class _Strings {
         'Recommended: chatgpt.com, OpenAI web assets, and auth use the current VPN/proxy instead of direct routing.',
     codexDiagnostics: 'Codex diagnostics',
     codexDiagnosticsDone: 'Codex diagnostics written to logs',
+    terminalDiagnostics: 'Terminal diagnostics',
+    terminalDiagnosticsDone: 'Terminal diagnostics written to logs',
+    dnsDiagnostics: 'DNS diagnostics',
+    dnsDiagnosticsDone: 'DNS diagnostics written to logs',
     splitTunnelTitle: 'App exclusions',
     splitTunnelDescription:
         'Enter exe files that should go directly and bypass the VPN. One per line.',

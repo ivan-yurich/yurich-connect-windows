@@ -10,6 +10,8 @@ void main() {
 
       expect(await store.loadCodexDirect(), isTrue);
       expect(await store.loadChatGptThroughVpn(), isTrue);
+      expect(await store.loadDeveloperMode(), isTrue);
+      expect(await store.loadDnsOnlyThroughVpn(), isTrue);
       expect(await store.loadVpnOnlyProcesses(), isEmpty);
     });
 
@@ -29,6 +31,24 @@ void main() {
       await store.saveChatGptThroughVpn(false);
 
       expect(await store.loadChatGptThroughVpn(), isFalse);
+    });
+
+    test('saves developer mode preference', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveDeveloperMode(false);
+
+      expect(await store.loadDeveloperMode(), isFalse);
+    });
+
+    test('saves DNS leak protection preference', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveDnsOnlyThroughVpn(false);
+
+      expect(await store.loadDnsOnlyThroughVpn(), isFalse);
     });
   });
 
@@ -68,6 +88,49 @@ void main() {
       await store.restoreProfiles(['profile-a']);
 
       expect(await store.loadDeletedProfileIds(), {'profile-b'});
+    });
+  });
+
+  group('ProfileStore runtime stats', () {
+    test('records profile success and failure score', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      final success = await store.recordProfileRuntimeSuccess(
+        'profile-a',
+        const Duration(milliseconds: 1200),
+      );
+      final failure = await store.recordProfileRuntimeFailure(
+        'profile-a',
+        'proxy_probe_timeout',
+      );
+
+      expect(success.successes, 1);
+      expect(failure.successes, 1);
+      expect(failure.failures, 1);
+      expect(failure.consecutiveFailures, 1);
+      expect(failure.score, lessThan(100));
+      expect(failure.unstable, isFalse);
+
+      final loaded = await store.loadProfileRuntimeStats();
+      expect(loaded['profile-a']?.lastFailureReason, 'proxy_probe_timeout');
+    });
+
+    test('marks repeated failures as unstable and clears stats', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.recordProfileRuntimeFailure('profile-a', 'dns');
+      final second = await store.recordProfileRuntimeFailure(
+        'profile-a',
+        'tcp',
+      );
+
+      expect(second.consecutiveFailures, 2);
+      expect(second.unstable, isTrue);
+
+      await store.removeProfileRuntimeStats('profile-a');
+      expect(await store.loadProfileRuntimeStats(), isEmpty);
     });
   });
 }

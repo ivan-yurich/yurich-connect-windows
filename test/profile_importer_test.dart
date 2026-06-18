@@ -600,6 +600,67 @@ void main() {
     expect(vpnOnlyIndex, greaterThanOrEqualTo(0));
   });
 
+  test('can harden Windows DNS to avoid local provider leaks', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                dnsOnlyThroughVpn: true,
+              ),
+            )
+            as Map<String, dynamic>;
+    final dns = config['dns'] as Map<String, dynamic>;
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final dnsRules = (dns['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final route = config['route'] as Map<String, dynamic>;
+    final proxyOutbound = ((config['outbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .firstWhere((outbound) => outbound['tag'] == 'proxy'));
+
+    expect(
+      dnsServers.any(
+        (server) =>
+            server['tag'] == 'bootstrap-dns' &&
+            server['type'] == 'https' &&
+            server['detour'] == 'direct',
+      ),
+      isTrue,
+    );
+    expect(
+      dnsServers.any(
+        (server) =>
+            server['tag'] == 'global-dns' &&
+            server['type'] == 'https' &&
+            server['detour'] == 'proxy',
+      ),
+      isTrue,
+    );
+    expect(
+      dnsRules.any(
+        (rule) =>
+            rule['server'] == 'local-dns' && rule['domain_suffix'] is List,
+      ),
+      isFalse,
+    );
+    expect(route['default_domain_resolver'], {
+      'server': 'bootstrap-dns',
+      'strategy': 'ipv4_only',
+    });
+    expect(proxyOutbound['domain_resolver'], {
+      'server': 'bootstrap-dns',
+      'strategy': 'ipv4_only',
+    });
+  });
+
   test('builds Windows Advanced TUN config only when requested', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
@@ -656,6 +717,46 @@ void main() {
     expect(vpnOnlyIndex, greaterThanOrEqualTo(0));
     expect(geoIpRuIndex, greaterThanOrEqualTo(0));
     expect(vpnOnlyIndex, lessThan(geoIpRuIndex));
+  });
+
+  test('routes developer terminal and SSH tools directly on Windows', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                developerMode: true,
+                vpnOnlyProcesses: const ['ssh.exe', 'git.exe', 'Codex.exe'],
+              ),
+            )
+            as Map<String, dynamic>;
+    final route = config['route'] as Map<String, dynamic>;
+    final routeRules = (route['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final directProcessRule = routeRules.firstWhere(
+      (rule) => rule['outbound'] == 'direct' && rule['process_name'] is List,
+    );
+    final directProcesses = directProcessRule['process_name'] as List;
+
+    expect(route['find_process'], isTrue);
+    expect(directProcesses, contains('ssh.exe'));
+    expect(directProcesses, contains('git.exe'));
+    expect(directProcesses, contains('gh.exe'));
+    expect(directProcesses, contains('powershell.exe'));
+    expect(directProcesses, contains('WindowsTerminal.exe'));
+
+    final proxyProcessRule = routeRules.firstWhere(
+      (rule) => rule['outbound'] == 'proxy' && rule['process_name'] is List,
+    );
+    final proxyProcesses = proxyProcessRule['process_name'] as List;
+    expect(proxyProcesses, contains('Codex.exe'));
+    expect(proxyProcesses, isNot(contains('ssh.exe')));
+    expect(proxyProcesses, isNot(contains('git.exe')));
   });
 
   test(

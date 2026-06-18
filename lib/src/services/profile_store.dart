@@ -20,6 +20,106 @@ enum WindowsConnectionMode {
   }
 }
 
+class ProfileRuntimeStats {
+  const ProfileRuntimeStats({
+    this.successes = 0,
+    this.failures = 0,
+    this.consecutiveFailures = 0,
+    this.totalStartMs = 0,
+    this.lastSuccessAt,
+    this.lastFailureAt,
+    this.lastFailureReason,
+  });
+
+  final int successes;
+  final int failures;
+  final int consecutiveFailures;
+  final int totalStartMs;
+  final DateTime? lastSuccessAt;
+  final DateTime? lastFailureAt;
+  final String? lastFailureReason;
+
+  int get averageStartMs => successes <= 0 ? 0 : totalStartMs ~/ successes;
+
+  int get score {
+    var value = 100 - (consecutiveFailures * 18) - (failures * 4);
+    if (averageStartMs > 8000) {
+      value -= 15;
+    } else if (averageStartMs > 4000) {
+      value -= 8;
+    }
+    if (successes >= 3 && consecutiveFailures == 0) {
+      value += successes.clamp(0, 10).toInt();
+    }
+    return value.clamp(0, 100).toInt();
+  }
+
+  bool get unstable => consecutiveFailures >= 2 || score < 55;
+
+  ProfileRuntimeStats recordSuccess(Duration startDuration) {
+    return ProfileRuntimeStats(
+      successes: successes + 1,
+      failures: failures,
+      consecutiveFailures: 0,
+      totalStartMs: totalStartMs + startDuration.inMilliseconds,
+      lastSuccessAt: DateTime.now(),
+      lastFailureAt: lastFailureAt,
+      lastFailureReason: lastFailureReason,
+    );
+  }
+
+  ProfileRuntimeStats recordFailure(String reason) {
+    return ProfileRuntimeStats(
+      successes: successes,
+      failures: failures + 1,
+      consecutiveFailures: consecutiveFailures + 1,
+      totalStartMs: totalStartMs,
+      lastSuccessAt: lastSuccessAt,
+      lastFailureAt: DateTime.now(),
+      lastFailureReason: reason,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'successes': successes,
+      'failures': failures,
+      'consecutiveFailures': consecutiveFailures,
+      'totalStartMs': totalStartMs,
+      'lastSuccessAt': lastSuccessAt?.toIso8601String(),
+      'lastFailureAt': lastFailureAt?.toIso8601String(),
+      'lastFailureReason': lastFailureReason,
+    };
+  }
+
+  factory ProfileRuntimeStats.fromJson(Map<String, dynamic> json) {
+    int readInt(String key) {
+      final value = json[key];
+      if (value is int) {
+        return value < 0 ? 0 : value;
+      }
+      if (value is num) {
+        return value < 0 ? 0 : value.toInt();
+      }
+      return 0;
+    }
+
+    return ProfileRuntimeStats(
+      successes: readInt('successes'),
+      failures: readInt('failures'),
+      consecutiveFailures: readInt('consecutiveFailures'),
+      totalStartMs: readInt('totalStartMs'),
+      lastSuccessAt: json['lastSuccessAt'] == null
+          ? null
+          : DateTime.tryParse('${json['lastSuccessAt']}'),
+      lastFailureAt: json['lastFailureAt'] == null
+          ? null
+          : DateTime.tryParse('${json['lastFailureAt']}'),
+      lastFailureReason: json['lastFailureReason'] as String?,
+    );
+  }
+}
+
 class ProfileStore {
   static const _profilesKey = 'profiles';
   static const _selectedProfileKey = 'selectedProfileId';
@@ -32,10 +132,15 @@ class ProfileStore {
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
   static const _codexDirectKey = 'codexDirect';
   static const _chatGptThroughVpnKey = 'chatGptThroughVpn';
+  static const _developerModeKey = 'developerMode';
+  static const _dnsOnlyThroughVpnKey = 'dnsOnlyThroughVpn';
   static const _windowsConnectionModeKey = 'windowsConnectionMode';
+  static const _profileRuntimeStatsKey = 'profileRuntimeStats';
   static const defaultVpnOnlyProcesses = <String>[];
   static const defaultCodexDirect = true;
   static const defaultChatGptThroughVpn = true;
+  static const defaultDeveloperMode = true;
+  static const defaultDnsOnlyThroughVpn = true;
   static const defaultWindowsConnectionMode = WindowsConnectionMode.stableProxy;
 
   Future<List<VpnProfile>> loadProfiles() async {
@@ -186,6 +291,26 @@ class ProfileStore {
     await prefs.setBool(_chatGptThroughVpnKey, enabled);
   }
 
+  Future<bool> loadDeveloperMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_developerModeKey) ?? defaultDeveloperMode;
+  }
+
+  Future<void> saveDeveloperMode(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_developerModeKey, enabled);
+  }
+
+  Future<bool> loadDnsOnlyThroughVpn() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_dnsOnlyThroughVpnKey) ?? defaultDnsOnlyThroughVpn;
+  }
+
+  Future<void> saveDnsOnlyThroughVpn(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_dnsOnlyThroughVpnKey, enabled);
+  }
+
   Future<WindowsConnectionMode> loadWindowsConnectionMode() async {
     final prefs = await SharedPreferences.getInstance();
     return WindowsConnectionMode.fromCode(
@@ -196,5 +321,78 @@ class ProfileStore {
   Future<void> saveWindowsConnectionMode(WindowsConnectionMode mode) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_windowsConnectionModeKey, mode.code);
+  }
+
+  Future<Map<String, ProfileRuntimeStats>> loadProfileRuntimeStats() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_profileRuntimeStatsKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    final result = <String, ProfileRuntimeStats>{};
+    for (final entry in decoded.entries) {
+      final key = '${entry.key}'.trim();
+      if (key.isEmpty) {
+        continue;
+      }
+      final value = entry.value;
+      final stats = value is Map
+          ? ProfileRuntimeStats.fromJson(value.cast<String, dynamic>())
+          : const ProfileRuntimeStats();
+      result[key] = stats;
+    }
+    return result;
+  }
+
+  Future<void> saveProfileRuntimeStats(
+    Map<String, ProfileRuntimeStats> stats,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, dynamic>{
+      for (final entry in stats.entries)
+        if (entry.key.trim().isNotEmpty) entry.key.trim(): entry.value.toJson(),
+    };
+    await prefs.setString(_profileRuntimeStatsKey, jsonEncode(normalized));
+  }
+
+  Future<ProfileRuntimeStats> recordProfileRuntimeSuccess(
+    String profileId,
+    Duration startDuration,
+  ) async {
+    final stats = Map<String, ProfileRuntimeStats>.of(
+      await loadProfileRuntimeStats(),
+    );
+    final updated = (stats[profileId] ?? const ProfileRuntimeStats())
+        .recordSuccess(startDuration);
+    stats[profileId] = updated;
+    await saveProfileRuntimeStats(stats);
+    return updated;
+  }
+
+  Future<ProfileRuntimeStats> recordProfileRuntimeFailure(
+    String profileId,
+    String reason,
+  ) async {
+    final stats = Map<String, ProfileRuntimeStats>.of(
+      await loadProfileRuntimeStats(),
+    );
+    final updated = (stats[profileId] ?? const ProfileRuntimeStats())
+        .recordFailure(reason);
+    stats[profileId] = updated;
+    await saveProfileRuntimeStats(stats);
+    return updated;
+  }
+
+  Future<void> removeProfileRuntimeStats(String profileId) async {
+    final stats = Map<String, ProfileRuntimeStats>.of(
+      await loadProfileRuntimeStats(),
+    )..remove(profileId);
+    await saveProfileRuntimeStats(stats);
   }
 }

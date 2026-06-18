@@ -35,6 +35,24 @@ class SingBoxConfigBuilder {
     'openai-codex.exe',
     'OpenAI Codex.exe',
   ];
+  static const developerDirectProcesses = [
+    'ssh.exe',
+    'scp.exe',
+    'sftp.exe',
+    'git.exe',
+    'gh.exe',
+    'plink.exe',
+    'putty.exe',
+    'pageant.exe',
+    'winscp.exe',
+    'rsync.exe',
+    'curl.exe',
+    'powershell.exe',
+    'pwsh.exe',
+    'cmd.exe',
+    'wt.exe',
+    'WindowsTerminal.exe',
+  ];
   static const russianDirectDomains = [
     '.ru',
     '.рф',
@@ -66,6 +84,8 @@ class SingBoxConfigBuilder {
     List<String> vpnOnlyProcesses = const [],
     bool codexDirect = false,
     bool chatGptThroughVpn = true,
+    bool developerMode = false,
+    bool dnsOnlyThroughVpn = false,
     bool windowsTunMode = false,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
@@ -85,7 +105,11 @@ class SingBoxConfigBuilder {
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
-    _applyDialStability(proxyOutbound, target);
+    _applyDialStability(
+      proxyOutbound,
+      target,
+      dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+    );
     final usesNaiveProxyCore =
         target == SingBoxConfigTarget.windows &&
         proxyOutbound['type'] == 'socks';
@@ -105,11 +129,22 @@ class SingBoxConfigBuilder {
     final codexProcesses = target == SingBoxConfigTarget.windows && codexDirect
         ? _normalizeProcessNames(codexDirectProcesses)
         : const <String>[];
+    final developerProcesses =
+        target == SingBoxConfigTarget.windows && developerMode
+        ? _normalizeProcessNames(developerDirectProcesses)
+        : const <String>[];
     final codexProcessLookup = codexProcesses
         .map((process) => process.toLowerCase())
         .toSet();
+    final developerProcessLookup = developerProcesses
+        .map((process) => process.toLowerCase())
+        .toSet();
     final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses)
-        .where((process) => !codexProcessLookup.contains(process.toLowerCase()))
+        .where(
+          (process) =>
+              !codexProcessLookup.contains(process.toLowerCase()) &&
+              !developerProcessLookup.contains(process.toLowerCase()),
+        )
         .toList(growable: false);
     final forcedProxyLookup = forcedProxyProcesses
         .map((process) => process.toLowerCase())
@@ -118,6 +153,7 @@ class SingBoxConfigBuilder {
         _normalizeProcessNames([
               ...splitTunnelExcludedProcesses,
               ...codexProcesses,
+              ...developerProcesses,
             ])
             .where(
               (process) => !forcedProxyLookup.contains(process.toLowerCase()),
@@ -130,6 +166,7 @@ class SingBoxConfigBuilder {
         target,
         codexWebDomainsDirect: codexWebDomainsDirect,
         windowsTunMode: useWindowsTun,
+        dnsOnlyThroughVpn: dnsOnlyThroughVpn,
       ),
       'inbounds': _inbounds(target, windowsTunMode: useWindowsTun),
       'outbounds': [
@@ -190,7 +227,10 @@ class SingBoxConfigBuilder {
               'url': russianGeoIpRuleSetUrl,
             },
           ],
-        'default_domain_resolver': _domainResolver(target),
+        'default_domain_resolver': _domainResolver(
+          target,
+          dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+        ),
         'auto_detect_interface': true,
         'find_process':
             target == SingBoxConfigTarget.windows &&
@@ -281,9 +321,20 @@ class SingBoxConfigBuilder {
     SingBoxConfigTarget target, {
     required bool codexWebDomainsDirect,
     required bool windowsTunMode,
+    required bool dnsOnlyThroughVpn,
   }) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
+      if (target == SingBoxConfigTarget.windows && dnsOnlyThroughVpn)
+        {
+          'type': 'https',
+          'tag': 'bootstrap-dns',
+          'server': '1.1.1.1',
+          'server_port': 443,
+          'path': '/dns-query',
+          'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
+          'detour': 'direct',
+        },
       if (target == SingBoxConfigTarget.android)
         {
           'type': 'fakeip',
@@ -321,18 +372,19 @@ class SingBoxConfigBuilder {
             'action': 'route',
             'server': 'local-dns',
           },
-          if (codexWebDomainsDirect)
+          if (codexWebDomainsDirect && !dnsOnlyThroughVpn)
             {
               'domain': codexDirectDomains,
               'domain_suffix': codexDirectDomainSuffixes,
               'action': 'route',
               'server': 'local-dns',
             },
-          {
-            'domain_suffix': russianDirectDomains,
-            'action': 'route',
-            'server': 'local-dns',
-          },
+          if (!dnsOnlyThroughVpn)
+            {
+              'domain_suffix': russianDirectDomains,
+              'action': 'route',
+              'server': 'local-dns',
+            },
         ],
       'strategy': 'ipv4_only',
       'cache_capacity': target == SingBoxConfigTarget.windows ? 32768 : 8192,
@@ -374,15 +426,16 @@ class SingBoxConfigBuilder {
 
   void _applyDialStability(
     Map<String, dynamic> proxyOutbound,
-    SingBoxConfigTarget target,
-  ) {
+    SingBoxConfigTarget target, {
+    required bool dnsOnlyThroughVpn,
+  }) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
     if (target == SingBoxConfigTarget.windows) {
-      proxyOutbound['domain_resolver'] = _normalizeDomainResolver(
-        proxyOutbound['domain_resolver'],
-      );
+      proxyOutbound['domain_resolver'] = dnsOnlyThroughVpn
+          ? _normalizeDomainResolver('bootstrap-dns')
+          : _normalizeDomainResolver(proxyOutbound['domain_resolver']);
     } else {
       proxyOutbound.putIfAbsent('domain_resolver', () => 'local-dns');
     }
@@ -392,9 +445,15 @@ class SingBoxConfigBuilder {
     }
   }
 
-  Object _domainResolver(SingBoxConfigTarget target) {
+  Object _domainResolver(
+    SingBoxConfigTarget target, {
+    required bool dnsOnlyThroughVpn,
+  }) {
     if (target == SingBoxConfigTarget.windows) {
-      return {'server': 'local-dns', 'strategy': 'ipv4_only'};
+      return {
+        'server': dnsOnlyThroughVpn ? 'bootstrap-dns' : 'local-dns',
+        'strategy': 'ipv4_only',
+      };
     }
     return 'local-dns';
   }
