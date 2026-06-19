@@ -31,6 +31,9 @@ class WindowsSingBoxEngine implements VpnEngine {
   int _runtimeFailureCount = 0;
   DateTime? _lastRuntimeFailureAt;
   String? _lastRuntimeFailureReason;
+  bool _lastStartupFailureIsFatal = false;
+  bool _lastStartupFailureSuggestsDnsFallback = false;
+  String? _lastStartupFailureMessage;
   int _sessionTotalBytes = 0;
   final Map<String, bool> _configCheckCache = {};
   static const _visualRuntimeDlls = [
@@ -41,6 +44,13 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   @override
   SingBoxConfigTarget get configTarget => SingBoxConfigTarget.windows;
+
+  bool get lastStartupFailureIsFatal => _lastStartupFailureIsFatal;
+
+  bool get lastStartupFailureSuggestsDnsFallback =>
+      _lastStartupFailureSuggestsDnsFallback;
+
+  String? get lastStartupFailureMessage => _lastStartupFailureMessage;
 
   @override
   Stream<Map<String, dynamic>> get onStatusChanged => _statusController.stream;
@@ -130,6 +140,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     _transitioning = true;
     _setStatus(YurichConnectStatus.starting);
     _reportedAdminIssue = false;
+    _clearStartupFailure();
     try {
       await _applyRuntimeBackoff();
       final runtimeDir = await _runtimeDir();
@@ -177,6 +188,56 @@ class WindowsSingBoxEngine implements VpnEngine {
         _appendLog('sing-box.exe не найден в ${runtimeDir.path}');
         _setStatus(YurichConnectStatus.stopped);
         return false;
+      }
+
+      if (_shouldRunStartupCanary(effectiveConfig)) {
+        var canary = await _runStartupCanary(exe, configFile, runtimeDir);
+        if (!canary.ok && canary.suggestsDnsFallback) {
+          final fallbackConfig = _safeDnsFallbackConfig(effectiveConfig);
+          if (fallbackConfig != null) {
+            _appendLog(
+              'Safe DNS fallback applied before start: strict bootstrap DNS disabled after canary failure.',
+            );
+            await configFile.writeAsString(fallbackConfig, encoding: utf8);
+            _lastConfigNeedsTun = _configNeedsTun(fallbackConfig);
+            _configCheckCache.clear();
+            final fallbackPreflightOk = await _runPreflight(
+              runtimeDir,
+              configFile,
+              needsNaiveProxy: needsNaiveProxy,
+              needsTun: _lastConfigNeedsTun,
+            );
+            if (!fallbackPreflightOk) {
+              if (_status != YurichConnectStatus.adminRequired) {
+                _setStatus(YurichConnectStatus.error);
+              }
+              return false;
+            }
+            _emitUserAlert(
+              'DNS only through VPN временно отключён: строгий DNS мешал старту Yurich Core. VPN запускается в безопасном DNS-режиме.',
+              code: 'dnsFallbackApplied',
+            );
+            canary = await _runStartupCanary(exe, configFile, runtimeDir);
+          }
+        }
+
+        if (!canary.ok) {
+          _setStartupFailure(
+            canary.message ?? 'sing-box canary failed before start.',
+            fatal: canary.fatal,
+            suggestsDnsFallback: canary.suggestsDnsFallback,
+          );
+          _emitUserAlert(
+            _lastStartupFailureMessage ??
+                'Yurich Core не стартовал. Открой логи ниже.',
+            code: canary.fatal ? 'startupFatal' : null,
+          );
+          await _stopNaiveProxy();
+          if (_status != YurichConnectStatus.adminRequired) {
+            _setStatus(YurichConnectStatus.error);
+          }
+          return false;
+        }
       }
 
       _appendLog('Starting sing-box ${exe.path}');
@@ -467,6 +528,22 @@ class WindowsSingBoxEngine implements VpnEngine {
     _appendLog('Runtime backoff cleared after successful start.');
   }
 
+  void _clearStartupFailure() {
+    _lastStartupFailureIsFatal = false;
+    _lastStartupFailureSuggestsDnsFallback = false;
+    _lastStartupFailureMessage = null;
+  }
+
+  void _setStartupFailure(
+    String message, {
+    required bool fatal,
+    required bool suggestsDnsFallback,
+  }) {
+    _lastStartupFailureIsFatal = fatal;
+    _lastStartupFailureSuggestsDnsFallback = suggestsDnsFallback;
+    _lastStartupFailureMessage = _friendlyStartupFailure(message);
+  }
+
   Future<void> _cleanupTemporaryConfigs(Directory configDir) async {
     final names = ['config.json', 'naive.json', 'geoip-ru.srs.download'];
     for (final name in names) {
@@ -566,6 +643,175 @@ class WindowsSingBoxEngine implements VpnEngine {
       'Windows preflight check passed in ${stopwatch.elapsedMilliseconds}ms.',
     );
     return true;
+  }
+
+  bool _shouldRunStartupCanary(String config) {
+    try {
+      final decoded = jsonDecode(config);
+      if (decoded is! Map) {
+        return false;
+      }
+      final dns = decoded['dns'];
+      if (dns is! Map) {
+        return false;
+      }
+      final servers = dns['servers'];
+      if (servers is! List) {
+        return false;
+      }
+      return servers.whereType<Map>().any(
+        (server) => server['tag'] == 'bootstrap-dns',
+      );
+    } on Object {
+      return config.contains('bootstrap-dns');
+    }
+  }
+
+  Future<_StartupCanaryResult> _runStartupCanary(
+    File exe,
+    File configFile,
+    Directory runtimeDir,
+  ) async {
+    final stopwatch = Stopwatch()..start();
+    Process? process;
+    StreamSubscription<String>? stdoutSub;
+    StreamSubscription<String>? stderrSub;
+    final lines = <String>[];
+    try {
+      _appendLog('sing-box startup canary started.');
+      process = await Process.start(
+        exe.path,
+        ['run', '-c', configFile.path],
+        workingDirectory: runtimeDir.path,
+        runInShell: false,
+      );
+      stdoutSub = process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            if (line.trim().isNotEmpty && lines.length < 40) {
+              lines.add(line.trim());
+            }
+          });
+      stderrSub = process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            if (line.trim().isNotEmpty && lines.length < 40) {
+              lines.add(line.trim());
+            }
+          });
+
+      try {
+        final exitCode = await process.exitCode.timeout(
+          const Duration(milliseconds: 750),
+        );
+        await stdoutSub.cancel();
+        await stderrSub.cancel();
+        final output = lines.join('\n').trim();
+        final message = output.isEmpty
+            ? 'sing-box canary exited early with code $exitCode.'
+            : output;
+        _appendLog(
+          'sing-box startup canary failed in ${stopwatch.elapsedMilliseconds}ms: $message',
+        );
+        return _StartupCanaryResult.failed(
+          message,
+          suggestsDnsFallback: _suggestsDnsFallback(message),
+        );
+      } on TimeoutException {
+        process.kill();
+        try {
+          await process.exitCode.timeout(const Duration(seconds: 2));
+        } on TimeoutException {
+          process.kill(ProcessSignal.sigkill);
+        }
+        await stdoutSub.cancel();
+        await stderrSub.cancel();
+        _appendLog(
+          'sing-box startup canary passed in ${stopwatch.elapsedMilliseconds}ms.',
+        );
+        return const _StartupCanaryResult.ok();
+      }
+    } on Object catch (e) {
+      final message = 'sing-box canary could not start: $e';
+      _appendLog(message);
+      try {
+        process?.kill(ProcessSignal.sigkill);
+      } on Object {
+        // Best-effort cleanup.
+      }
+      await stdoutSub?.cancel();
+      await stderrSub?.cancel();
+      return _StartupCanaryResult.failed(
+        message,
+        suggestsDnsFallback: _suggestsDnsFallback(message),
+      );
+    }
+  }
+
+  String? _safeDnsFallbackConfig(String config) {
+    try {
+      final decoded = jsonDecode(config);
+      if (decoded is! Map) {
+        return null;
+      }
+      final map = decoded.cast<String, dynamic>();
+      final dns = (map['dns'] as Map?)?.cast<String, dynamic>();
+      final route = (map['route'] as Map?)?.cast<String, dynamic>();
+      if (dns == null || route == null) {
+        return null;
+      }
+
+      var changed = false;
+      final servers = (dns['servers'] as List?)?.whereType<Map>().toList();
+      if (servers != null) {
+        final nextServers = servers
+            .where((server) => server['tag'] != 'bootstrap-dns')
+            .map((server) => server.cast<String, dynamic>())
+            .toList();
+        if (nextServers.length != servers.length) {
+          dns['servers'] = nextServers;
+          changed = true;
+        }
+      }
+
+      final localResolver = {'server': 'local-dns', 'strategy': 'ipv4_only'};
+      route['default_domain_resolver'] = localResolver;
+      final outbounds = map['outbounds'];
+      if (outbounds is List) {
+        for (final outbound in outbounds.whereType<Map>()) {
+          if (outbound['tag'] == 'proxy') {
+            outbound['domain_resolver'] = localResolver;
+            changed = true;
+          }
+        }
+      }
+
+      final rules = (dns['rules'] as List?)?.whereType<Map>().toList();
+      if (rules != null) {
+        final hasRussianLocalRule = rules.any(
+          (rule) =>
+              rule['server'] == 'local-dns' && rule['domain_suffix'] is List,
+        );
+        if (!hasRussianLocalRule) {
+          dns['rules'] = [
+            ...rules.map((rule) => rule.cast<String, dynamic>()),
+            {
+              'domain_suffix': SingBoxConfigBuilder.russianDirectDomains,
+              'action': 'route',
+              'server': 'local-dns',
+            },
+          ];
+          changed = true;
+        }
+      }
+
+      return changed ? const JsonEncoder.withIndent('  ').convert(map) : null;
+    } on Object catch (e) {
+      _appendLog('Safe DNS fallback config rewrite failed: $e');
+      return null;
+    }
   }
 
   Future<bool> _isAdministrator() async {
@@ -878,11 +1124,46 @@ class WindowsSingBoxEngine implements VpnEngine {
     return 'Конфиг повреждён. Импортируйте профиль заново.';
   }
 
-  void _emitUserAlert(String message) {
+  String _friendlyStartupFailure(String output) {
+    final lower = output.toLowerCase();
+    if (lower.contains('start dns') ||
+        lower.contains('dns/https') ||
+        lower.contains('bootstrap-dns') ||
+        lower.contains('global-dns')) {
+      return 'Yurich Core не стартовал из-за DNS-конфига. Включён безопасный DNS fallback или отключи режим DNS только через VPN.';
+    }
+    if (lower.contains('address already in use') ||
+        lower.contains('bind') ||
+        lower.contains('listen')) {
+      return 'Yurich Core не стартовал: локальный порт уже занят другим приложением.';
+    }
+    if (lower.contains('tun') || lower.contains('wintun')) {
+      return 'Yurich Core не стартовал: проблема TUN/Wintun. Проверь права администратора или Stable Proxy Mode.';
+    }
+    if (lower.contains('fatal') || lower.contains('start service')) {
+      return 'Yurich Core не стартовал из-за fatal-ошибки конфигурации. Повторный retry остановлен.';
+    }
+    return _friendlyConfigError(output);
+  }
+
+  bool _suggestsDnsFallback(String output) {
+    final lower = output.toLowerCase();
+    return lower.contains('start dns') ||
+        lower.contains('dns/https') ||
+        lower.contains('bootstrap-dns') ||
+        lower.contains('global-dns') ||
+        lower.contains('dns server');
+  }
+
+  void _emitUserAlert(String message, {String? code}) {
     if (_statusController.isClosed || message.isEmpty) {
       return;
     }
-    _statusController.add({'type': 'alert', 'message': message});
+    final event = <String, dynamic>{'type': 'alert', 'message': message};
+    if (code != null) {
+      event['code'] = code;
+    }
+    _statusController.add(event);
   }
 
   Future<void> _stopStaleRuntimeProcesses(Directory runtimeDir) async {
@@ -1255,4 +1536,31 @@ Write-Output \$stopped
       }
     }
   }
+}
+
+class _StartupCanaryResult {
+  const _StartupCanaryResult._({
+    required this.ok,
+    required this.fatal,
+    required this.suggestsDnsFallback,
+    this.message,
+  });
+
+  const _StartupCanaryResult.ok()
+    : this._(ok: true, fatal: false, suggestsDnsFallback: false);
+
+  const _StartupCanaryResult.failed(
+    String message, {
+    required bool suggestsDnsFallback,
+  }) : this._(
+         ok: false,
+         fatal: true,
+         suggestsDnsFallback: suggestsDnsFallback,
+         message: message,
+       );
+
+  final bool ok;
+  final bool fatal;
+  final bool suggestsDnsFallback;
+  final String? message;
 }

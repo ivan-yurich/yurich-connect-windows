@@ -33,7 +33,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.41';
+const _appVersion = '1.0.42';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -526,16 +526,23 @@ class _HomeScreenState extends State<HomeScreen>
     _statusSubscription = _vpnEngine.onStatusChanged.listen((event) {
       if (event['type'] == 'alert') {
         final message = event['message'] as String?;
+        final code = event['code'] as String?;
         if (message != null && message.isNotEmpty && mounted) {
+          if (code == 'dnsFallbackApplied') {
+            unawaited(_store.saveDnsOnlyThroughVpn(false));
+          }
           setState(() {
             _message = message;
             _lastError = message;
-            if (event['code'] == 'adminRequired') {
+            if (code == 'dnsFallbackApplied') {
+              _dnsOnlyThroughVpn = false;
+            }
+            if (code == 'adminRequired') {
               _status = YurichConnectStatus.adminRequired;
               _isWindowsAdmin = false;
             }
           });
-          if (event['code'] == 'adminRequired') {
+          if (code == 'adminRequired') {
             _showSnack(
               message,
               action: SnackBarAction(
@@ -1385,11 +1392,12 @@ class _HomeScreenState extends State<HomeScreen>
 
     Object? lastStartError;
     var connected = false;
+    var fatalStartup = false;
     final plans = _connectionPlans(profile);
 
     for (
       var planIndex = 0;
-      planIndex < plans.length && !connected;
+      planIndex < plans.length && !connected && !fatalStartup;
       planIndex += 1
     ) {
       final plan = plans[planIndex];
@@ -1489,10 +1497,20 @@ class _HomeScreenState extends State<HomeScreen>
             lastStartError = s.vpnNotConnected(finalStatus);
           }
         } else {
-          lastStartError = s.vpnStartFailed;
+          final fatalMessage = _windowsStartupFatalMessage();
+          if (fatalMessage != null) {
+            fatalStartup = true;
+            lastStartError = fatalMessage;
+            _queueLog(
+              'VPN start aborted without retry [${plan.label}]: '
+              '${_redactSensitive(fatalMessage)}',
+            );
+          } else {
+            lastStartError = s.vpnStartFailed;
+          }
         }
 
-        if (!connected) {
+        if (!connected && !fatalStartup) {
           _queueLog(
             'VPN start retry [attempt=$attempt/2 · ${plan.label}]: '
             '${_redactSensitive('$lastStartError')}',
@@ -1513,7 +1531,7 @@ class _HomeScreenState extends State<HomeScreen>
         }
       }
 
-      if (!connected && planIndex < plans.length - 1) {
+      if (!connected && !fatalStartup && planIndex < plans.length - 1) {
         final fallbackProbeInfo = _healthProbeP99LatencyMs();
         _queueLog(
           'Naive mode fallback: ${plan.label} did not pass probe. '
@@ -3489,6 +3507,17 @@ if ($null -ne $match) { 'true' } else { 'false' }
     final sorted = [...samples]..sort();
     final index = ((sorted.length - 1) * percentile / 100).round();
     return sorted[index.clamp(0, sorted.length - 1).toInt()];
+  }
+
+  String? _windowsStartupFatalMessage() {
+    final engine = _vpnEngine;
+    if (engine is! WindowsSingBoxEngine || !engine.lastStartupFailureIsFatal) {
+      return null;
+    }
+    final message = engine.lastStartupFailureMessage;
+    return message == null || message.trim().isEmpty
+        ? s.vpnStartFailed
+        : message.trim();
   }
 
   String _classifyStartFailure(Object error) {
