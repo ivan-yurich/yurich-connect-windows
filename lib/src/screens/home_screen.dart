@@ -17,6 +17,7 @@ import '../services/profile_failover.dart';
 import '../services/profile_store.dart';
 import '../services/secret_redactor.dart';
 import '../services/sing_box_config_builder.dart';
+import '../services/vless_profile_tools.dart';
 import '../services/vpn_engine.dart';
 import '../services/windows_integration_service.dart';
 import '../services/windows_sing_box_engine.dart';
@@ -33,7 +34,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.43';
+const _appVersion = '1.0.44';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -1175,8 +1176,11 @@ class _HomeScreenState extends State<HomeScreen>
 
   List<VpnProfile> _connectCandidateProfiles(VpnProfile preferred) {
     final latencySnapshots = _profileLatencySnapshots();
+    final failoverProfiles = VlessProfileTools.isVlessProfile(preferred)
+        ? _profiles.where(VlessProfileTools.isVlessProfile).toList()
+        : _profiles;
     final ranked = rankProfilesForFailover(
-      profiles: _profiles,
+      profiles: failoverProfiles,
       preferred: preferred,
       runtimeStats: _profileRuntimeStats,
       latencies: latencySnapshots,
@@ -1225,7 +1229,7 @@ class _HomeScreenState extends State<HomeScreen>
         break;
       }
     }
-    final quarantined = _profiles.where(
+    final quarantined = failoverProfiles.where(
       (profile) => _profileRuntimeStats[profile.id]?.isQuarantined() == true,
     );
     for (final profile in quarantined) {
@@ -1690,10 +1694,23 @@ class _HomeScreenState extends State<HomeScreen>
     switch (profile.kind) {
       case VpnProfileKind.vlessReality:
       case VpnProfileKind.vlessTls:
+        final portValue = profile.port ?? outbound['server_port'];
+        final port = portValue is int ? portValue : int.tryParse('$portValue');
+        if (port == null || port < 1 || port > 65535) {
+          throw StateError('Ошибка VLESS: неверный порт сервера.');
+        }
         final uuid = '${outbound['uuid'] ?? ''}'.trim();
         if (uuid.isEmpty) {
           throw StateError('В профиле отсутствует UUID.');
         }
+        if (!VlessProfileTools.isValidUuid(uuid)) {
+          throw StateError('Ошибка VLESS: неверный UUID.');
+        }
+        VlessProfileTools.normalizeFlow('${outbound['flow'] ?? ''}');
+        VlessProfileTools.normalizePacketEncoding(
+          '${outbound['packet_encoding'] ?? ''}',
+        );
+        VlessProfileTools.transportTypeFromOutbound(outbound);
         final tls = (outbound['tls'] as Map?)?.cast<String, dynamic>();
         if (profile.kind == VpnProfileKind.vlessReality) {
           final reality = (tls?['reality'] as Map?)?.cast<String, dynamic>();
@@ -3535,6 +3552,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       if (profile != null) ...[
         'profile: ${_redactSensitive(profile.name)}',
         'protocol: ${_profileKindLabel(profile.kind)}',
+        if (VlessProfileTools.isVlessProfile(profile))
+          'vless: ${_redactSensitive(VlessProfileTools.configSummary(profile))}',
         'endpoint: ${_redactSensitive(profile.endpoint)}',
         if (_profileRuntimeStats[profile.id] != null)
           'profile_score: ${_profileRuntimeStats[profile.id]!.score}; '
@@ -3583,8 +3602,11 @@ if ($null -ne $match) { 'true' } else { 'false' }
   }
 
   String _formatFailoverCandidateSummary(VpnProfile preferred) {
+    final failoverProfiles = VlessProfileTools.isVlessProfile(preferred)
+        ? _profiles.where(VlessProfileTools.isVlessProfile).toList()
+        : _profiles;
     final ranked = rankProfilesForFailover(
-      profiles: _profiles,
+      profiles: failoverProfiles,
       preferred: preferred,
       runtimeStats: _profileRuntimeStats,
       latencies: _profileLatencySnapshots(),
@@ -3601,7 +3623,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
           final quarantine = stats?.isQuarantined() == true
               ? ' quarantined_until=${stats!.quarantinedUntil?.toIso8601String()}'
               : '';
-          return '${_redactSensitive(candidate.profile.name)} score=${candidate.score} $latencyLabel$quarantine';
+          final vless = VlessProfileTools.isVlessProfile(candidate.profile)
+              ? ' vless_transport=${VlessProfileTools.safeTransportType(candidate.profile)}'
+              : '';
+          return '${_redactSensitive(candidate.profile.name)} score=${candidate.score} $latencyLabel$vless$quarantine';
         })
         .join('; ');
   }
@@ -3667,6 +3692,11 @@ if ($null -ne $match) { 'true' } else { 'false' }
         'target=${target.name}',
         'mode=${tun.isEmpty ? 'stable_proxy' : 'advanced_tun'}',
         'proxy=${proxy['type'] ?? 'unknown'}',
+        if (proxy['type'] == 'vless')
+          'vless_transport=${VlessProfileTools.transportTypeFromOutbound(proxy)}',
+        if (proxy['type'] == 'vless') 'vless_flow=${proxy['flow'] ?? 'none'}',
+        if (proxy['type'] == 'vless')
+          'vless_packet_encoding=${proxy['packet_encoding'] ?? 'none'}',
         'dns=$dnsFinal/${dnsServer['type'] ?? 'unknown'}',
         if (hasFakeDns) 'fake_dns=true',
         'mtu=${tun['mtu'] ?? 'unknown'}',
@@ -3815,6 +3845,29 @@ if ($null -ne $match) { 'true' } else { 'false' }
 
   String _classifyStartFailure(Object error) {
     final text = _redactSensitive('$error').toLowerCase();
+    if (text.contains('reality') ||
+        text.contains('publickey') ||
+        text.contains('public_key')) {
+      return 'vless_reality';
+    }
+    if (text.contains('shortid') || text.contains('short_id')) {
+      return 'vless_reality_short_id';
+    }
+    if (text.contains('server_name') || text.contains('servername')) {
+      return 'vless_sni';
+    }
+    if (text.contains('vless') && text.contains('flow')) {
+      return 'vless_flow';
+    }
+    if (text.contains('xhttp') || text.contains('splithttp')) {
+      return 'vless_xhttp_unsupported';
+    }
+    if (text.contains('vless') && text.contains('transport')) {
+      return 'vless_transport';
+    }
+    if (text.contains('handshake') || text.contains('tls')) {
+      return text.contains('vless') ? 'vless_tls_handshake' : 'tls';
+    }
     if (text.contains('dns') || text.contains('failed host lookup')) {
       return 'dns';
     }

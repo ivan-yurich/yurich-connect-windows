@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../models/vpn_profile.dart';
+import 'vless_profile_tools.dart';
 
 enum SingBoxConfigTarget { android, windows }
 
@@ -474,11 +475,8 @@ class SingBoxConfigBuilder {
     Map<String, dynamic> proxyOutbound,
     NaiveOutboundMode naiveMode,
   ) {
-    if (profile.kind == VpnProfileKind.vlessReality ||
-        profile.kind == VpnProfileKind.vlessTls) {
-      if (proxyOutbound['network'] == 'tcp') {
-        proxyOutbound.remove('network');
-      }
+    if (VlessProfileTools.isVlessProfile(profile)) {
+      _normalizeVlessOutbound(proxyOutbound);
       return;
     }
 
@@ -536,6 +534,54 @@ class SingBoxConfigBuilder {
       () => profile.server ?? proxyOutbound['server'],
     );
     proxyOutbound['tls'] = normalizedTls;
+  }
+
+  void _normalizeVlessOutbound(Map<String, dynamic> proxyOutbound) {
+    final flow = VlessProfileTools.normalizeFlow(
+      '${proxyOutbound['flow'] ?? ''}',
+    );
+    if (flow == null) {
+      proxyOutbound.remove('flow');
+    } else {
+      proxyOutbound['flow'] = flow;
+    }
+
+    final packetEncoding = VlessProfileTools.normalizePacketEncoding(
+      '${proxyOutbound['packet_encoding'] ?? ''}',
+    );
+    if (packetEncoding == null) {
+      proxyOutbound.remove('packet_encoding');
+    } else {
+      proxyOutbound['packet_encoding'] = packetEncoding;
+    }
+
+    if (proxyOutbound['network'] == 'tcp') {
+      proxyOutbound.remove('network');
+    }
+
+    final transport = (proxyOutbound['transport'] as Map?)
+        ?.cast<String, dynamic>();
+    if (transport == null) {
+      return;
+    }
+
+    final type = VlessProfileTools.normalizeTransportType(
+      '${transport['type'] ?? 'tcp'}',
+    );
+    if (type == 'tcp') {
+      proxyOutbound.remove('transport');
+      return;
+    }
+    transport['type'] = type;
+
+    if (type == 'grpc') {
+      transport.putIfAbsent('idle_timeout', () => '30s');
+      transport.putIfAbsent('ping_timeout', () => '15s');
+    }
+    if (type == 'http') {
+      transport.putIfAbsent('idle_timeout', () => '30s');
+      transport.putIfAbsent('ping_timeout', () => '15s');
+    }
   }
 
   String buildNaiveProxyConfig(VpnProfile profile) {
