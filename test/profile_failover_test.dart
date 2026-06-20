@@ -106,6 +106,38 @@ void main() {
       expect(ranked.first.profile.id, active.id);
       expect(ranked.any((entry) => entry.profile.id == expired.id), isFalse);
     });
+
+    test('skips quarantined profiles when healthy candidates exist', () {
+      final preferred = _profile('preferred', 'Germany Primary');
+      final quarantined = _profile('quarantined', 'Germany Broken');
+      final healthy = _profile('healthy', 'Germany Backup');
+      final now = DateTime(2026, 6, 18);
+      final stats = {
+        quarantined.id: ProfileRuntimeStats(
+          failures: 4,
+          consecutiveFailures: 3,
+          quarantinedUntil: now.add(const Duration(minutes: 20)),
+        ),
+        healthy.id: const ProfileRuntimeStats(successes: 4, totalStartMs: 2000),
+      };
+
+      final ranked = rankProfilesForFailover(
+        profiles: [preferred, quarantined, healthy],
+        preferred: preferred,
+        runtimeStats: stats,
+        latencies: {
+          quarantined.id: const ProfileLatencySnapshot.ok(40),
+          healthy.id: const ProfileLatencySnapshot.ok(90),
+        },
+        now: now,
+      );
+
+      expect(
+        ranked.map((entry) => entry.profile.id),
+        isNot(contains(quarantined.id)),
+      );
+      expect(ranked.first.profile.id, healthy.id);
+    });
   });
 }
 
