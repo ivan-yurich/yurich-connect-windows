@@ -1154,8 +1154,23 @@ class WindowsSingBoxEngine implements VpnEngine {
     if (lower.contains('uuid')) {
       return 'В профиле отсутствует UUID.';
     }
+    if (lower.contains('xhttp') || lower.contains('splithttp')) {
+      return 'VLESS XHTTP требует Xray-core. В текущей Windows-сборке bundled sing-box поддерживает TCP/WS/gRPC/HTTP/HTTPUpgrade.';
+    }
+    if (lower.contains('flow')) {
+      return 'Ошибка VLESS: неподдерживаемый flow. Поддерживается xtls-rprx-vision.';
+    }
+    if (lower.contains('packet_encoding') || lower.contains('packet encoding')) {
+      return 'Ошибка VLESS: неподдерживаемый packet_encoding. Доступны packetaddr или xudp.';
+    }
+    if (lower.contains('transport')) {
+      return 'Ошибка VLESS: неподдерживаемый transport.';
+    }
     if (lower.contains('public_key') || lower.contains('publickey')) {
       return 'Ошибка Reality: отсутствует publicKey.';
+    }
+    if (lower.contains('short_id') || lower.contains('shortid')) {
+      return 'Ошибка Reality: неверный shortId.';
     }
     if (lower.contains('server_name') || lower.contains('servername')) {
       return 'Ошибка Reality: отсутствует serverName.';
@@ -1184,6 +1199,14 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
     if (lower.contains('tun') || lower.contains('wintun')) {
       return 'Yurich Core не стартовал: проблема TUN/Wintun. Проверь права администратора или Stable Proxy Mode.';
+    }
+    if (lower.contains('reality') &&
+        (lower.contains('handshake') || lower.contains('tls'))) {
+      return 'VLESS Reality не прошёл handshake. Проверь SNI, publicKey, shortId, fingerprint и сервер.';
+    }
+    if (lower.contains('vless') &&
+        (lower.contains('handshake') || lower.contains('tls'))) {
+      return 'VLESS TLS не прошёл handshake. Проверь SNI, сертификат, fingerprint и сервер.';
     }
     if (lower.contains('fatal') || lower.contains('start service')) {
       return 'Yurich Core не стартовал из-за fatal-ошибки конфигурации. Повторный retry остановлен.';

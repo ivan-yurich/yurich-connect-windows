@@ -33,6 +33,62 @@ void main() {
     );
   });
 
+  test('imports VLESS packet encoding and HTTPUpgrade transport', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=httpupgrade&sni=cdn.example.com&host=edge.example.com&path=%2Fup&packet_encoding=xudp#VLESS-UP';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(proxy['packet_encoding'], 'xudp');
+    expect(proxy['transport'], {
+      'type': 'httpupgrade',
+      'host': 'edge.example.com',
+      'path': '/up',
+    });
+  });
+
+  test('rejects VLESS XHTTP for bundled sing-box runtime', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=www.example.com&pbk=abc123#XHTTP';
+
+    expect(
+      () => ProfileImporter().importFromText(link),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('XHTTP'),
+        ),
+      ),
+    );
+  });
+
+  test('rejects invalid VLESS flow before config start', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=tcp&flow=xtls-rprx-direct&sni=cdn.example.com#BadFlow';
+
+    expect(
+      () => ProfileImporter().importFromText(link),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('flow'),
+        ),
+      ),
+    );
+  });
+
   test('propagates subscription expiry from JSON payload', () async {
     final payload = jsonEncode({
       'links': ['naive+https://example.com:user@example.com:443#Naive'],
@@ -1000,5 +1056,100 @@ void main() {
     expect(profiles.first.kind, VpnProfileKind.vlessReality);
     expect(profiles.first.originalInput, startsWith('vless://'));
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
+  });
+
+  test('imports VLESS gRPC transport from Xray JSON subscription', () async {
+    final payload = jsonEncode([
+      {
+        'remarks': 'Germany gRPC',
+        'outbounds': [
+          {
+            'protocol': 'vless',
+            'settings': {
+              'vnext': [
+                {
+                  'address': 'grpc.example.com',
+                  'port': 443,
+                  'users': [
+                    {
+                      'id': '11111111-1111-4111-8111-111111111111',
+                      'encryption': 'none',
+                    },
+                  ],
+                },
+              ],
+            },
+            'streamSettings': {
+              'network': 'grpc',
+              'security': 'tls',
+              'tlsSettings': {'serverName': 'cdn.example.com'},
+              'grpcSettings': {'serviceName': 'TunService'},
+            },
+          },
+        ],
+      },
+    ]);
+
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(proxy['transport'], {
+      'type': 'grpc',
+      'service_name': 'TunService',
+      'idle_timeout': '30s',
+      'ping_timeout': '15s',
+    });
+  });
+
+  test('reports unsupported VLESS XHTTP from Xray JSON subscription', () async {
+    final payload = jsonEncode([
+      {
+        'remarks': 'XHTTP',
+        'outbounds': [
+          {
+            'protocol': 'vless',
+            'settings': {
+              'vnext': [
+                {
+                  'address': 'xhttp.example.com',
+                  'port': 443,
+                  'users': [
+                    {
+                      'id': '11111111-1111-4111-8111-111111111111',
+                      'encryption': 'none',
+                    },
+                  ],
+                },
+              ],
+            },
+            'streamSettings': {
+              'network': 'xhttp',
+              'security': 'tls',
+              'tlsSettings': {'serverName': 'cdn.example.com'},
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(
+      () => ProfileImporter().importFromText(payload),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('XHTTP'),
+        ),
+      ),
+    );
   });
 }

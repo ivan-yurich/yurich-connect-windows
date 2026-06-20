@@ -138,10 +138,58 @@ void main() {
       );
       expect(ranked.first.profile.id, healthy.id);
     });
+
+    test('keeps VLESS failover inside the same transport group first', () {
+      final preferred = _profile(
+        'preferred',
+        'Germany Reality TCP',
+        transport: 'tcp',
+      );
+      final sameTransport = _profile(
+        'same-transport',
+        'Germany Reality Backup',
+        transport: 'tcp',
+      );
+      final grpc = _profile('grpc', 'Germany gRPC Backup', transport: 'grpc');
+      final now = DateTime(2026, 6, 18);
+      final stats = {
+        sameTransport.id: const ProfileRuntimeStats(
+          successes: 2,
+          totalStartMs: 1400,
+        ),
+        grpc.id: const ProfileRuntimeStats(successes: 6, totalStartMs: 900),
+      };
+      final latencies = {
+        sameTransport.id: const ProfileLatencySnapshot.ok(120),
+        grpc.id: const ProfileLatencySnapshot.ok(40),
+      };
+
+      final ranked = rankProfilesForFailover(
+        profiles: [preferred, grpc, sameTransport],
+        preferred: preferred,
+        runtimeStats: stats,
+        latencies: latencies,
+        now: now,
+      );
+
+      expect(ranked.first.profile.id, sameTransport.id);
+      expect(ranked.map((entry) => entry.profile.id), contains(grpc.id));
+    });
   });
 }
 
-VpnProfile _profile(String id, String name, {DateTime? expiresAt}) {
+VpnProfile _profile(
+  String id,
+  String name, {
+  DateTime? expiresAt,
+  String transport = 'tcp',
+}) {
+  final outbound = <String, dynamic>{
+    'type': 'vless',
+    'server': 'example.com',
+    'uuid': '11111111-1111-4111-8111-111111111111',
+    if (transport != 'tcp') 'transport': {'type': transport},
+  };
   return VpnProfile(
     id: id,
     name: name,
@@ -149,7 +197,7 @@ VpnProfile _profile(String id, String name, {DateTime? expiresAt}) {
     originalInput: 'vless://example',
     server: '$id.example.com',
     port: 443,
-    outbound: const {'type': 'vless', 'server': 'example.com', 'uuid': 'uuid'},
+    outbound: outbound,
     subscriptionSource: 'https://example.com/sub',
     expiresAt: expiresAt,
   );

@@ -1,5 +1,6 @@
 import '../models/vpn_profile.dart';
 import 'profile_store.dart';
+import 'vless_profile_tools.dart';
 
 enum ProfileLatencyState { ok, failed, unavailable }
 
@@ -191,6 +192,11 @@ int profileFailoverScore({
 }
 
 int _profileFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
+  if (VlessProfileTools.isVlessProfile(preferred) &&
+      VlessProfileTools.isVlessProfile(profile)) {
+    return _vlessFailoverGroupPriority(profile, preferred);
+  }
+
   final sameProtocol = profile.kind == preferred.kind;
   final sameSubscription =
       profile.subscriptionSource != null &&
@@ -216,6 +222,43 @@ int _profileFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
     return 5;
   }
   return 6;
+}
+
+int _vlessFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
+  final sameKind = profile.kind == preferred.kind;
+  final sameTransport =
+      VlessProfileTools.safeTransportType(profile) ==
+      VlessProfileTools.safeTransportType(preferred);
+  final sameSubscription =
+      profile.subscriptionSource != null &&
+      profile.subscriptionSource == preferred.subscriptionSource;
+  final profileRegion = _profileRegionKey(profile);
+  final preferredRegion = _profileRegionKey(preferred);
+  final sameRegion =
+      profileRegion.isNotEmpty && profileRegion == preferredRegion;
+
+  if (sameTransport && sameRegion) {
+    return 1;
+  }
+  if (sameTransport && sameSubscription) {
+    return 2;
+  }
+  if (sameTransport) {
+    return 3;
+  }
+  if (sameKind && sameRegion) {
+    return 4;
+  }
+  if (sameKind) {
+    return 5;
+  }
+  if (sameRegion) {
+    return 6;
+  }
+  if (sameSubscription) {
+    return 7;
+  }
+  return 8;
 }
 
 String _profileRegionKey(VpnProfile profile) {
