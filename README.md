@@ -2,7 +2,7 @@
 
 Yurich Connect is the Windows client in the Yurich ecosystem for stable access to foreign services, Yurich ID subscriptions, and manual VPN/proxy profiles.
 
-It runs on Windows 10/11 and uses Yurich Core powered by sing-box, NaiveProxy, Hysteria, and optional Wintun.
+It runs on Windows 10/11 and uses Yurich Core powered by sing-box, Xray-core, NaiveProxy, Hysteria, and optional Wintun.
 
 ## English
 
@@ -20,7 +20,7 @@ Yurich Connect imports single profile links and full subscriptions with multiple
 Supported inputs:
 
 - Yurich ID subscription URL;
-- VLESS Reality and VLESS TLS;
+- VLESS Reality and VLESS TLS, including Xray-backed VLESS XHTTP in Stable Proxy Mode;
 - NaiveProxy;
 - Hysteria 1 and Hysteria 2;
 - raw sing-box JSON;
@@ -70,6 +70,7 @@ Logs are stored under `%APPDATA%\Yurich Connect\logs`:
 
 - `yurich.log`
 - `sing-box.log`
+- `xray.log`
 - `naive.log`
 
 Diagnostics are created under `%APPDATA%\Yurich Connect\diagnostics` as `report.zip`.
@@ -104,7 +105,7 @@ Yurich Connect импортирует одиночные ссылки профи
 Поддерживаются:
 
 - Yurich ID subscription URL;
-- VLESS Reality и VLESS TLS;
+- VLESS Reality и VLESS TLS, включая VLESS XHTTP через Xray-core в Stable Proxy Mode;
 - NaiveProxy;
 - Hysteria 1 и Hysteria 2;
 - raw sing-box JSON;
@@ -154,6 +155,7 @@ Stable Proxy Mode не требует прав администратора. П�
 
 - `yurich.log`
 - `sing-box.log`
+- `xray.log`
 - `naive.log`
 
 Диагностика создаётся в `%APPDATA%\Yurich Connect\diagnostics` как `report.zip`.

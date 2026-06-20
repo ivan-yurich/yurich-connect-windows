@@ -21,6 +21,7 @@ import '../services/vless_profile_tools.dart';
 import '../services/vpn_engine.dart';
 import '../services/windows_integration_service.dart';
 import '../services/windows_sing_box_engine.dart';
+import '../services/xray_config_builder.dart';
 import 'qr_scan_screen.dart';
 
 const _gold = Color(0xFF15B8FF);
@@ -34,7 +35,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.45';
+const _appVersion = '1.0.46';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -47,6 +48,10 @@ const _healthWatchdogActiveTrafficFailureWindow = Duration(minutes: 5);
 const _healthWatchdogProbeAttempts = 2;
 const _healthWatchdogProbeDelay = Duration(milliseconds: 800);
 const _softRecoveryCooldown = Duration(minutes: 2);
+const _vlessEofStormWindow = Duration(seconds: 25);
+const _vlessEofStormThreshold = 8;
+const _vlessEofStormQuarantine = Duration(minutes: 15);
+const _vlessEofStormFailoverCooldown = Duration(minutes: 2);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
 const _healthProbeHistoryWindow = Duration(hours: 1);
 const _healthProbeHistoryLimit = 240;
@@ -150,6 +155,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _store = ProfileStore();
   final _importer = ProfileImporter();
   final _configBuilder = SingBoxConfigBuilder();
+  final _xrayConfigBuilder = const XrayConfigBuilder();
   final _windowsIntegration = WindowsIntegrationService();
   final _manualController = TextEditingController();
 
@@ -220,9 +226,12 @@ class _HomeScreenState extends State<HomeScreen>
   String? _lastVpnReconnectReason;
   bool _lastReconnectDuringCodex = false;
   final List<_HealthProbeAttempt> _healthProbeHistory = [];
+  final List<DateTime> _vlessEofEvents = [];
   final Map<String, List<int>> _stageTimings = {};
   final _logs = <String>[];
   final _pendingLogs = <String>[];
+  DateTime? _vlessEofFailoverCooldownUntil;
+  bool _vlessEofFailoverRunning = false;
 
   _Strings get s => _Strings.forLanguage(_language);
 
@@ -613,6 +622,7 @@ class _HomeScreenState extends State<HomeScreen>
             _connectionLifecycle = _ConnectionLifecycle.stable;
             _connectionLifecycleChangedAt = DateTime.now();
             _lastError = null;
+            _vlessEofEvents.clear();
             _connectedAt ??= DateTime.now();
             _ignoreStoppedUntil = DateTime.now().add(
               const Duration(seconds: 4),
@@ -677,6 +687,7 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
       _queueLog(message);
+      _observeRuntimeLogForFailover(message);
     });
 
     try {
@@ -1336,26 +1347,17 @@ class _HomeScreenState extends State<HomeScreen>
     final stopwatch = Stopwatch()..start();
     _validateProfileForStart(profile);
     final plan = _connectionPlans(profile).first;
-    final config = _configBuilder.build(
+    final coreBackend = _coreBackendForProfile(profile);
+    final config = _buildCoreConfig(profile, plan, coreBackend: coreBackend);
+    final naiveProxyConfig = _buildNaiveProxyConfigForPlan(
       profile,
-      target: _vpnEngine.configTarget,
-      naiveMode: plan.naiveMode,
-      splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
-      vpnOnlyProcesses: _vpnOnlyProcesses,
-      codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
-      chatGptThroughVpn: _chatGptThroughVpn,
-      developerMode: _developerMode,
-      dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
-      windowsTunMode: _advancedTunMode,
+      plan,
+      coreBackend: coreBackend,
     );
-    final naiveProxyConfig =
-        profile.kind == VpnProfileKind.naive &&
-            plan.naiveMode == NaiveOutboundMode.externalCore
-        ? _configBuilder.buildNaiveProxyConfig(profile)
-        : null;
     final saved = await _vpnEngine.saveConfig(
       config,
       naiveProxyConfig: naiveProxyConfig,
+      coreBackend: coreBackend,
     );
     if (!saved) {
       throw StateError(s.configSaveFailed);
@@ -1482,31 +1484,22 @@ class _HomeScreenState extends State<HomeScreen>
     ) {
       final plan = plans[planIndex];
       String? lastProbeFailureReason;
-      final config = _configBuilder.build(
+      final coreBackend = _coreBackendForProfile(profile);
+      final config = _buildCoreConfig(profile, plan, coreBackend: coreBackend);
+      final naiveProxyConfig = _buildNaiveProxyConfigForPlan(
         profile,
-        target: _vpnEngine.configTarget,
-        naiveMode: plan.naiveMode,
-        splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
-        vpnOnlyProcesses: _vpnOnlyProcesses,
-        codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
-        chatGptThroughVpn: _chatGptThroughVpn,
-        developerMode: _developerMode,
-        dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
-        windowsTunMode: _advancedTunMode,
+        plan,
+        coreBackend: coreBackend,
       );
-      final naiveProxyConfig =
-          _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
-              profile.kind == VpnProfileKind.naive &&
-              plan.naiveMode == NaiveOutboundMode.externalCore
-          ? _configBuilder.buildNaiveProxyConfig(profile)
-          : null;
-      final configSummary = _summarizeSingBoxConfig(
+      final configSummary = _summarizeCoreConfig(
         config,
         target: _vpnEngine.configTarget,
+        coreBackend: coreBackend,
       );
       final saved = await _vpnEngine.saveConfig(
         config,
         naiveProxyConfig: naiveProxyConfig,
+        coreBackend: coreBackend,
       );
       if (!saved) {
         throw StateError(s.configSaveFailed);
@@ -1626,6 +1619,7 @@ class _HomeScreenState extends State<HomeScreen>
           await _vpnEngine.saveConfig(
             config,
             naiveProxyConfig: naiveProxyConfig,
+            coreBackend: coreBackend,
           );
           _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 14));
         }
@@ -1683,6 +1677,12 @@ class _HomeScreenState extends State<HomeScreen>
     final outbound = profile.outbound;
     if (outbound == null) {
       throw StateError('Конфиг повреждён. Импортируйте профиль заново.');
+    }
+    if (_advancedTunMode &&
+        _coreBackendForProfile(profile) == VpnCoreBackend.xray) {
+      throw StateError(
+        'VLESS XHTTP через Xray-core работает только в Stable Proxy Mode. Отключите Advanced TUN Mode для этого профиля.',
+      );
     }
 
     final serverValue = profile.server ?? outbound['server'];
@@ -1746,6 +1746,55 @@ class _HomeScreenState extends State<HomeScreen>
       case VpnProfileKind.singBoxConfig:
         break;
     }
+  }
+
+  VpnCoreBackend _coreBackendForProfile(VpnProfile profile) {
+    if (_vpnEngine.configTarget == SingBoxConfigTarget.windows &&
+        VlessProfileTools.requiresXrayBackend(profile)) {
+      return VpnCoreBackend.xray;
+    }
+    return VpnCoreBackend.singBox;
+  }
+
+  String _buildCoreConfig(
+    VpnProfile profile,
+    _ConnectionConfigPlan plan, {
+    required VpnCoreBackend coreBackend,
+  }) {
+    if (coreBackend == VpnCoreBackend.xray) {
+      return _xrayConfigBuilder.build(
+        profile,
+        windowsTunMode: _advancedTunMode,
+      );
+    }
+    return _configBuilder.build(
+      profile,
+      target: _vpnEngine.configTarget,
+      naiveMode: plan.naiveMode,
+      splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
+      vpnOnlyProcesses: _vpnOnlyProcesses,
+      codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
+      chatGptThroughVpn: _chatGptThroughVpn,
+      developerMode: _developerMode,
+      dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
+      windowsTunMode: _advancedTunMode,
+    );
+  }
+
+  String? _buildNaiveProxyConfigForPlan(
+    VpnProfile profile,
+    _ConnectionConfigPlan plan, {
+    required VpnCoreBackend coreBackend,
+  }) {
+    if (coreBackend == VpnCoreBackend.xray) {
+      return null;
+    }
+    if (_vpnEngine.configTarget == SingBoxConfigTarget.windows &&
+        profile.kind == VpnProfileKind.naive &&
+        plan.naiveMode == NaiveOutboundMode.externalCore) {
+      return _configBuilder.buildNaiveProxyConfig(profile);
+    }
+    return null;
   }
 
   List<_ConnectionConfigPlan> _connectionPlans(VpnProfile profile) {
@@ -2080,6 +2129,8 @@ class _HomeScreenState extends State<HomeScreen>
     _healthWatchdogFailures = 0;
     _healthWatchdogCooldownUntil = null;
     _softRecoveryCooldownUntil = null;
+    _vlessEofEvents.clear();
+    _vlessEofFailoverRunning = false;
   }
 
   Future<void> _runHealthWatchdogTick() async {
@@ -2211,6 +2262,86 @@ class _HomeScreenState extends State<HomeScreen>
         _message = s.healthWatchdogWarning;
         _lastError = s.healthWatchdogWarning;
       });
+    }
+  }
+
+  void _observeRuntimeLogForFailover(String message) {
+    if (!Platform.isWindows || _status != YurichConnectStatus.started) {
+      return;
+    }
+    final profile = _selectedProfile;
+    if (profile == null || !VlessProfileTools.isVlessProfile(profile)) {
+      return;
+    }
+    final lower = message.toLowerCase();
+    if (!lower.contains('using outbound/vless[proxy]') ||
+        !lower.contains('eof')) {
+      return;
+    }
+
+    final now = DateTime.now();
+    _vlessEofEvents
+      ..removeWhere((time) => now.difference(time) > _vlessEofStormWindow)
+      ..add(now);
+
+    if (_vlessEofEvents.length < _vlessEofStormThreshold) {
+      return;
+    }
+
+    final cooldownUntil = _vlessEofFailoverCooldownUntil;
+    if (cooldownUntil != null && now.isBefore(cooldownUntil)) {
+      return;
+    }
+
+    unawaited(_handleVlessEofStorm(profile, _vlessEofEvents.length));
+  }
+
+  Future<void> _handleVlessEofStorm(VpnProfile profile, int count) async {
+    if (_vlessEofFailoverRunning || _busy || !mounted) {
+      return;
+    }
+
+    _vlessEofFailoverRunning = true;
+    _vlessEofFailoverCooldownUntil = DateTime.now().add(
+      _vlessEofStormFailoverCooldown,
+    );
+    _vlessEofEvents.clear();
+
+    const reason = 'vless_eof_storm';
+    try {
+      _setConnectionLifecycle(_ConnectionLifecycle.degraded, reason: reason);
+      _queueLog(
+        'VLESS EOF storm detected: $count EOF errors within '
+        '${_vlessEofStormWindow.inSeconds}s for '
+        '${_redactSensitive(profile.name)}. Profile will be quarantined for '
+        '${_vlessEofStormQuarantine.inMinutes}m and failover will try another server.',
+      );
+      await _recordProfileRuntimeFailure(
+        profile,
+        reason,
+        quarantineFor: _vlessEofStormQuarantine,
+      );
+
+      if (!mounted || _status != YurichConnectStatus.started) {
+        return;
+      }
+
+      await _runBusy(
+        () => _connectWithFailover(profile),
+        message: s.switchingProfile,
+      );
+    } on Object catch (error) {
+      _queueLog(
+        'VLESS EOF storm failover failed: ${_redactSensitive('$error')}',
+      );
+      if (mounted) {
+        setState(() {
+          _message = s.healthWatchdogWarning;
+          _lastError = s.healthWatchdogWarning;
+        });
+      }
+    } finally {
+      _vlessEofFailoverRunning = false;
     }
   }
 
@@ -3638,6 +3769,70 @@ if ($null -ne $match) { 'true' } else { 'false' }
     return processes.map(_redactSensitive).join(', ');
   }
 
+  String _summarizeCoreConfig(
+    String config, {
+    required SingBoxConfigTarget target,
+    required VpnCoreBackend coreBackend,
+  }) {
+    if (coreBackend == VpnCoreBackend.xray) {
+      return _summarizeXrayConfig(config, target: target);
+    }
+    return _summarizeSingBoxConfig(config, target: target);
+  }
+
+  String _summarizeXrayConfig(
+    String config, {
+    required SingBoxConfigTarget target,
+  }) {
+    try {
+      final decoded = jsonDecode(config);
+      if (decoded is! Map) {
+        return 'target=${target.name}; core=xray; raw/custom config';
+      }
+      final map = decoded.cast<String, dynamic>();
+      final inbounds = ((map['inbounds'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((item) => item.cast<String, dynamic>())
+          .toList();
+      final hasHttpProxy = inbounds.any(
+        (inbound) =>
+            inbound['protocol'] == 'http' &&
+            inbound['listen'] == '127.0.0.1' &&
+            inbound['port'] == SingBoxConfigBuilder.localMixedProxyPort,
+      );
+      final hasSocksProxy = inbounds.any(
+        (inbound) =>
+            inbound['protocol'] == 'socks' &&
+            inbound['listen'] == '127.0.0.1' &&
+            inbound['port'] == SingBoxConfigBuilder.localSocksProxyPort,
+      );
+      final outbounds = ((map['outbounds'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((item) => item.cast<String, dynamic>())
+          .toList();
+      final proxy = outbounds.firstWhere(
+        (outbound) => outbound['tag'] == 'proxy',
+        orElse: () =>
+            outbounds.isEmpty ? const <String, dynamic>{} : outbounds.first,
+      );
+      final stream =
+          (proxy['streamSettings'] as Map?)?.cast<String, dynamic>() ??
+          const <String, dynamic>{};
+      return [
+        'target=${target.name}',
+        'core=xray',
+        'mode=stable_proxy',
+        'proxy=${proxy['protocol'] ?? 'unknown'}',
+        'transport=${stream['network'] ?? 'raw'}',
+        'security=${stream['security'] ?? 'none'}',
+        'http_proxy=$hasHttpProxy',
+        'socks_proxy=$hasSocksProxy',
+      ].join('; ');
+    } on Object {
+      return 'target=${target.name}; core=xray; raw/custom config';
+    }
+  }
+
   String _summarizeSingBoxConfig(
     String config, {
     required SingBoxConfigTarget target,
@@ -3897,9 +4092,14 @@ if ($null -ne $match) { 'true' } else { 'false' }
 
   Future<void> _recordProfileRuntimeFailure(
     VpnProfile profile,
-    String reason,
-  ) async {
-    final stats = await _store.recordProfileRuntimeFailure(profile.id, reason);
+    String reason, {
+    Duration? quarantineFor,
+  }) async {
+    final stats = await _store.recordProfileRuntimeFailure(
+      profile.id,
+      reason,
+      quarantineFor: quarantineFor,
+    );
     _queueLog(
       'Profile stability updated: ${_redactSensitive(profile.name)} '
       'score=${stats.score} failures=${stats.failures} '

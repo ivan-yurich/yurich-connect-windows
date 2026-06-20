@@ -44,7 +44,7 @@ function Test-SafeInstallPath([string]$Path) {
 
 function Stop-YurichProcessFromPath([string]$InstallDir) {
   $prefix = (Get-FullPathSafe $InstallDir) + '\'
-  $names = @('YurichConnect.exe', 'AurumVPN.exe', 'sing-box.exe', 'naive.exe')
+  $names = @('YurichConnect.exe', 'AurumVPN.exe', 'sing-box.exe', 'naive.exe', 'xray.exe')
 
   Get-CimInstance Win32_Process |
     Where-Object {

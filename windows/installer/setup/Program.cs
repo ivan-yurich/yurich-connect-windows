@@ -11,12 +11,12 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.45";
+    private const string AppVersion = "1.0.46";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
     private const string LegacyUninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN";
-    private static readonly string[] AppProcessNames = ["YurichConnect", "AurumVPN", "sing-box", "naive"];
+    private static readonly string[] AppProcessNames = ["YurichConnect", "AurumVPN", "sing-box", "naive", "xray"];
     private static readonly string[] VisualRuntimeDlls =
     [
         "MSVCP140.dll",

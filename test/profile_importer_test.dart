@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/models/vpn_profile.dart';
 import 'package:yurich_connect_windows/src/services/profile_importer.dart';
 import 'package:yurich_connect_windows/src/services/sing_box_config_builder.dart';
+import 'package:yurich_connect_windows/src/services/xray_config_builder.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -57,20 +58,25 @@ void main() {
     });
   });
 
-  test('rejects VLESS XHTTP for bundled sing-box runtime', () async {
+  test('imports VLESS XHTTP for Xray backend', () async {
     const link =
-        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=www.example.com&pbk=abc123#XHTTP';
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=www.example.com&fp=chrome&pbk=abc123&path=%2Fxhttp&mode=auto#XHTTP';
 
-    expect(
-      () => ProfileImporter().importFromText(link),
-      throwsA(
-        isA<ProfileImportException>().having(
-          (error) => error.message,
-          'message',
-          contains('XHTTP'),
-        ),
-      ),
-    );
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+
+    expect(profile.coreBackend, VpnCoreBackend.xray);
+    expect(profile.outbound?['transport']['type'], 'xhttp');
+    expect(stream['network'], 'xhttp');
+    expect(stream['security'], 'reality');
+    expect(stream['xhttpSettings'], {
+      'host': 'www.example.com',
+      'path': '/xhttp',
+      'mode': 'auto',
+    });
   });
 
   test('rejects invalid VLESS flow before config start', () async {
@@ -1110,7 +1116,7 @@ void main() {
     });
   });
 
-  test('reports unsupported VLESS XHTTP from Xray JSON subscription', () async {
+  test('imports VLESS XHTTP from Xray JSON subscription', () async {
     final payload = jsonEncode([
       {
         'remarks': 'XHTTP',
@@ -1135,21 +1141,37 @@ void main() {
               'network': 'xhttp',
               'security': 'tls',
               'tlsSettings': {'serverName': 'cdn.example.com'},
+              'xhttpSettings': {
+                'host': 'cdn.example.com',
+                'path': '/xhttp',
+                'mode': 'stream-one',
+              },
             },
           },
         ],
       },
     ]);
 
-    expect(
-      () => ProfileImporter().importFromText(payload),
-      throwsA(
-        isA<ProfileImportException>().having(
-          (error) => error.message,
-          'message',
-          contains('XHTTP'),
-        ),
-      ),
-    );
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+    final config =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+
+    expect(profile.coreBackend, VpnCoreBackend.xray);
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(profile.outbound?['transport'], {
+      'type': 'xhttp',
+      'host': 'cdn.example.com',
+      'path': '/xhttp',
+      'mode': 'stream-one',
+    });
+    expect(stream['network'], 'xhttp');
+    expect(stream['security'], 'tls');
+    expect(stream['xhttpSettings'], {
+      'host': 'cdn.example.com',
+      'path': '/xhttp',
+      'mode': 'stream-one',
+    });
   });
 }

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../branding.dart';
+import '../models/vpn_profile.dart';
 import 'secret_redactor.dart';
 import 'sing_box_config_builder.dart';
 import 'vpn_engine.dart';
@@ -20,6 +21,7 @@ class WindowsSingBoxEngine implements VpnEngine {
   String _status = YurichConnectStatus.stopped;
   String _config = '{}';
   String? _naiveProxyConfig;
+  VpnCoreBackend _coreBackend = VpnCoreBackend.singBox;
   String _notificationTitle = YurichBranding.appName;
   String _notificationDescription = 'VPN connection is active';
   Timer? _trafficTimer;
@@ -95,10 +97,17 @@ class WindowsSingBoxEngine implements VpnEngine {
   }
 
   @override
-  Future<bool> saveConfig(String config, {String? naiveProxyConfig}) async {
+  Future<bool> saveConfig(
+    String config, {
+    String? naiveProxyConfig,
+    VpnCoreBackend coreBackend = VpnCoreBackend.singBox,
+  }) async {
     _config = config;
     _naiveProxyConfig = naiveProxyConfig;
-    _lastConfigNeedsTun = _configNeedsTun(config);
+    _coreBackend = coreBackend == VpnCoreBackend.auto
+        ? VpnCoreBackend.singBox
+        : coreBackend;
+    _lastConfigNeedsTun = _usesXrayCore ? false : _configNeedsTun(config);
     return config.trim().isNotEmpty;
   }
 
@@ -123,12 +132,20 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
   }
 
+  bool get _usesXrayCore => _coreBackend == VpnCoreBackend.xray;
+
+  String get _coreProcessName => _usesXrayCore ? 'xray' : 'sing-box';
+
+  String get _coreExeName => _usesXrayCore ? 'xray.exe' : 'sing-box.exe';
+
+  String get _coreLogFileName => _usesXrayCore ? 'xray.log' : 'sing-box.log';
+
   @override
   Future<bool> startVPN() async {
     final startStopwatch = Stopwatch()..start();
     if (_process != null) {
       _appendLog(
-        'Start skipped: sing-box is already tracked with PID $_processPid.',
+        'Start skipped: $_coreProcessName is already tracked with PID $_processPid.',
       );
       return true;
     }
@@ -151,22 +168,27 @@ class WindowsSingBoxEngine implements VpnEngine {
         'Startup stale process cleanup finished in ${staleStopwatch.elapsedMilliseconds}ms.',
       );
 
-      final configFile = File('${configDir.path}\\config.json');
-      final effectiveConfig = await _prepareConfigWithGeoIpFallback(
-        runtimeDir,
-        configDir,
-        _config,
+      final configFile = File(
+        '${configDir.path}\\${_usesXrayCore ? 'xray.json' : 'config.json'}',
       );
-      final needsTun = _configNeedsTun(effectiveConfig);
+      final effectiveConfig = _usesXrayCore
+          ? _config
+          : await _prepareConfigWithGeoIpFallback(
+              runtimeDir,
+              configDir,
+              _config,
+            );
+      final needsTun = !_usesXrayCore && _configNeedsTun(effectiveConfig);
       _lastConfigNeedsTun = needsTun;
       await configFile.writeAsString(effectiveConfig, encoding: utf8);
 
-      final needsNaiveProxy = _naiveProxyConfig != null;
+      final needsNaiveProxy = !_usesXrayCore && _naiveProxyConfig != null;
       final preflightOk = await _runPreflight(
         runtimeDir,
         configFile,
         needsNaiveProxy: needsNaiveProxy,
         needsTun: needsTun,
+        coreBackend: _coreBackend,
       );
       if (!preflightOk) {
         if (_status != YurichConnectStatus.adminRequired) {
@@ -183,14 +205,14 @@ class WindowsSingBoxEngine implements VpnEngine {
         }
       }
 
-      final exe = File('${runtimeDir.path}\\sing-box.exe');
+      final exe = File('${runtimeDir.path}\\$_coreExeName');
       if (!await exe.exists()) {
-        _appendLog('sing-box.exe не найден в ${runtimeDir.path}');
+        _appendLog('$_coreExeName не найден в ${runtimeDir.path}');
         _setStatus(YurichConnectStatus.stopped);
         return false;
       }
 
-      if (_shouldRunStartupCanary(effectiveConfig)) {
+      if (!_usesXrayCore && _shouldRunStartupCanary(effectiveConfig)) {
         var canary = await _runStartupCanary(exe, configFile, runtimeDir);
         if (!canary.ok && canary.suggestsDnsFallback) {
           final fallbackConfig = _safeDnsFallbackConfig(effectiveConfig);
@@ -206,6 +228,7 @@ class WindowsSingBoxEngine implements VpnEngine {
               configFile,
               needsNaiveProxy: needsNaiveProxy,
               needsTun: _lastConfigNeedsTun,
+              coreBackend: _coreBackend,
             );
             if (!fallbackPreflightOk) {
               if (_status != YurichConnectStatus.adminRequired) {
@@ -240,29 +263,33 @@ class WindowsSingBoxEngine implements VpnEngine {
         }
       }
 
-      _appendLog('Starting sing-box ${exe.path}');
+      _appendLog('Starting $_coreProcessName ${exe.path}');
       _appendLog(
         needsTun
             ? 'Advanced TUN Mode preflight passed.'
+            : _usesXrayCore
+            ? 'Stable Proxy Mode preflight passed for Xray-core backend.'
             : 'Stable Proxy Mode preflight passed.',
       );
       final process = await Process.start(
         exe.path,
-        ['run', '-c', configFile.path],
+        _usesXrayCore
+            ? ['-c', configFile.path]
+            : ['run', '-c', configFile.path],
         workingDirectory: runtimeDir.path,
         runInShell: false,
       );
       _process = process;
       _processPid = process.pid;
-      _appendLog('sing-box PID ${process.pid}');
+      _appendLog('$_coreProcessName PID ${process.pid}');
       _pipeProcess(process);
       _startTrafficTicker();
 
       unawaited(
         process.exitCode.then((code) async {
-          _appendLog('sing-box exited with code $code');
+          _appendLog('$_coreProcessName exited with code $code');
           if (_status != YurichConnectStatus.stopping) {
-            _recordRuntimeFailure('sing-box', code);
+            _recordRuntimeFailure(_coreProcessName, code);
           }
           if (_process == process) {
             _process = null;
@@ -292,7 +319,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       }
       return false;
     } on Object catch (e) {
-      _appendLog('Не удалось запустить sing-box: $e');
+      _appendLog('Не удалось запустить $_coreProcessName: $e');
       await _stopNaiveProxy();
       if (_status != YurichConnectStatus.adminRequired) {
         _setStatus(YurichConnectStatus.error);
@@ -313,22 +340,28 @@ class WindowsSingBoxEngine implements VpnEngine {
     try {
       final runtimeDir = await _runtimeDir();
       final configDir = await _configDir();
-      final configFile = File('${configDir.path}\\config.json');
-      final effectiveConfig = await _prepareConfigWithGeoIpFallback(
-        runtimeDir,
-        configDir,
-        _config,
+      final configFile = File(
+        '${configDir.path}\\${_usesXrayCore ? 'xray.json' : 'config.json'}',
       );
-      _lastConfigNeedsTun = _configNeedsTun(effectiveConfig);
+      final effectiveConfig = _usesXrayCore
+          ? _config
+          : await _prepareConfigWithGeoIpFallback(
+              runtimeDir,
+              configDir,
+              _config,
+            );
+      _lastConfigNeedsTun = !_usesXrayCore && _configNeedsTun(effectiveConfig);
       await configFile.writeAsString(effectiveConfig, encoding: utf8);
 
-      final exe = File('${runtimeDir.path}\\sing-box.exe');
+      final exe = File('${runtimeDir.path}\\$_coreExeName');
       if (!await exe.exists()) {
-        _appendLog('Warm config check failed: sing-box.exe не найден.');
+        _appendLog('Warm config check failed: $_coreExeName не найден.');
         return false;
       }
 
-      final ok = await _checkConfig(exe, configFile, runtimeDir);
+      final ok = _usesXrayCore
+          ? await _checkXrayConfig(exe, configFile, runtimeDir)
+          : await _checkConfig(exe, configFile, runtimeDir);
       _appendLog(
         'Warm config check ${ok ? 'passed' : 'failed'} in ${stopwatch.elapsedMilliseconds}ms.',
       );
@@ -388,17 +421,19 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
 
     _setStatus(YurichConnectStatus.stopping);
-    _appendLog('Stopping sing-box...');
+    _appendLog('Stopping $_coreProcessName...');
     process.kill();
     try {
       await process.exitCode.timeout(gracefulTimeout);
     } on TimeoutException {
-      _appendLog('sing-box did not exit in time; killing PID $_processPid.');
+      _appendLog(
+        '$_coreProcessName did not exit in time; killing PID $_processPid.',
+      );
       process.kill(ProcessSignal.sigkill);
       try {
         await process.exitCode.timeout(killTimeout);
       } on TimeoutException {
-        _appendLog('sing-box kill timeout for PID $_processPid.');
+        _appendLog('$_coreProcessName kill timeout for PID $_processPid.');
       }
     }
     _process = null;
@@ -476,20 +511,22 @@ class WindowsSingBoxEngine implements VpnEngine {
   Future<bool> softRecoverConnection() async {
     _appendLog('Soft recovery started: no core restart.');
     if (_process == null) {
-      _appendLog('Soft recovery skipped: sing-box is not tracked.');
+      _appendLog('Soft recovery skipped: $_coreProcessName is not tracked.');
       return false;
     }
 
     await _flushDnsCache();
-    unawaited(_trafficSocket?.close());
-    _trafficSocket = null;
-    _trafficSocketConnecting = false;
-    unawaited(_connectTrafficSocket());
+    if (!_usesXrayCore) {
+      unawaited(_trafficSocket?.close());
+      _trafficSocket = null;
+      _trafficSocketConnecting = false;
+      unawaited(_connectTrafficSocket());
+    }
 
     final ports = <int>[
       SingBoxConfigBuilder.localMixedProxyPort,
       SingBoxConfigBuilder.localSocksProxyPort,
-      SingBoxConfigBuilder.windowsClashApiPort,
+      if (!_usesXrayCore) SingBoxConfigBuilder.windowsClashApiPort,
     ];
     final checks = await Future.wait(
       ports.map((port) => _checkTcpPortOpen('127.0.0.1', port)),
@@ -497,7 +534,8 @@ class WindowsSingBoxEngine implements VpnEngine {
     final ok = checks.every((value) => value);
     _appendLog(
       'Soft recovery ${ok ? 'passed' : 'degraded'}: '
-      'mixed=${checks[0]} socks=${checks[1]} clash=${checks[2]}.',
+      'mixed=${checks[0]} socks=${checks[1]}'
+      '${_usesXrayCore ? '' : ' clash=${checks[2]}'}.',
     );
     return ok;
   }
@@ -590,7 +628,12 @@ class WindowsSingBoxEngine implements VpnEngine {
   }
 
   Future<void> _cleanupTemporaryConfigs(Directory configDir) async {
-    final names = ['config.json', 'naive.json', 'geoip-ru.srs.download'];
+    final names = [
+      'config.json',
+      'xray.json',
+      'naive.json',
+      'geoip-ru.srs.download',
+    ];
     for (final name in names) {
       final file = File('${configDir.path}\\$name');
       try {
@@ -627,6 +670,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     File configFile, {
     required bool needsNaiveProxy,
     required bool needsTun,
+    required VpnCoreBackend coreBackend,
   }) async {
     final stopwatch = Stopwatch()..start();
     _appendLog('Windows preflight check started.');
@@ -658,6 +702,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       runtimeDir,
       needsNaiveProxy: needsNaiveProxy,
       needsTun: needsTun,
+      coreBackend: coreBackend,
     );
     if (missingRuntime.isNotEmpty) {
       return fail(
@@ -672,16 +717,27 @@ class WindowsSingBoxEngine implements VpnEngine {
       );
     }
 
-    final busyPorts = await _busyLocalPorts(needsNaiveProxy: needsNaiveProxy);
+    final busyPorts = await _busyLocalPorts(
+      needsNaiveProxy: needsNaiveProxy,
+      coreBackend: coreBackend,
+    );
     if (busyPorts.isNotEmpty) {
       return fail(
         'Preflight failed: заняты локальные порты ${busyPorts.join(', ')}. Закрой другой прокси/VPN или перезапусти Windows.',
       );
     }
 
-    final exe = File('${runtimeDir.path}\\sing-box.exe');
-    if (!await _checkConfig(exe, configFile, runtimeDir)) {
-      return fail('Preflight failed: sing-box config check failed.');
+    final usesXrayCore = coreBackend == VpnCoreBackend.xray;
+    final exe = File(
+      '${runtimeDir.path}\\${usesXrayCore ? 'xray.exe' : 'sing-box.exe'}',
+    );
+    final configOk = usesXrayCore
+        ? await _checkXrayConfig(exe, configFile, runtimeDir)
+        : await _checkConfig(exe, configFile, runtimeDir);
+    if (!configOk) {
+      return fail(
+        'Preflight failed: ${usesXrayCore ? 'Xray' : 'sing-box'} config check failed.',
+      );
     }
 
     _appendLog(
@@ -883,13 +939,16 @@ class WindowsSingBoxEngine implements VpnEngine {
     Directory runtimeDir, {
     required bool needsNaiveProxy,
     required bool needsTun,
+    required VpnCoreBackend coreBackend,
   }) async {
-    final names = [
-      'sing-box.exe',
-      'libcronet.dll',
-      if (needsTun) 'wintun.dll',
-      if (needsNaiveProxy) 'naive.exe',
-    ];
+    final names = coreBackend == VpnCoreBackend.xray
+        ? ['xray.exe']
+        : [
+            'sing-box.exe',
+            'libcronet.dll',
+            if (needsTun) 'wintun.dll',
+            if (needsNaiveProxy) 'naive.exe',
+          ];
     final missing = <String>[];
     for (final name in names) {
       if (!await File('${runtimeDir.path}\\$name').exists()) {
@@ -914,11 +973,15 @@ class WindowsSingBoxEngine implements VpnEngine {
     return missing;
   }
 
-  Future<List<int>> _busyLocalPorts({required bool needsNaiveProxy}) async {
+  Future<List<int>> _busyLocalPorts({
+    required bool needsNaiveProxy,
+    required VpnCoreBackend coreBackend,
+  }) async {
     final ports = <int>[
       SingBoxConfigBuilder.localMixedProxyPort,
       SingBoxConfigBuilder.localSocksProxyPort,
-      SingBoxConfigBuilder.windowsClashApiPort,
+      if (coreBackend != VpnCoreBackend.xray)
+        SingBoxConfigBuilder.windowsClashApiPort,
       if (needsNaiveProxy) SingBoxConfigBuilder.naiveProxySocksPort,
     ];
     final busy = <int>[];
@@ -1128,6 +1191,72 @@ class WindowsSingBoxEngine implements VpnEngine {
     return false;
   }
 
+  Future<bool> _checkXrayConfig(
+    File exe,
+    File configFile,
+    Directory runtimeDir,
+  ) async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final fingerprint = await _configCheckFingerprint(exe, configFile);
+      final cached = _configCheckCache[fingerprint];
+      if (cached == true) {
+        _appendLog(
+          'Xray config check cache hit in ${stopwatch.elapsedMilliseconds}ms.',
+        );
+        return true;
+      }
+
+      final attempts = <List<String>>[
+        ['-test', '-c', configFile.path],
+        ['run', '-test', '-c', configFile.path],
+      ];
+      var lastOutput = '';
+      var unsupportedCli = false;
+      for (final args in attempts) {
+        final result = await Process.run(
+          exe.path,
+          args,
+          workingDirectory: runtimeDir.path,
+          runInShell: false,
+        ).timeout(const Duration(seconds: 12));
+        final output = '${result.stdout}${result.stderr}'.trim();
+        if (result.exitCode == 0) {
+          _configCheckCache[fingerprint] = true;
+          if (_configCheckCache.length > 24) {
+            _configCheckCache.remove(_configCheckCache.keys.first);
+          }
+          _appendLog(
+            'Xray config check passed in ${stopwatch.elapsedMilliseconds}ms.',
+          );
+          return true;
+        }
+        lastOutput = output.isEmpty
+            ? 'Xray config check failed with code ${result.exitCode}'
+            : output;
+        final lower = lastOutput.toLowerCase();
+        unsupportedCli =
+            lower.contains('unknown command') ||
+            lower.contains('flag provided but not defined') ||
+            lower.contains('unknown shorthand') ||
+            lower.contains('unknown flag');
+        if (!unsupportedCli) {
+          break;
+        }
+      }
+
+      _configCheckCache.remove(fingerprint);
+      _appendLog('Xray config check failed: $lastOutput');
+      _emitUserAlert(_friendlyXrayConfigError(lastOutput));
+    } on Object catch (e) {
+      _appendLog('Xray config check failed: $e');
+      _emitUserAlert(
+        'Xray-конфиг повреждён. Импортируйте VLESS профиль заново.',
+      );
+    }
+    return false;
+  }
+
   Future<String> _configCheckFingerprint(File exe, File configFile) async {
     final exeStat = await exe.stat();
     final config = await configFile.readAsString(encoding: utf8);
@@ -1160,7 +1289,8 @@ class WindowsSingBoxEngine implements VpnEngine {
     if (lower.contains('flow')) {
       return 'Ошибка VLESS: неподдерживаемый flow. Поддерживается xtls-rprx-vision.';
     }
-    if (lower.contains('packet_encoding') || lower.contains('packet encoding')) {
+    if (lower.contains('packet_encoding') ||
+        lower.contains('packet encoding')) {
       return 'Ошибка VLESS: неподдерживаемый packet_encoding. Доступны packetaddr или xudp.';
     }
     if (lower.contains('transport')) {
@@ -1182,6 +1312,23 @@ class WindowsSingBoxEngine implements VpnEngine {
       return 'Ошибка NaiveProxy: неверный формат ссылки.';
     }
     return 'Конфиг повреждён. Импортируйте профиль заново.';
+  }
+
+  String _friendlyXrayConfigError(String output) {
+    final lower = output.toLowerCase();
+    if (lower.contains('xhttp')) {
+      return 'Ошибка VLESS XHTTP: проверь path, host, mode и настройки сервера.';
+    }
+    if (lower.contains('reality')) {
+      return 'Ошибка Reality для Xray: проверь SNI, publicKey, shortId и fingerprint.';
+    }
+    if (lower.contains('vless')) {
+      return 'Ошибка VLESS профиля для Xray. Импортируйте ссылку заново.';
+    }
+    if (lower.contains('address') || lower.contains('port')) {
+      return 'В Xray профиле отсутствует адрес или порт сервера.';
+    }
+    return 'Xray-конфиг повреждён. Импортируйте VLESS профиль заново.';
   }
 
   String _friendlyStartupFailure(String output) {
@@ -1241,7 +1388,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     final script =
         '''
 \$runtimePrefix = ${_quotePowerShell(runtimePrefix)}
-\$names = @('sing-box.exe', 'naive.exe')
+\$names = @('sing-box.exe', 'naive.exe', 'xray.exe')
 \$stopped = 0
 Get-CimInstance Win32_Process |
   Where-Object {
@@ -1297,11 +1444,11 @@ Write-Output \$stopped
     process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) => _appendLog(line, fileName: 'sing-box.log'));
+        .listen((line) => _appendLog(line, fileName: _coreLogFileName));
     process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) => _appendLog(line, fileName: 'sing-box.log'));
+        .listen((line) => _appendLog(line, fileName: _coreLogFileName));
   }
 
   Future<bool> _startNaiveProxy(
@@ -1447,6 +1594,12 @@ Write-Output \$stopped
     _stopTrafficTicker();
     _sessionTotalBytes = 0;
     _emitTraffic(0, 0);
+    if (_usesXrayCore) {
+      _appendLog(
+        'Traffic monitor: Xray backend has no Clash API traffic feed.',
+      );
+      return;
+    }
     _trafficTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_process != null &&
           _trafficSocket == null &&
@@ -1557,16 +1710,20 @@ Write-Output \$stopped
   Future<Directory> _runtimeDir() async {
     final executableDir = File(Platform.resolvedExecutable).parent;
     final bundledRuntime = Directory('${executableDir.path}\\runtime');
-    if (await File('${bundledRuntime.path}\\sing-box.exe').exists()) {
+    if (await File('${bundledRuntime.path}\\sing-box.exe').exists() ||
+        await File('${bundledRuntime.path}\\xray.exe').exists()) {
       return bundledRuntime;
     }
 
     final projectRuntime = Directory('assets\\windows\\sing-box');
-    if (await File('${projectRuntime.path}\\sing-box.exe').exists()) {
+    if (await File('${projectRuntime.path}\\sing-box.exe').exists() ||
+        await File('${projectRuntime.path}\\xray.exe').exists()) {
       return projectRuntime.absolute;
     }
 
-    throw StateError('Windows runtime не найден. Нужен sing-box.exe.');
+    throw StateError(
+      'Windows runtime не найден. Нужен sing-box.exe или xray.exe.',
+    );
   }
 
   Future<Directory> _configDir() async {

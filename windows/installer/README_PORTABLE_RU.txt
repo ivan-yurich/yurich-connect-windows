@@ -22,6 +22,7 @@ START_YURICH_CONNECT.cmd оставлен для совместимости. О�
 
 - %APPDATA%\Yurich Connect\logs\yurich.log
 - %APPDATA%\Yurich Connect\logs\sing-box.log
+- %APPDATA%\Yurich Connect\logs\xray.log
 - %APPDATA%\Yurich Connect\logs\naive.log
 
 Диагностика:

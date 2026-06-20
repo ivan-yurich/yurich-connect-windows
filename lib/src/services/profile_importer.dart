@@ -454,6 +454,13 @@ class ProfileImporter {
       case 'xhttp':
       case 'splithttp':
         query['type'] = 'xhttp';
+        settings =
+            _asMap(stream['xhttpSettings']) ??
+            _asMap(stream['splithttpSettings']);
+        _putIfNotEmpty(query, 'host', settings?['host']);
+        _putIfNotEmpty(query, 'path', settings?['path']);
+        _putIfNotEmpty(query, 'mode', settings?['mode']);
+        _putIfNotEmpty(query, 'extra', settings?['extra']);
         break;
     }
   }
@@ -580,6 +587,17 @@ class ProfileImporter {
     if (transport != null) {
       outbound['transport'] = transport;
     }
+    final transportType = VlessProfileTools.safeTransportType(
+      VpnProfile(
+        id: '_import_probe',
+        name: name,
+        kind: security == 'reality'
+            ? VpnProfileKind.vlessReality
+            : VpnProfileKind.vlessTls,
+        originalInput: link,
+        outbound: outbound,
+      ),
+    );
 
     return VpnProfile(
       id: _stableId(link),
@@ -591,6 +609,9 @@ class ProfileImporter {
       server: uri.host,
       port: port,
       outbound: outbound,
+      coreBackend: transportType == 'xhttp'
+          ? VpnCoreBackend.xray
+          : VpnCoreBackend.auto,
       expiresAt: _resolveExpiresAt(
         defaultValue: expiresAt,
         candidates: [_extractExpiryFromQuery(query)],
@@ -1059,12 +1080,22 @@ class ProfileImporter {
       };
     }
 
+    if (type == 'xhttp') {
+      return {
+        'type': 'xhttp',
+        if ((query['host'] ?? '').isNotEmpty) 'host': query['host'],
+        if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
+        if ((query['mode'] ?? '').isNotEmpty) 'mode': query['mode'],
+        if ((query['extra'] ?? '').isNotEmpty) 'extra': query['extra'],
+      };
+    }
+
     throw ProfileImportException('Transport "$type" пока не поддержан.');
   }
 
   String _normalizeVlessTransportType(String? value) {
     try {
-      return VlessProfileTools.normalizeTransportType(value);
+      return VlessProfileTools.normalizeImportTransportType(value);
     } on Object catch (error) {
       throw ProfileImportException(_vlessToolError(error));
     }
