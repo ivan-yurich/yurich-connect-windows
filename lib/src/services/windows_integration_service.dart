@@ -495,17 +495,22 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
       await target.parent.create(recursive: true);
     }
 
-    Object? lastError;
-    for (final viaLocalProxy in const [false, true]) {
+    if (await _isValidDownloadedInstaller(target, update.installerSize)) {
+      return target;
+    }
+
+    final errors = <String>[];
+    Future<File?> tryDownload(
+      String label,
+      Future<File> Function() action,
+    ) async {
       try {
-        return await _downloadInstaller(
-          update,
-          target: target,
-          partial: partial,
-          viaLocalProxy: viaLocalProxy,
-        );
+        if (await partial.exists()) {
+          await partial.delete();
+        }
+        return await action();
       } on Object catch (error) {
-        lastError = error;
+        errors.add('$label: ${_shortUpdateError(error)}');
         try {
           if (await partial.exists()) {
             await partial.delete();
@@ -513,9 +518,63 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         } on Object {
           // Best-effort cleanup of an incomplete update payload.
         }
+        return null;
       }
     }
-    throw StateError('Could not download update installer: $lastError');
+
+    for (final viaLocalProxy in const [false, true]) {
+      final result = await tryDownload(
+        'Dart ${_updateRouteLabel(viaLocalProxy)}',
+        () => _downloadInstaller(
+          update,
+          target: target,
+          partial: partial,
+          viaLocalProxy: viaLocalProxy,
+        ),
+      );
+      if (result != null) {
+        return result;
+      }
+    }
+
+    if (Platform.isWindows) {
+      for (final viaLocalProxy in const [false, true]) {
+        final result = await tryDownload(
+          'curl.exe ${_updateRouteLabel(viaLocalProxy)}',
+          () => _downloadInstallerWithCurl(
+            update,
+            target: target,
+            partial: partial,
+            viaLocalProxy: viaLocalProxy,
+          ),
+        );
+        if (result != null) {
+          return result;
+        }
+      }
+
+      for (final viaLocalProxy in const [false, true]) {
+        final result = await tryDownload(
+          'PowerShell ${_updateRouteLabel(viaLocalProxy)}',
+          () => _downloadInstallerWithPowerShell(
+            update,
+            target: target,
+            partial: partial,
+            viaLocalProxy: viaLocalProxy,
+          ),
+        );
+        if (result != null) {
+          return result;
+        }
+      }
+    }
+
+    final details = errors.take(6).join('; ');
+    throw StateError(
+      details.isEmpty
+          ? 'Could not download update installer.'
+          : 'Could not download update installer. Tried ${errors.length} methods. $details',
+    );
   }
 
   Future<File> _downloadInstaller(
@@ -537,24 +596,14 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         throw StateError('GitHub asset returned HTTP ${response.statusCode}.');
       }
 
-      await response.pipe(partial.openWrite());
-      final expectedSize = update.installerSize;
-      final actualSize = await partial.length();
-      if (expectedSize != null && actualSize != expectedSize) {
-        throw StateError(
-          'Downloaded installer size mismatch: $actualSize of $expectedSize bytes.',
-        );
-      }
-      if (actualSize < 1024 * 1024) {
-        throw StateError(
-          'Downloaded installer is too small: $actualSize bytes.',
-        );
-      }
-      if (await target.exists()) {
-        await target.delete();
-      }
-      await partial.rename(target.path);
-      return target;
+      await response
+          .pipe(partial.openWrite())
+          .timeout(const Duration(minutes: 15));
+      return await _finalizeDownloadedInstaller(
+        target,
+        partial,
+        update.installerSize,
+      );
     } on Object {
       try {
         if (await partial.exists()) {
@@ -567,6 +616,124 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<File> _downloadInstallerWithCurl(
+    WindowsUpdateInfo update, {
+    required File target,
+    required File partial,
+    required bool viaLocalProxy,
+  }) async {
+    final args = <String>[
+      '--fail',
+      '--location',
+      '--show-error',
+      '--silent',
+      '--connect-timeout',
+      '30',
+      '--max-time',
+      '900',
+      '--retry',
+      '3',
+      '--retry-delay',
+      '2',
+      '--retry-all-errors',
+      '--tlsv1.2',
+      '--ssl-no-revoke',
+      '--proto',
+      '=https',
+      '--user-agent',
+      'YurichConnect updater',
+      '--output',
+      partial.path,
+    ];
+    if (viaLocalProxy) {
+      args.addAll([
+        '--proxy',
+        'http://127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}',
+      ]);
+    } else {
+      args.addAll(['--noproxy', '*']);
+    }
+    args.add(update.installerUrl!.toString());
+
+    final result = await Process.run(
+      'curl.exe',
+      args,
+    ).timeout(const Duration(minutes: 16));
+    if (result.exitCode != 0) {
+      final output = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        output.isEmpty
+            ? 'curl.exe exited with code ${result.exitCode}.'
+            : 'curl.exe exited with code ${result.exitCode}: $output',
+      );
+    }
+    return _finalizeDownloadedInstaller(target, partial, update.installerSize);
+  }
+
+  Future<File> _downloadInstallerWithPowerShell(
+    WindowsUpdateInfo update, {
+    required File target,
+    required File partial,
+    required bool viaLocalProxy,
+  }) async {
+    final url = _quotePowerShell(update.installerUrl!.toString());
+    final outFile = _quotePowerShell(partial.path);
+    final proxy = viaLocalProxy
+        ? "-Proxy ${_quotePowerShell('http://127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}')}"
+        : '';
+    final script =
+        '''
+\$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 900 -Headers @{ 'User-Agent' = 'YurichConnect updater' } $proxy
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(minutes: 16),
+    );
+    if (result.exitCode != 0) {
+      final output = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        output.isEmpty
+            ? 'PowerShell downloader exited with code ${result.exitCode}.'
+            : output,
+      );
+    }
+    return _finalizeDownloadedInstaller(target, partial, update.installerSize);
+  }
+
+  Future<File> _finalizeDownloadedInstaller(
+    File target,
+    File partial,
+    int? expectedSize,
+  ) async {
+    final actualSize = await partial.length();
+    if (expectedSize != null && actualSize != expectedSize) {
+      throw StateError(
+        'Downloaded installer size mismatch: $actualSize of $expectedSize bytes.',
+      );
+    }
+    if (actualSize < 1024 * 1024) {
+      throw StateError('Downloaded installer is too small: $actualSize bytes.');
+    }
+    if (await target.exists()) {
+      await target.delete();
+    }
+    await partial.rename(target.path);
+    return target;
+  }
+
+  Future<bool> _isValidDownloadedInstaller(File file, int? expectedSize) async {
+    if (!await file.exists()) {
+      return false;
+    }
+    final size = await file.length();
+    if (size < 1024 * 1024) {
+      return false;
+    }
+    return expectedSize == null || size == expectedSize;
   }
 
   HttpClient _githubHttpClient({required bool viaLocalProxy}) {
@@ -591,6 +758,14 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
 
   String _updateRouteLabel(bool viaLocalProxy) {
     return viaLocalProxy ? 'local VPN proxy' : 'direct';
+  }
+
+  String _shortUpdateError(Object error) {
+    final text = '$error'.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.length <= 260) {
+      return text;
+    }
+    return '${text.substring(0, 260)}...';
   }
 
   Future<void> runInstallerAsAdmin(File installer) async {
