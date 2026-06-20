@@ -18,6 +18,16 @@ extension VpnProfileKindLabel on VpnProfileKind {
   };
 }
 
+enum VpnCoreBackend { auto, singBox, xray }
+
+extension VpnCoreBackendLabel on VpnCoreBackend {
+  String get label => switch (this) {
+    VpnCoreBackend.auto => 'Yurich Core Auto',
+    VpnCoreBackend.singBox => 'sing-box',
+    VpnCoreBackend.xray => 'Xray-core',
+  };
+}
+
 class VpnProfile {
   const VpnProfile({
     required this.id,
@@ -30,6 +40,7 @@ class VpnProfile {
     this.rawConfig,
     this.expiresAt,
     this.subscriptionSource,
+    this.coreBackend = VpnCoreBackend.auto,
   });
 
   final String id;
@@ -42,6 +53,7 @@ class VpnProfile {
   final String? rawConfig;
   final DateTime? expiresAt;
   final String? subscriptionSource;
+  final VpnCoreBackend coreBackend;
 
   String get endpoint {
     if (server == null || server!.isEmpty) {
@@ -65,6 +77,7 @@ class VpnProfile {
       rawConfig: rawConfig,
       expiresAt: value,
       subscriptionSource: subscriptionSource,
+      coreBackend: coreBackend,
     );
   }
 
@@ -83,6 +96,7 @@ class VpnProfile {
       rawConfig: rawConfig,
       expiresAt: expiresAt,
       subscriptionSource: value.trim(),
+      coreBackend: coreBackend,
     );
   }
 
@@ -98,12 +112,15 @@ class VpnProfile {
       'rawConfig': rawConfig,
       'expiresAt': expiresAt?.toIso8601String(),
       'subscriptionSource': subscriptionSource,
+      'coreBackend': coreBackend.name,
     };
   }
 
   factory VpnProfile.fromJson(Map<String, dynamic> json) {
     final kindName =
         json['kind'] as String? ?? VpnProfileKind.vlessReality.name;
+    final coreBackendName =
+        json['coreBackend'] as String? ?? VpnCoreBackend.auto.name;
     return VpnProfile(
       id: json['id'] as String,
       name: json['name'] as String,
@@ -120,6 +137,10 @@ class VpnProfile {
       expiresAt: json['expiresAt'] == null
           ? null
           : DateTime.tryParse(json['expiresAt'] as String),
+      coreBackend: VpnCoreBackend.values.firstWhere(
+        (value) => value.name == coreBackendName,
+        orElse: () => VpnCoreBackend.auto,
+      ),
     );
   }
 }

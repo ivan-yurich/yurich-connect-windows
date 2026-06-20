@@ -11,9 +11,10 @@ class VlessProfileTools {
     'http',
     'httpupgrade',
   };
+  static const xrayOnlyTransports = {'xhttp', 'splithttp'};
   static const supportedPacketEncodings = {'packetaddr', 'xudp'};
   static const unsupportedXhttpMessage =
-      'VLESS XHTTP пока не поддерживается bundled sing-box. Для XHTTP нужен отдельный Xray-core backend.';
+      'VLESS XHTTP требует Xray-core backend. Обычный sing-box backend поддерживает TCP/WS/gRPC/HTTP/HTTPUpgrade.';
 
   static bool isVlessKind(VpnProfileKind kind) =>
       kind == VpnProfileKind.vlessReality || kind == VpnProfileKind.vlessTls;
@@ -29,6 +30,17 @@ class VlessProfileTools {
   }
 
   static String normalizeTransportType(String? value) {
+    final type = normalizeImportTransportType(value);
+    if (xrayOnlyTransports.contains(type)) {
+      throw StateError(unsupportedXhttpMessage);
+    }
+    if (!supportedTransports.contains(type)) {
+      throw StateError('VLESS transport "$type" не поддерживается.');
+    }
+    return type;
+  }
+
+  static String normalizeImportTransportType(String? value) {
     final type = (value ?? 'tcp').trim().toLowerCase();
     if (type.isEmpty || type == 'tcp') {
       return 'tcp';
@@ -36,8 +48,11 @@ class VlessProfileTools {
     if (type == 'h2') {
       return 'http';
     }
+    if (type == 'websocket') {
+      return 'ws';
+    }
     if (type == 'splithttp' || type == 'xhttp') {
-      throw StateError(unsupportedXhttpMessage);
+      return 'xhttp';
     }
     if (!supportedTransports.contains(type)) {
       throw StateError('VLESS transport "$type" не поддерживается.');
@@ -48,13 +63,13 @@ class VlessProfileTools {
   static String transportTypeFromOutbound(Map<String, dynamic>? outbound) {
     final transport = (outbound?['transport'] as Map?)?.cast<String, dynamic>();
     if (transport != null) {
-      return normalizeTransportType('${transport['type'] ?? 'tcp'}');
+      return normalizeImportTransportType('${transport['type'] ?? 'tcp'}');
     }
     final network = '${outbound?['network'] ?? ''}'.trim().toLowerCase();
     if (network.isEmpty || network == 'tcp' || network == 'udp') {
       return 'tcp';
     }
-    return normalizeTransportType(network);
+    return normalizeImportTransportType(network);
   }
 
   static String transportType(VpnProfile profile) =>
@@ -75,8 +90,26 @@ class VlessProfileTools {
       'grpc' => 'gRPC',
       'http' => 'HTTP/H2',
       'httpupgrade' => 'HTTPUpgrade',
+      'xhttp' => 'XHTTP',
       _ => 'TCP',
     };
+  }
+
+  static bool requiresXrayBackend(VpnProfile profile) {
+    if (profile.coreBackend == VpnCoreBackend.xray) {
+      return true;
+    }
+    if (!isVlessProfile(profile)) {
+      return false;
+    }
+    return xrayOnlyTransports.contains(safeTransportType(profile));
+  }
+
+  static bool supportsSingBoxBackend(VpnProfile profile) {
+    if (!isVlessProfile(profile)) {
+      return true;
+    }
+    return !requiresXrayBackend(profile);
   }
 
   static String? normalizeFlow(String? value) {
@@ -116,6 +149,7 @@ class VlessProfileTools {
     final packetEncoding = '${outbound['packet_encoding'] ?? 'none'}';
     return [
       'family=${profile.kind.label}',
+      'core=${profile.coreBackend.label}',
       'transport=${safeTransportType(profile)}',
       'flow=$flow',
       'packet_encoding=$packetEncoding',

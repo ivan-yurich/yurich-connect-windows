@@ -46,6 +46,7 @@ migrate_working_dir/
 *.msi
 *.pdb
 !/assets/windows/sing-box/sing-box.exe
+!/assets/windows/sing-box/xray.exe
 
 # This repository publishes the Windows edition only
 /android/

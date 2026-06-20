@@ -28,7 +28,7 @@ Advanced TUN Mode включайте только если нужен полны
 
 В приложение можно добавить одиночный профиль или Yurich ID подписку с несколькими серверами. После импорта Yurich Connect покажет профили списком и сможет проверить ping серверов.
 
-Поддерживаются VLESS Reality, VLESS TLS, NaiveProxy, Hysteria 1/2, raw sing-box JSON и HTML-страницы панели с raw-ссылками внутри.
+Поддерживаются VLESS Reality, VLESS TLS, VLESS XHTTP через Xray-core в Stable Proxy Mode, NaiveProxy, Hysteria 1/2, raw sing-box JSON и HTML-страницы панели с raw-ссылками внутри.
 
 ## Логи и диагностика
 
@@ -36,6 +36,7 @@ Advanced TUN Mode включайте только если нужен полны
 
 - `yurich.log`
 - `sing-box.log`
+- `xray.log`
 - `naive.log`
 
 Диагностический отчёт сохраняется в `%APPDATA%\Yurich Connect\diagnostics\report.zip`.
