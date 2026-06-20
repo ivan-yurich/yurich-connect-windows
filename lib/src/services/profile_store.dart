@@ -29,6 +29,7 @@ class ProfileRuntimeStats {
     this.lastSuccessAt,
     this.lastFailureAt,
     this.lastFailureReason,
+    this.quarantinedUntil,
   });
 
   final int successes;
@@ -38,6 +39,7 @@ class ProfileRuntimeStats {
   final DateTime? lastSuccessAt;
   final DateTime? lastFailureAt;
   final String? lastFailureReason;
+  final DateTime? quarantinedUntil;
 
   int get averageStartMs => successes <= 0 ? 0 : totalStartMs ~/ successes;
 
@@ -56,6 +58,14 @@ class ProfileRuntimeStats {
 
   bool get unstable => consecutiveFailures >= 2 || score < 55;
 
+  bool isQuarantined([DateTime? now]) {
+    final until = quarantinedUntil;
+    if (until == null) {
+      return false;
+    }
+    return (now ?? DateTime.now()).isBefore(until);
+  }
+
   ProfileRuntimeStats recordSuccess(Duration startDuration) {
     return ProfileRuntimeStats(
       successes: successes + 1,
@@ -65,18 +75,29 @@ class ProfileRuntimeStats {
       lastSuccessAt: DateTime.now(),
       lastFailureAt: lastFailureAt,
       lastFailureReason: lastFailureReason,
+      quarantinedUntil: null,
     );
   }
 
-  ProfileRuntimeStats recordFailure(String reason) {
+  ProfileRuntimeStats recordFailure(String reason, {Duration? quarantineFor}) {
+    final now = DateTime.now();
+    final nextConsecutiveFailures = consecutiveFailures + 1;
+    final shouldQuarantine =
+        quarantineFor != null || nextConsecutiveFailures >= 2;
+    final quarantineDuration =
+        quarantineFor ??
+        (nextConsecutiveFailures >= 3
+            ? const Duration(minutes: 30)
+            : const Duration(minutes: 10));
     return ProfileRuntimeStats(
       successes: successes,
       failures: failures + 1,
-      consecutiveFailures: consecutiveFailures + 1,
+      consecutiveFailures: nextConsecutiveFailures,
       totalStartMs: totalStartMs,
       lastSuccessAt: lastSuccessAt,
-      lastFailureAt: DateTime.now(),
+      lastFailureAt: now,
       lastFailureReason: reason,
+      quarantinedUntil: shouldQuarantine ? now.add(quarantineDuration) : null,
     );
   }
 
@@ -89,6 +110,7 @@ class ProfileRuntimeStats {
       'lastSuccessAt': lastSuccessAt?.toIso8601String(),
       'lastFailureAt': lastFailureAt?.toIso8601String(),
       'lastFailureReason': lastFailureReason,
+      'quarantinedUntil': quarantinedUntil?.toIso8601String(),
     };
   }
 
@@ -116,6 +138,92 @@ class ProfileRuntimeStats {
           ? null
           : DateTime.tryParse('${json['lastFailureAt']}'),
       lastFailureReason: json['lastFailureReason'] as String?,
+      quarantinedUntil: json['quarantinedUntil'] == null
+          ? null
+          : DateTime.tryParse('${json['quarantinedUntil']}'),
+    );
+  }
+}
+
+class ConnectionSessionRecord {
+  const ConnectionSessionRecord({
+    required this.timestamp,
+    required this.profileId,
+    required this.profileName,
+    required this.protocol,
+    required this.lifecycle,
+    required this.success,
+    required this.startMs,
+    this.reason,
+    this.failover = false,
+    this.activeTraffic = false,
+    this.codexActive = false,
+    this.probeP95Ms = 0,
+    this.probeP99Ms = 0,
+  });
+
+  final DateTime timestamp;
+  final String profileId;
+  final String profileName;
+  final String protocol;
+  final String lifecycle;
+  final bool success;
+  final int startMs;
+  final String? reason;
+  final bool failover;
+  final bool activeTraffic;
+  final bool codexActive;
+  final int probeP95Ms;
+  final int probeP99Ms;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'timestamp': timestamp.toIso8601String(),
+      'profileId': profileId,
+      'profileName': profileName,
+      'protocol': protocol,
+      'lifecycle': lifecycle,
+      'success': success,
+      'startMs': startMs,
+      'reason': reason,
+      'failover': failover,
+      'activeTraffic': activeTraffic,
+      'codexActive': codexActive,
+      'probeP95Ms': probeP95Ms,
+      'probeP99Ms': probeP99Ms,
+    };
+  }
+
+  factory ConnectionSessionRecord.fromJson(Map<String, dynamic> json) {
+    bool readBool(String key) => json[key] == true;
+
+    int readInt(String key) {
+      final value = json[key];
+      if (value is int) {
+        return value < 0 ? 0 : value;
+      }
+      if (value is num) {
+        return value < 0 ? 0 : value.toInt();
+      }
+      return 0;
+    }
+
+    return ConnectionSessionRecord(
+      timestamp:
+          DateTime.tryParse('${json['timestamp']}') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      profileId: '${json['profileId'] ?? ''}',
+      profileName: '${json['profileName'] ?? ''}',
+      protocol: '${json['protocol'] ?? ''}',
+      lifecycle: '${json['lifecycle'] ?? ''}',
+      success: readBool('success'),
+      startMs: readInt('startMs'),
+      reason: json['reason'] == null ? null : '${json['reason']}',
+      failover: readBool('failover'),
+      activeTraffic: readBool('activeTraffic'),
+      codexActive: readBool('codexActive'),
+      probeP95Ms: readInt('probeP95Ms'),
+      probeP99Ms: readInt('probeP99Ms'),
     );
   }
 }
@@ -136,6 +244,8 @@ class ProfileStore {
   static const _dnsOnlyThroughVpnKey = 'dnsOnlyThroughVpn';
   static const _windowsConnectionModeKey = 'windowsConnectionMode';
   static const _profileRuntimeStatsKey = 'profileRuntimeStats';
+  static const _connectionSessionHistoryKey = 'connectionSessionHistory';
+  static const _connectionSessionHistoryLimit = 20;
   static const defaultVpnOnlyProcesses = <String>[];
   static const defaultCodexDirect = true;
   static const defaultChatGptThroughVpn = true;
@@ -377,13 +487,14 @@ class ProfileStore {
 
   Future<ProfileRuntimeStats> recordProfileRuntimeFailure(
     String profileId,
-    String reason,
-  ) async {
+    String reason, {
+    Duration? quarantineFor,
+  }) async {
     final stats = Map<String, ProfileRuntimeStats>.of(
       await loadProfileRuntimeStats(),
     );
     final updated = (stats[profileId] ?? const ProfileRuntimeStats())
-        .recordFailure(reason);
+        .recordFailure(reason, quarantineFor: quarantineFor);
     stats[profileId] = updated;
     await saveProfileRuntimeStats(stats);
     return updated;
@@ -394,5 +505,40 @@ class ProfileStore {
       await loadProfileRuntimeStats(),
     )..remove(profileId);
     await saveProfileRuntimeStats(stats);
+  }
+
+  Future<List<ConnectionSessionRecord>> loadConnectionSessionHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_connectionSessionHistoryKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const [];
+    }
+    final decoded = jsonDecode(encoded);
+    if (decoded is! List) {
+      return const [];
+    }
+    return decoded
+        .whereType<Map>()
+        .map(
+          (json) =>
+              ConnectionSessionRecord.fromJson(json.cast<String, dynamic>()),
+        )
+        .where((record) => record.profileId.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<List<ConnectionSessionRecord>> appendConnectionSession(
+    ConnectionSessionRecord record,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final history = [...await loadConnectionSessionHistory(), record];
+    final trimmed = history.length <= _connectionSessionHistoryLimit
+        ? history
+        : history.sublist(history.length - _connectionSessionHistoryLimit);
+    await prefs.setString(
+      _connectionSessionHistoryKey,
+      jsonEncode(trimmed.map((item) => item.toJson()).toList()),
+    );
+    return List.unmodifiable(trimmed);
   }
 }

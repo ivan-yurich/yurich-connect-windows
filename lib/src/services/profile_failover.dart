@@ -41,7 +41,17 @@ List<RankedProfile> rankProfilesForFailover({
   final activeProfiles = profiles
       .where((profile) => !_isExpired(profile, currentTime))
       .toList();
-  final candidates = activeProfiles.isEmpty ? profiles : activeProfiles;
+  final nonQuarantinedProfiles = activeProfiles
+      .where(
+        (profile) =>
+            runtimeStats[profile.id]?.isQuarantined(currentTime) != true,
+      )
+      .toList();
+  final candidates = nonQuarantinedProfiles.isNotEmpty
+      ? nonQuarantinedProfiles
+      : activeProfiles.isNotEmpty
+      ? activeProfiles
+      : profiles;
   final ranked = candidates
       .map(
         (profile) => RankedProfile(
@@ -57,6 +67,13 @@ List<RankedProfile> rankProfilesForFailover({
       )
       .toList();
   ranked.sort((a, b) {
+    final byGroup = _profileFailoverGroupPriority(
+      a.profile,
+      preferred,
+    ).compareTo(_profileFailoverGroupPriority(b.profile, preferred));
+    if (byGroup != 0) {
+      return byGroup;
+    }
     final byScore = b.score.compareTo(a.score);
     if (byScore != 0) {
       return byScore;
@@ -84,6 +101,9 @@ bool shouldAutoSelectBestProfile({
   }
   final currentTime = now ?? DateTime.now();
   if (_isExpired(preferred, currentTime)) {
+    return true;
+  }
+  if (runtimeStats[preferred.id]?.isQuarantined(currentTime) == true) {
     return true;
   }
 
@@ -120,6 +140,9 @@ int profileFailoverScore({
   }
 
   var score = runtimeStats?.score ?? 76;
+  if (runtimeStats?.isQuarantined(currentTime) == true) {
+    score -= 80;
+  }
   if (runtimeStats?.unstable == true) {
     score -= 16;
   }
@@ -165,6 +188,63 @@ int profileFailoverScore({
     score += 5;
   }
   return score;
+}
+
+int _profileFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
+  final sameProtocol = profile.kind == preferred.kind;
+  final sameSubscription =
+      profile.subscriptionSource != null &&
+      profile.subscriptionSource == preferred.subscriptionSource;
+  final profileRegion = _profileRegionKey(profile);
+  final preferredRegion = _profileRegionKey(preferred);
+  final sameRegion =
+      profileRegion.isNotEmpty && profileRegion == preferredRegion;
+
+  if (sameProtocol && sameRegion) {
+    return 1;
+  }
+  if (sameProtocol && sameSubscription) {
+    return 2;
+  }
+  if (sameProtocol) {
+    return 3;
+  }
+  if (sameRegion) {
+    return 4;
+  }
+  if (sameSubscription) {
+    return 5;
+  }
+  return 6;
+}
+
+String _profileRegionKey(VpnProfile profile) {
+  final source = '${profile.name} ${profile.server ?? ''}'.toLowerCase();
+  const regions = {
+    'ru': [' russia', 'moscow', '.ru', 'russia'],
+    'fi': [' finland', 'helsinki', '.fi', 'finland'],
+    'de': [' germany', 'deutschland', 'frankfurt', '.de', 'germany'],
+    'nl': [' netherlands', 'amsterdam', '.nl', 'netherlands'],
+    'fr': [' france', 'paris', '.fr', 'france'],
+    'pl': [' poland', 'warsaw', '.pl', 'poland'],
+    'gb': [' united kingdom', 'london', '.uk', 'united kingdom'],
+    'us': [' usa', 'united states', 'new york', '.us', 'usa'],
+  };
+  for (final entry in regions.entries) {
+    if (entry.value.any(source.contains)) {
+      return entry.key;
+    }
+  }
+  final server = profile.server?.toLowerCase();
+  if (server == null || server.isEmpty) {
+    return '';
+  }
+  final parts = server.split('.');
+  if (parts.length < 2) {
+    return '';
+  }
+  final tld = parts.last;
+  return tld.length == 2 ? tld : '';
 }
 
 bool _isExpired(VpnProfile profile, DateTime now) {

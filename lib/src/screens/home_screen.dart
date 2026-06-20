@@ -33,7 +33,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.42';
+const _appVersion = '1.0.43';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -45,6 +45,7 @@ const _healthWatchdogFailureLimit = 4;
 const _healthWatchdogActiveTrafficFailureWindow = Duration(minutes: 5);
 const _healthWatchdogProbeAttempts = 2;
 const _healthWatchdogProbeDelay = Duration(milliseconds: 800);
+const _softRecoveryCooldown = Duration(minutes: 2);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
 const _healthProbeHistoryWindow = Duration(hours: 1);
 const _healthProbeHistoryLimit = 240;
@@ -91,6 +92,30 @@ class _ConnectionConfigPlan {
 
   final NaiveOutboundMode naiveMode;
   final String label;
+}
+
+enum _ConnectionLifecycle {
+  idle,
+  preparing,
+  startingCore,
+  probing,
+  stable,
+  degraded,
+  recovering,
+  failed,
+}
+
+extension _ConnectionLifecycleLabel on _ConnectionLifecycle {
+  String get code => switch (this) {
+    _ConnectionLifecycle.idle => 'idle',
+    _ConnectionLifecycle.preparing => 'preparing',
+    _ConnectionLifecycle.startingCore => 'starting_core',
+    _ConnectionLifecycle.probing => 'probing',
+    _ConnectionLifecycle.stable => 'stable',
+    _ConnectionLifecycle.degraded => 'degraded',
+    _ConnectionLifecycle.recovering => 'recovering',
+    _ConnectionLifecycle.failed => 'failed',
+  };
 }
 
 enum _AppLanguage {
@@ -169,6 +194,10 @@ class _HomeScreenState extends State<HomeScreen>
   _ProfileFilter _profileFilter = _ProfileFilter.all;
   int _healthWatchdogFailures = 0;
   DateTime? _healthWatchdogCooldownUntil;
+  DateTime? _softRecoveryCooldownUntil;
+  _ConnectionLifecycle _connectionLifecycle = _ConnectionLifecycle.idle;
+  DateTime? _connectionLifecycleChangedAt;
+  DateTime? _dnsFallbackAppliedAt;
   bool _quitFromTray = false;
   List<String> _splitTunnelExcludedProcesses = const [];
   List<String> _vpnOnlyProcesses = ProfileStore.defaultVpnOnlyProcesses;
@@ -177,6 +206,7 @@ class _HomeScreenState extends State<HomeScreen>
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
   Map<String, ProfileRuntimeStats> _profileRuntimeStats = const {};
+  List<ConnectionSessionRecord> _connectionSessionHistory = const [];
   DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
   bool _refreshingSubscriptions = false;
@@ -417,6 +447,8 @@ class _HomeScreenState extends State<HomeScreen>
         .loadSplitTunnelExcludedProcesses();
     final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
     final profileRuntimeStats = await _store.loadProfileRuntimeStats();
+    final connectionSessionHistory = await _store
+        .loadConnectionSessionHistory();
     var subscriptionSources = await _store.loadSubscriptionSources();
     final inferredSubscriptionSources = _extractSubscriptionSourcesFromProfiles(
       profiles,
@@ -469,6 +501,7 @@ class _HomeScreenState extends State<HomeScreen>
       _subscriptionSources = subscriptionSources;
       _deletedProfileIds = deletedProfileIds;
       _profileRuntimeStats = profileRuntimeStats;
+      _connectionSessionHistory = connectionSessionHistory;
       _message = profiles.isEmpty
           ? strings.addProfileHint
           : strings.loadedProfiles(profiles.length);
@@ -530,6 +563,7 @@ class _HomeScreenState extends State<HomeScreen>
         if (message != null && message.isNotEmpty && mounted) {
           if (code == 'dnsFallbackApplied') {
             unawaited(_store.saveDnsOnlyThroughVpn(false));
+            _dnsFallbackAppliedAt = DateTime.now();
           }
           setState(() {
             _message = message;
@@ -575,6 +609,8 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() {
           _status = status;
           if (status == YurichConnectStatus.started) {
+            _connectionLifecycle = _ConnectionLifecycle.stable;
+            _connectionLifecycleChangedAt = DateTime.now();
             _lastError = null;
             _connectedAt ??= DateTime.now();
             _ignoreStoppedUntil = DateTime.now().add(
@@ -585,6 +621,8 @@ class _HomeScreenState extends State<HomeScreen>
           } else if (status == YurichConnectStatus.stopped ||
               status == YurichConnectStatus.stopping) {
             if (status == YurichConnectStatus.stopped) {
+              _connectionLifecycle = _ConnectionLifecycle.idle;
+              _connectionLifecycleChangedAt = DateTime.now();
               _connectedAt = null;
               _stopSessionTimer();
             }
@@ -1072,6 +1110,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _connectWithFailover(VpnProfile preferred) async {
+    _setConnectionLifecycle(
+      _ConnectionLifecycle.preparing,
+      reason: 'connect requested',
+    );
     if (!_checkingServerLatency) {
       await _refreshServerLatencies();
     }
@@ -1100,7 +1142,11 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       try {
-        await _startVpnCore(candidate, fastReconnect: index > 0);
+        await _startVpnCore(
+          candidate,
+          fastReconnect: index > 0,
+          failover: index > 0 || candidate.id != preferred.id,
+        );
         if (candidate.id != preferred.id) {
           final message = _failoverConnectedMessage(candidate);
           _queueLog(message);
@@ -1178,6 +1224,16 @@ class _HomeScreenState extends State<HomeScreen>
       if (ordered.length >= _maxProfileFailoverAttempts) {
         break;
       }
+    }
+    final quarantined = _profiles.where(
+      (profile) => _profileRuntimeStats[profile.id]?.isQuarantined() == true,
+    );
+    for (final profile in quarantined) {
+      _queueLog(
+        'Profile quarantined and skipped by failover: '
+        '${_redactSensitive(profile.name)} until '
+        '${_profileRuntimeStats[profile.id]?.quarantinedUntil?.toIso8601String() ?? 'unknown'}.',
+      );
     }
     return ordered.take(_maxProfileFailoverAttempts).toList();
   }
@@ -1318,6 +1374,7 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _startVpnCore(
     VpnProfile profile, {
     bool fastReconnect = false,
+    bool failover = false,
   }) async {
     final totalStopwatch = Stopwatch()..start();
     try {
@@ -1339,6 +1396,13 @@ class _HomeScreenState extends State<HomeScreen>
         detail:
             'profile=${_redactSensitive(profile.name)} score=${stats.score}',
       );
+      await _recordConnectionSession(
+        profile: profile,
+        success: true,
+        startDuration: totalStopwatch.elapsed,
+        lifecycle: _connectionLifecycle.code,
+        failover: failover,
+      );
     } on Object catch (error) {
       final reason = _classifyStartFailure(error);
       final stats = await _store.recordProfileRuntimeFailure(
@@ -1358,6 +1422,14 @@ class _HomeScreenState extends State<HomeScreen>
         detail:
             'profile=${_redactSensitive(profile.name)} reason=$reason score=${stats.score}',
       );
+      await _recordConnectionSession(
+        profile: profile,
+        success: false,
+        startDuration: totalStopwatch.elapsed,
+        lifecycle: _connectionLifecycle.code,
+        reason: reason,
+        failover: failover,
+      );
       rethrow;
     }
   }
@@ -1367,6 +1439,10 @@ class _HomeScreenState extends State<HomeScreen>
     bool fastReconnect = false,
   }) async {
     _validateProfileForStart(profile);
+    _setConnectionLifecycle(
+      _ConnectionLifecycle.preparing,
+      reason: 'profile=${_redactSensitive(profile.name)}',
+    );
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
     final status = await _refreshVpnStatus();
     if (status != YurichConnectStatus.stopped) {
@@ -1450,6 +1526,10 @@ class _HomeScreenState extends State<HomeScreen>
         }
 
         final engineStartStopwatch = Stopwatch()..start();
+        _setConnectionLifecycle(
+          _ConnectionLifecycle.startingCore,
+          reason: plan.label,
+        );
         final started = await _vpnEngine.startVPN();
         _recordStageTiming(
           'profile_start.engine_start',
@@ -1461,6 +1541,10 @@ class _HomeScreenState extends State<HomeScreen>
             YurichConnectStatus.started,
           }, timeout: const Duration(seconds: 14));
           if (finalStatus == YurichConnectStatus.started) {
+            _setConnectionLifecycle(
+              _ConnectionLifecycle.probing,
+              reason: plan.label,
+            );
             final probeResult =
                 _vpnEngine.configTarget != SingBoxConfigTarget.windows
                 ? const _HealthProbeResult(
@@ -1470,6 +1554,10 @@ class _HomeScreenState extends State<HomeScreen>
                   )
                 : await _probeLocalMixedProxy();
             if (probeResult.success) {
+              _setConnectionLifecycle(
+                _ConnectionLifecycle.stable,
+                reason: plan.label,
+              );
               connected = true;
               break;
             }
@@ -1489,6 +1577,10 @@ class _HomeScreenState extends State<HomeScreen>
                 'VPN start probe failed during $guardedSessionReason; keeping tunnel alive '
                 'to preserve long-lived connections. Reason: $probeInfo.',
               );
+              _setConnectionLifecycle(
+                _ConnectionLifecycle.degraded,
+                reason: probeInfo,
+              );
               connected = true;
               break;
             }
@@ -1501,6 +1593,10 @@ class _HomeScreenState extends State<HomeScreen>
           if (fatalMessage != null) {
             fatalStartup = true;
             lastStartError = fatalMessage;
+            _setConnectionLifecycle(
+              _ConnectionLifecycle.failed,
+              reason: fatalMessage,
+            );
             _queueLog(
               'VPN start aborted without retry [${plan.label}]: '
               '${_redactSensitive(fatalMessage)}',
@@ -1546,6 +1642,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (!connected) {
+      _setConnectionLifecycle(
+        _ConnectionLifecycle.failed,
+        reason: '${lastStartError ?? s.vpnStartFailed}',
+      );
       throw StateError('${lastStartError ?? s.vpnStartFailed}');
     }
 
@@ -1962,6 +2062,7 @@ class _HomeScreenState extends State<HomeScreen>
     _healthWatchdogWarmupUntil = null;
     _healthWatchdogFailures = 0;
     _healthWatchdogCooldownUntil = null;
+    _softRecoveryCooldownUntil = null;
   }
 
   Future<void> _runHealthWatchdogTick() async {
@@ -1984,6 +2085,12 @@ class _HomeScreenState extends State<HomeScreen>
 
     final probeResult = await _probeLocalMixedProxy(logFailures: false);
     if (probeResult.success) {
+      if (_connectionLifecycle != _ConnectionLifecycle.stable) {
+        _setConnectionLifecycle(
+          _ConnectionLifecycle.stable,
+          reason: 'health watchdog ok',
+        );
+      }
       if (_healthWatchdogFailures > 0) {
         _queueLog(
           'VPN health watchdog recovered. '
@@ -2002,6 +2109,11 @@ class _HomeScreenState extends State<HomeScreen>
 
     final guardedSessionReason = await _healthReconnectGuardReason();
     if (guardedSessionReason != null) {
+      _setConnectionLifecycle(
+        _ConnectionLifecycle.degraded,
+        reason: probeDescription,
+      );
+      unawaited(_attemptSoftRecovery(probeDescription));
       _healthWatchdogFailures = 0;
       _healthWatchdogCooldownUntil = DateTime.now().add(
         _healthWatchdogActiveTrafficFailureWindow,
@@ -2015,7 +2127,20 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    final recovered = await _attemptSoftRecovery(probeDescription);
+    if (recovered) {
+      _healthWatchdogFailures = 0;
+      _healthWatchdogCooldownUntil = DateTime.now().add(
+        _healthWatchdogRetryGrace,
+      );
+      return;
+    }
+
     _healthWatchdogFailures += 1;
+    _setConnectionLifecycle(
+      _ConnectionLifecycle.degraded,
+      reason: probeDescription,
+    );
     _queueLog(
       'VPN health watchdog failed $_healthWatchdogFailures/'
       '$_healthWatchdogFailureLimit: $probeDescription. '
@@ -2031,6 +2156,10 @@ class _HomeScreenState extends State<HomeScreen>
 
     final codexActive = await _hasActiveCodexProcess();
     if (codexActive) {
+      _setConnectionLifecycle(
+        _ConnectionLifecycle.degraded,
+        reason: 'codex active',
+      );
       _healthWatchdogFailures = 0;
       _healthWatchdogCooldownUntil = DateTime.now().add(
         _healthWatchdogActiveTrafficFailureWindow,
@@ -2049,6 +2178,10 @@ class _HomeScreenState extends State<HomeScreen>
     _lastVpnReconnectReason = probeDescription;
     _lastReconnectDuringCodex = codexActive;
     _healthWatchdogFailures = 0;
+    _setConnectionLifecycle(
+      _ConnectionLifecycle.degraded,
+      reason: probeDescription,
+    );
     _queueLog(
       'VPN health watchdog diagnostic-only: repeated probe failures detected, '
       'but reconnect is skipped to preserve active WebSocket/browser sessions. '
@@ -2061,6 +2194,69 @@ class _HomeScreenState extends State<HomeScreen>
         _message = s.healthWatchdogWarning;
         _lastError = s.healthWatchdogWarning;
       });
+    }
+  }
+
+  Future<bool> _attemptSoftRecovery(String reason) async {
+    if (!Platform.isWindows || _status != YurichConnectStatus.started) {
+      return false;
+    }
+    final cooldownUntil = _softRecoveryCooldownUntil;
+    if (cooldownUntil != null && DateTime.now().isBefore(cooldownUntil)) {
+      _queueLog(
+        'Soft recovery skipped by cooldown: ${_redactSensitive(reason)}.',
+      );
+      return false;
+    }
+
+    _softRecoveryCooldownUntil = DateTime.now().add(_softRecoveryCooldown);
+    _setConnectionLifecycle(_ConnectionLifecycle.recovering, reason: reason);
+    final stopwatch = Stopwatch()..start();
+    var engineOk = false;
+    try {
+      if (_systemProxyEnabled) {
+        await _windowsIntegration.setSystemProxyEnabled(true);
+        _queueLog('Soft recovery refreshed Windows system proxy settings.');
+      }
+
+      final engine = _vpnEngine;
+      if (engine is WindowsSingBoxEngine) {
+        engineOk = await engine.softRecoverConnection();
+      }
+
+      final probe = await _probeLocalMixedProxy(logFailures: false);
+      _recordStageTiming(
+        'soft_recovery.total',
+        stopwatch.elapsed,
+        detail:
+            'engine=$engineOk probe=${probe.success} reason=${_redactSensitive(reason)}',
+      );
+      if (probe.success) {
+        _setConnectionLifecycle(
+          _ConnectionLifecycle.stable,
+          reason: 'soft recovery ok',
+        );
+        _queueLog('Soft recovery restored VPN health.');
+        return true;
+      }
+      _setConnectionLifecycle(
+        _ConnectionLifecycle.degraded,
+        reason: _healthProbeDescription(probe.lastFailure),
+      );
+      _queueLog(
+        'Soft recovery did not restore probe: '
+        '${_healthProbeDescription(probe.lastFailure)}.',
+      );
+      return false;
+    } on Object catch (error) {
+      _recordStageTiming(
+        'soft_recovery.total',
+        stopwatch.elapsed,
+        detail: 'failed=${_redactSensitive('$error')}',
+      );
+      _setConnectionLifecycle(_ConnectionLifecycle.degraded, reason: '$error');
+      _queueLog('Soft recovery failed: ${_redactSensitive('$error')}');
+      return false;
     }
   }
 
@@ -2306,10 +2502,15 @@ if ($null -ne $match) { 'true' } else { 'false' }
 
   Future<void> _disconnect() async {
     await _runBusy(() => _stopVpnCore(), message: s.disconnectingVpn);
+    _setConnectionLifecycle(_ConnectionLifecycle.idle, reason: 'user stop');
   }
 
   Future<void> _repairConnection() async {
     await _runBusy(() async {
+      _setConnectionLifecycle(
+        _ConnectionLifecycle.recovering,
+        reason: 'manual repair',
+      );
       final ok = await _vpnEngine.repairConnection();
       if (!mounted) {
         return;
@@ -2323,6 +2524,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
         _lastError = ok ? null : s.repairFailed;
         _message = ok ? s.repairOk : s.repairFailed;
       });
+      _setConnectionLifecycle(
+        ok ? _ConnectionLifecycle.idle : _ConnectionLifecycle.failed,
+        reason: ok ? 'manual repair ok' : 'manual repair failed',
+      );
       if (ok) {
         _showSnack(s.repairOk);
       } else {
@@ -2364,6 +2569,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
         _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
         setState(() {
           _status = YurichConnectStatus.stopped;
+          _connectionLifecycle = _ConnectionLifecycle.idle;
+          _connectionLifecycleChangedAt = DateTime.now();
           _uplink = '0 B/s';
           _downlink = '0 B/s';
           _lastError = null;
@@ -2764,6 +2971,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     final lines = <String>[
       'DNS diagnostics started. dns_only_through_vpn=$_dnsOnlyThroughVpn, '
           'connected=$_connected, advanced_tun=$_advancedTunMode, status=$_status.',
+      'DNS fallback status: ${_dnsFallbackAppliedAt == null ? 'not applied in this session' : 'applied at ${_dnsFallbackAppliedAt!.toIso8601String()}'}; lifecycle=${_connectionLifecycle.code}.',
       _dnsOnlyThroughVpn
           ? 'DNS routing expectation: regular A/AAAA queries use global-dns over proxy; bootstrap uses Cloudflare DoH direct instead of ISP DNS.'
           : 'DNS routing expectation: selected direct domains may use Windows local DNS.',
@@ -3305,12 +3513,17 @@ if ($null -ne $match) { 'true' } else { 'false' }
       'system_proxy_enabled: $_systemProxyEnabled',
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
       'status: $_status',
+      'connection_lifecycle: ${_connectionLifecycle.code}',
+      if (_connectionLifecycleChangedAt != null)
+        'connection_lifecycle_changed: ${_connectionLifecycleChangedAt!.toIso8601String()}',
       'message: ${_redactSensitive(_message)}',
       'codex_direct: $_codexDirect',
       'codex_direct_supported: $_codexDirectSupported',
       'chatgpt_through_vpn: $_chatGptThroughVpn',
       'developer_mode: $_developerMode',
       'dns_only_through_vpn: $_dnsOnlyThroughVpn',
+      if (_dnsFallbackAppliedAt != null)
+        'dns_fallback_applied: ${_dnsFallbackAppliedAt!.toIso8601String()}',
       'developer_direct_apps: ${_formatProcessList(SingBoxConfigBuilder.developerDirectProcesses)}',
       'split_tunnel_direct_apps: ${_formatProcessList(_splitTunnelExcludedProcesses)}',
       'vpn_only_apps: ${_formatProcessList(_vpnOnlyProcesses)}',
@@ -3334,6 +3547,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       ],
       'traffic: up=$_uplink down=$_downlink total=$_sessionTotal',
       'stage_timings: ${_formatStageTimingSummary()}',
+      'connection_history: ${_formatConnectionHistorySummary()}',
       'health_probe_p99_ms: ${_healthProbeP99LatencyMs()}'
           '; p95_ms=${_healthProbeP95LatencyMs()}'
           ' (${_healthProbeHistory.length} probes in window)',
@@ -3383,7 +3597,11 @@ if ($null -ne $match) { 'true' } else { 'false' }
         .map((candidate) {
           final latency = _serverLatencies[candidate.profile.id];
           final latencyLabel = latency == null ? 'ping=n/a' : latency.label(s);
-          return '${_redactSensitive(candidate.profile.name)} score=${candidate.score} $latencyLabel';
+          final stats = _profileRuntimeStats[candidate.profile.id];
+          final quarantine = stats?.isQuarantined() == true
+              ? ' quarantined_until=${stats!.quarantinedUntil?.toIso8601String()}'
+              : '';
+          return '${_redactSensitive(candidate.profile.name)} score=${candidate.score} $latencyLabel$quarantine';
         })
         .join('; ');
   }
@@ -3483,6 +3701,81 @@ if ($null -ne $match) { 'true' } else { 'false' }
         '${time.minute.toString().padLeft(2, '0')}:'
         '${time.second.toString().padLeft(2, '0')}.'
         '${time.millisecond.toString().padLeft(3, '0')}';
+  }
+
+  void _setConnectionLifecycle(
+    _ConnectionLifecycle lifecycle, {
+    String? reason,
+  }) {
+    if (_connectionLifecycle == lifecycle &&
+        (reason == null || reason.isEmpty)) {
+      return;
+    }
+    _connectionLifecycle = lifecycle;
+    _connectionLifecycleChangedAt = DateTime.now();
+    _queueLog(
+      'Connection lifecycle=${lifecycle.code}'
+      '${reason == null || reason.isEmpty ? '' : ' reason=${_redactSensitive(reason)}'}',
+    );
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _recordConnectionSession({
+    required VpnProfile profile,
+    required bool success,
+    required Duration startDuration,
+    required String lifecycle,
+    String? reason,
+    bool failover = false,
+  }) async {
+    final record = ConnectionSessionRecord(
+      timestamp: DateTime.now(),
+      profileId: profile.id,
+      profileName: _redactSensitive(profile.name),
+      protocol: _profileKindLabel(profile.kind),
+      lifecycle: lifecycle,
+      success: success,
+      startMs: startDuration.inMilliseconds,
+      reason: reason == null ? null : _redactSensitive(reason),
+      failover: failover,
+      activeTraffic: _hasActiveTraffic(),
+      codexActive:
+          _codexDirect &&
+          await _hasActiveCodexProcess().timeout(
+            const Duration(milliseconds: 800),
+            onTimeout: () => false,
+          ),
+      probeP95Ms: _healthProbeP95LatencyMs(),
+      probeP99Ms: _healthProbeP99LatencyMs(),
+    );
+    final history = await _store.appendConnectionSession(record);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _connectionSessionHistory = history);
+  }
+
+  String _formatConnectionHistorySummary() {
+    if (_connectionSessionHistory.isEmpty) {
+      return 'none';
+    }
+    return _connectionSessionHistory.reversed
+        .take(8)
+        .map((record) {
+          final result = record.success ? 'ok' : 'fail';
+          final reason = record.reason == null || record.reason!.isEmpty
+              ? ''
+              : ' reason=${record.reason}';
+          return '${record.timestamp.toIso8601String()} '
+              '$result ${record.protocol} ${record.profileName} '
+              'state=${record.lifecycle} start_ms=${record.startMs} '
+              'failover=${record.failover} traffic=${record.activeTraffic} '
+              'codex=${record.codexActive} p95=${record.probeP95Ms} '
+              'p99=${record.probeP99Ms}$reason';
+        })
+        .join(' | ');
   }
 
   void _recordStageTiming(String stage, Duration elapsed, {String? detail}) {

@@ -473,6 +473,51 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
   }
 
+  Future<bool> softRecoverConnection() async {
+    _appendLog('Soft recovery started: no core restart.');
+    if (_process == null) {
+      _appendLog('Soft recovery skipped: sing-box is not tracked.');
+      return false;
+    }
+
+    await _flushDnsCache();
+    unawaited(_trafficSocket?.close());
+    _trafficSocket = null;
+    _trafficSocketConnecting = false;
+    unawaited(_connectTrafficSocket());
+
+    final ports = <int>[
+      SingBoxConfigBuilder.localMixedProxyPort,
+      SingBoxConfigBuilder.localSocksProxyPort,
+      SingBoxConfigBuilder.windowsClashApiPort,
+    ];
+    final checks = await Future.wait(
+      ports.map((port) => _checkTcpPortOpen('127.0.0.1', port)),
+    );
+    final ok = checks.every((value) => value);
+    _appendLog(
+      'Soft recovery ${ok ? 'passed' : 'degraded'}: '
+      'mixed=${checks[0]} socks=${checks[1]} clash=${checks[2]}.',
+    );
+    return ok;
+  }
+
+  Future<bool> _checkTcpPortOpen(String host, int port) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        host,
+        port,
+        timeout: const Duration(seconds: 2),
+      );
+      return true;
+    } on Object {
+      return false;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
   Future<void> _applyRuntimeBackoff() async {
     final lastFailureAt = _lastRuntimeFailureAt;
     if (lastFailureAt == null || _runtimeFailureCount <= 0) {

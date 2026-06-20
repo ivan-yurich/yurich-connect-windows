@@ -128,9 +128,43 @@ void main() {
 
       expect(second.consecutiveFailures, 2);
       expect(second.unstable, isTrue);
+      expect(second.isQuarantined(), isTrue);
+
+      final recovered = await store.recordProfileRuntimeSuccess(
+        'profile-a',
+        const Duration(milliseconds: 600),
+      );
+      expect(recovered.consecutiveFailures, 0);
+      expect(recovered.isQuarantined(), isFalse);
 
       await store.removeProfileRuntimeStats('profile-a');
       expect(await store.loadProfileRuntimeStats(), isEmpty);
+    });
+  });
+
+  group('ProfileStore connection history', () {
+    test('keeps only the latest 20 session records', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      for (var i = 0; i < 25; i += 1) {
+        await store.appendConnectionSession(
+          ConnectionSessionRecord(
+            timestamp: DateTime(2026, 6, 18, 12, i),
+            profileId: 'profile-$i',
+            profileName: 'Profile $i',
+            protocol: 'VLESS Reality',
+            lifecycle: 'stable',
+            success: true,
+            startMs: 500 + i,
+          ),
+        );
+      }
+
+      final history = await store.loadConnectionSessionHistory();
+      expect(history, hasLength(20));
+      expect(history.first.profileId, 'profile-5');
+      expect(history.last.profileId, 'profile-24');
     });
   });
 }
