@@ -106,14 +106,15 @@ class SingBoxConfigBuilder {
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
+    final usesNaiveProxyCore =
+        target == SingBoxConfigTarget.windows &&
+        proxyOutbound['type'] == 'socks';
     _applyDialStability(
       proxyOutbound,
       target,
       dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+      usesNaiveProxyCore: usesNaiveProxyCore,
     );
-    final usesNaiveProxyCore =
-        target == SingBoxConfigTarget.windows &&
-        proxyOutbound['type'] == 'socks';
     final useWindowsTun =
         target == SingBoxConfigTarget.windows && windowsTunMode;
     final codexWebDomainsDirect =
@@ -168,6 +169,7 @@ class SingBoxConfigBuilder {
         codexWebDomainsDirect: codexWebDomainsDirect,
         windowsTunMode: useWindowsTun,
         dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+        usesNaiveProxyCore: usesNaiveProxyCore,
       ),
       'inbounds': _inbounds(target, windowsTunMode: useWindowsTun),
       'outbounds': [
@@ -231,6 +233,7 @@ class SingBoxConfigBuilder {
         'default_domain_resolver': _domainResolver(
           target,
           dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+          usesNaiveProxyCore: usesNaiveProxyCore,
         ),
         'auto_detect_interface': true,
         'find_process':
@@ -323,6 +326,7 @@ class SingBoxConfigBuilder {
     required bool codexWebDomainsDirect,
     required bool windowsTunMode,
     required bool dnsOnlyThroughVpn,
+    required bool usesNaiveProxyCore,
   }) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
@@ -351,7 +355,7 @@ class SingBoxConfigBuilder {
           'server_port': 443,
           'path': '/dns-query',
           'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
-          'detour': 'proxy',
+          if (!usesNaiveProxyCore) 'detour': 'proxy',
         },
     ];
 
@@ -428,12 +432,15 @@ class SingBoxConfigBuilder {
     Map<String, dynamic> proxyOutbound,
     SingBoxConfigTarget target, {
     required bool dnsOnlyThroughVpn,
+    required bool usesNaiveProxyCore,
   }) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
     if (target == SingBoxConfigTarget.windows) {
-      proxyOutbound['domain_resolver'] = dnsOnlyThroughVpn
+      proxyOutbound['domain_resolver'] = usesNaiveProxyCore
+          ? _normalizeDomainResolver('global-dns')
+          : dnsOnlyThroughVpn
           ? _normalizeDomainResolver('bootstrap-dns')
           : _normalizeDomainResolver(proxyOutbound['domain_resolver']);
     } else {
@@ -448,10 +455,15 @@ class SingBoxConfigBuilder {
   Object _domainResolver(
     SingBoxConfigTarget target, {
     required bool dnsOnlyThroughVpn,
+    required bool usesNaiveProxyCore,
   }) {
     if (target == SingBoxConfigTarget.windows) {
       return {
-        'server': dnsOnlyThroughVpn ? 'bootstrap-dns' : 'local-dns',
+        'server': usesNaiveProxyCore
+            ? 'global-dns'
+            : dnsOnlyThroughVpn
+            ? 'bootstrap-dns'
+            : 'local-dns',
         'strategy': 'ipv4_only',
       };
     }
