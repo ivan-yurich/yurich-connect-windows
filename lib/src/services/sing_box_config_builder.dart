@@ -54,6 +54,17 @@ class SingBoxConfigBuilder {
     'wt.exe',
     'WindowsTerminal.exe',
   ];
+  static const updaterDirectDomains = [
+    'github.com',
+    'api.github.com',
+    'uploads.github.com',
+    'objects.githubusercontent.com',
+    'release-assets.githubusercontent.com',
+  ];
+  static const updaterDirectDomainSuffixes = [
+    'github.com',
+    'githubusercontent.com',
+  ];
   static const russianDirectDomains = [
     '.ru',
     '.рф',
@@ -204,6 +215,12 @@ class SingBoxConfigBuilder {
             {
               'domain': codexDirectDomains,
               'domain_suffix': codexDirectDomainSuffixes,
+              'outbound': 'direct',
+            },
+          if (target == SingBoxConfigTarget.windows)
+            {
+              'domain': updaterDirectDomains,
+              'domain_suffix': updaterDirectDomainSuffixes,
               'outbound': 'direct',
             },
           _unsupportedUdpRule(
@@ -373,6 +390,12 @@ class SingBoxConfigBuilder {
         'rules': [
           {
             'query_type': windowsLocalDnsQueryTypes,
+            'action': 'route',
+            'server': 'local-dns',
+          },
+          {
+            'domain': updaterDirectDomains,
+            'domain_suffix': updaterDirectDomainSuffixes,
             'action': 'route',
             'server': 'local-dns',
           },
