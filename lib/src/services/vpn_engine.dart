@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import '../models/vpn_profile.dart';
 import 'android_vpn_engine.dart';
 import 'sing_box_config_builder.dart';
 import 'windows_sing_box_engine.dart';
@@ -30,7 +31,11 @@ abstract class VpnEngine {
   Future<String> getNotificationDescription();
   Future<bool> requestNotificationPermission();
   Future<String> getVPNStatus();
-  Future<bool> saveConfig(String config, {String? naiveProxyConfig});
+  Future<bool> saveConfig(
+    String config, {
+    String? naiveProxyConfig,
+    VpnCoreBackend coreBackend = VpnCoreBackend.singBox,
+  });
   Future<String> getConfig();
   Future<bool> startVPN();
   Future<bool> stopVPN();

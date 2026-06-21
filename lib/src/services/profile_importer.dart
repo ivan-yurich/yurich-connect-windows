@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../models/vpn_profile.dart';
 import 'sing_box_config_builder.dart';
+import 'vless_profile_tools.dart';
 
 class ProfileImportException implements Exception {
   const ProfileImportException(this.message);
@@ -47,7 +48,7 @@ class ProfileImporter {
 
   Future<_SubscriptionFetchResult> _fetchSubscription(Uri uri) async {
     final clients = [
-      'YurichConnect-Windows/1.0.35 YurichCore/sing-box/1.13.12',
+      'YurichConnect-Windows/1.0.39 YurichCore/sing-box/1.13.12',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',
@@ -303,6 +304,8 @@ class ProfileImporter {
       };
 
       final profiles = <VpnProfile>[];
+      final errors = <String>[];
+      var sawVless = false;
       for (final config in configs) {
         final outbounds = config['outbounds'];
         if (outbounds is! List) {
@@ -312,21 +315,27 @@ class ProfileImporter {
         for (final item in outbounds.whereType<Map>()) {
           final outbound = item.cast<String, dynamic>();
           if ((outbound['protocol'] as String?)?.toLowerCase() == 'vless') {
-            profiles.add(
-              _profileFromXrayVless(
-                config,
-                outbound,
-                defaultExpiresAt:
-                    _extractExpiryFromJson(config) ?? defaultExpiresAt,
-              ),
-            );
+            sawVless = true;
+            try {
+              profiles.add(
+                _profileFromXrayVless(
+                  config,
+                  outbound,
+                  defaultExpiresAt:
+                      _extractExpiryFromJson(config) ?? defaultExpiresAt,
+                ),
+              );
+            } on ProfileImportException catch (error) {
+              errors.add(error.message);
+            }
           }
         }
       }
+      if (profiles.isEmpty && sawVless && errors.isNotEmpty) {
+        throw ProfileImportException(errors.join('\n'));
+      }
       return profiles;
     } on FormatException {
-      return const [];
-    } on ProfileImportException {
       return const [];
     }
   }
@@ -391,6 +400,7 @@ class ProfileImporter {
     if (alpnValue.isNotEmpty) {
       query['alpn'] = alpnValue;
     }
+    _addXrayVlessTransportQuery(query, stream);
 
     final uri = Uri(
       scheme: 'vless',
@@ -407,6 +417,52 @@ class ProfileImporter {
         candidates: [_extractExpiryFromQuery(query)],
       ),
     );
+  }
+
+  void _addXrayVlessTransportQuery(
+    Map<String, String> query,
+    Map<String, dynamic> stream,
+  ) {
+    final network = (query['type'] ?? 'tcp').toLowerCase();
+    Map<String, dynamic>? settings;
+    switch (network) {
+      case 'ws':
+        settings = _asMap(stream['wsSettings']);
+        _putIfNotEmpty(query, 'path', settings?['path']);
+        final headers = _asMap(settings?['headers']);
+        _putIfNotEmpty(query, 'host', headers?['Host'] ?? headers?['host']);
+        break;
+      case 'grpc':
+        settings = _asMap(stream['grpcSettings']);
+        _putIfNotEmpty(
+          query,
+          'serviceName',
+          settings?['serviceName'] ?? settings?['service_name'],
+        );
+        break;
+      case 'http':
+      case 'h2':
+        settings = _asMap(stream['httpSettings']);
+        _putIfNotEmpty(query, 'host', _listOrString(settings?['host']));
+        _putIfNotEmpty(query, 'path', _listOrString(settings?['path']));
+        break;
+      case 'httpupgrade':
+        settings = _asMap(stream['httpupgradeSettings']);
+        _putIfNotEmpty(query, 'host', settings?['host']);
+        _putIfNotEmpty(query, 'path', settings?['path']);
+        break;
+      case 'xhttp':
+      case 'splithttp':
+        query['type'] = 'xhttp';
+        settings =
+            _asMap(stream['xhttpSettings']) ??
+            _asMap(stream['splithttpSettings']);
+        _putIfNotEmpty(query, 'host', settings?['host']);
+        _putIfNotEmpty(query, 'path', settings?['path']);
+        _putIfNotEmpty(query, 'mode', settings?['mode']);
+        _putIfNotEmpty(query, 'extra', settings?['extra']);
+        break;
+    }
   }
 
   List<String> _extractLinks(String text) {
@@ -453,16 +509,32 @@ class ProfileImporter {
 
   VpnProfile _parseVless(String link, {DateTime? expiresAt}) {
     final uri = Uri.parse(link);
-    final uuid = Uri.decodeComponent(uri.userInfo);
+    final uuid = Uri.decodeComponent(uri.userInfo).trim();
     if (uuid.isEmpty || uri.host.isEmpty) {
       throw const ProfileImportException('VLESS ссылка без UUID или host.');
+    }
+    if (!VlessProfileTools.isValidUuid(uuid)) {
+      throw const ProfileImportException(
+        'VLESS ссылка содержит неверный UUID.',
+      );
     }
 
     final query = _query(uri);
     final security = (query['security'] ?? '').toLowerCase();
+    if (!const {'', 'none', 'tls', 'reality'}.contains(security)) {
+      throw ProfileImportException(
+        'VLESS security "$security" не поддерживается. Доступны reality или tls.',
+      );
+    }
     final port = uri.hasPort ? uri.port : 443;
     final name = _displayName(uri.fragment, fallback: uri.host);
     final tls = <String, dynamic>{};
+    final flow = _normalizeVlessFlow(query['flow']);
+    final packetEncoding = _normalizeVlessPacketEncoding(
+      query['packet_encoding'] ??
+          query['packetEncoding'] ??
+          query['packet-encoding'],
+    );
 
     if (security == 'reality' || security == 'tls') {
       tls['enabled'] = true;
@@ -506,7 +578,8 @@ class ProfileImporter {
       'server': uri.host,
       'server_port': port,
       'uuid': uuid,
-      if ((query['flow'] ?? '').isNotEmpty) 'flow': query['flow'],
+      ..._optionalMapEntry('flow', flow),
+      ..._optionalMapEntry('packet_encoding', packetEncoding),
       if (tls.isNotEmpty) 'tls': tls,
     };
 
@@ -514,6 +587,17 @@ class ProfileImporter {
     if (transport != null) {
       outbound['transport'] = transport;
     }
+    final transportType = VlessProfileTools.safeTransportType(
+      VpnProfile(
+        id: '_import_probe',
+        name: name,
+        kind: security == 'reality'
+            ? VpnProfileKind.vlessReality
+            : VpnProfileKind.vlessTls,
+        originalInput: link,
+        outbound: outbound,
+      ),
+    );
 
     return VpnProfile(
       id: _stableId(link),
@@ -525,11 +609,34 @@ class ProfileImporter {
       server: uri.host,
       port: port,
       outbound: outbound,
+      coreBackend: transportType == 'xhttp'
+          ? VpnCoreBackend.xray
+          : VpnCoreBackend.auto,
       expiresAt: _resolveExpiresAt(
         defaultValue: expiresAt,
         candidates: [_extractExpiryFromQuery(query)],
       ),
     );
+  }
+
+  String? _normalizeVlessFlow(String? value) {
+    try {
+      return VlessProfileTools.normalizeFlow(value);
+    } on Object catch (error) {
+      throw ProfileImportException(_vlessToolError(error));
+    }
+  }
+
+  String? _normalizeVlessPacketEncoding(String? value) {
+    try {
+      return VlessProfileTools.normalizePacketEncoding(value);
+    } on Object catch (error) {
+      throw ProfileImportException(_vlessToolError(error));
+    }
+  }
+
+  String _vlessToolError(Object error) {
+    return '$error'.replaceFirst(RegExp(r'^Bad state:\s*'), '');
   }
 
   VpnProfile _parseNaive(String link, {DateTime? expiresAt}) {
@@ -901,8 +1008,22 @@ class ProfileImporter {
     return int.tryParse(value.trim());
   }
 
+  void _putIfNotEmpty(Map<String, String> target, String key, Object? value) {
+    final text = '$value'.trim();
+    if (value == null || text.isEmpty || text == 'null') {
+      return;
+    }
+    target[key] = text;
+  }
+
+  Map<String, dynamic> _optionalMapEntry(String key, Object? value) {
+    return value == null ? const {} : {key: value};
+  }
+
   Map<String, dynamic>? _v2rayTransport(Map<String, String> query) {
-    final type = (query['type'] ?? query['transport'] ?? 'tcp').toLowerCase();
+    final type = _normalizeVlessTransportType(
+      query['type'] ?? query['transport'] ?? 'tcp',
+    );
     if (type == 'tcp' || type.isEmpty) {
       return null;
     }
@@ -917,6 +1038,10 @@ class ProfileImporter {
         'type': 'ws',
         if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
         if (headers.isNotEmpty) 'headers': headers,
+        if (_asIntString(query['ed']) != null)
+          'max_early_data': _asIntString(query['ed']),
+        if ((query['eh'] ?? query['earlyDataHeaderName'] ?? '').isNotEmpty)
+          'early_data_header_name': query['eh'] ?? query['earlyDataHeaderName'],
       };
     }
 
@@ -925,6 +1050,12 @@ class ProfileImporter {
         'type': 'grpc',
         if ((query['serviceName'] ?? query['service_name'] ?? '').isNotEmpty)
           'service_name': query['serviceName'] ?? query['service_name'],
+        if ((query['idle_timeout'] ?? '').isNotEmpty)
+          'idle_timeout': query['idle_timeout'],
+        if ((query['ping_timeout'] ?? '').isNotEmpty)
+          'ping_timeout': query['ping_timeout'],
+        if (_truthy(query['permit_without_stream']))
+          'permit_without_stream': true,
       };
     }
 
@@ -933,10 +1064,41 @@ class ProfileImporter {
         'type': 'http',
         if ((query['host'] ?? '').isNotEmpty) 'host': _csv(query['host']),
         if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
+        if ((query['method'] ?? '').isNotEmpty) 'method': query['method'],
+        if ((query['idle_timeout'] ?? '').isNotEmpty)
+          'idle_timeout': query['idle_timeout'],
+        if ((query['ping_timeout'] ?? '').isNotEmpty)
+          'ping_timeout': query['ping_timeout'],
+      };
+    }
+
+    if (type == 'httpupgrade') {
+      return {
+        'type': 'httpupgrade',
+        if ((query['host'] ?? '').isNotEmpty) 'host': query['host'],
+        if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
+      };
+    }
+
+    if (type == 'xhttp') {
+      return {
+        'type': 'xhttp',
+        if ((query['host'] ?? '').isNotEmpty) 'host': query['host'],
+        if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
+        if ((query['mode'] ?? '').isNotEmpty) 'mode': query['mode'],
+        if ((query['extra'] ?? '').isNotEmpty) 'extra': query['extra'],
       };
     }
 
     throw ProfileImportException('Transport "$type" пока не поддержан.');
+  }
+
+  String _normalizeVlessTransportType(String? value) {
+    try {
+      return VlessProfileTools.normalizeImportTransportType(value);
+    } on Object catch (error) {
+      throw ProfileImportException(_vlessToolError(error));
+    }
   }
 
   String? _tryDecodeBase64(String text) {

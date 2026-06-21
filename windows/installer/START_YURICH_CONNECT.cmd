@@ -20,22 +20,5 @@ if not exist "%APP_EXE%" (
   exit /b 1
 )
 
-net session >nul 2>&1
-if %errorlevel%==0 (
-  start "" /D "%APP_DIR%" "%APP_EXE%"
-  exit /b 0
-)
-
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$exe = '%APP_EXE%'; $dir = '%APP_DIR%';" ^
-  "try { Start-Process -FilePath $exe -WorkingDirectory $dir -Verb RunAs -ErrorAction Stop; exit 0 }" ^
-  "catch { [Console]::Error.WriteLine('Пользователь отменил запрос прав администратора или Windows заблокировал запуск.'); exit 1223 }"
-
-if errorlevel 1 (
-  echo.
-  echo Yurich Connect не запущен: нужны права администратора для Windows TUN/Wintun.
-  pause
-  exit /b 1
-)
-
+start "" /D "%APP_DIR%" "%APP_EXE%"
 exit /b 0

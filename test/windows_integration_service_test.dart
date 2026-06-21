@@ -2,8 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/services/windows_integration_service.dart';
 
 void main() {
-  group('WindowsIntegrationService auto-start task XML', () {
-    test('accepts elevated immediate task that can run on battery', () {
+  group('WindowsIntegrationService legacy auto-start task XML', () {
+    test('detects elevated immediate task as installed legacy startup', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -29,10 +29,14 @@ void main() {
 </Task>
 ''';
 
-      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
+      expect(
+        WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
+        isTrue,
+      );
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
     });
 
-    test('accepts elevated immediate task without startup delay field', () {
+    test('detects elevated immediate task without startup delay field', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -53,14 +57,14 @@ void main() {
 </Task>
 ''';
 
-      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
       expect(
         WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
         isTrue,
       );
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isFalse);
     });
 
-    test('rejects old task with non-zero startup delay', () {
+    test('detects old task with non-zero startup delay', () {
       const xml = r'''
 <Task>
   <Principals>
@@ -201,6 +205,49 @@ void main() {
           '1.0.22',
         ),
         isNegative,
+      );
+    });
+  });
+
+  group('WindowsIntegrationService release web fallback', () {
+    test('extracts latest release tag from redirect location', () {
+      expect(
+        WindowsIntegrationService.releaseTagFromLocation(
+          'https://github.com/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.38-windows',
+        ),
+        'v1.0.38-windows',
+      );
+      expect(
+        WindowsIntegrationService.releaseTagFromLocation(
+          '/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.39-windows',
+        ),
+        'v1.0.39-windows',
+      );
+    });
+
+    test('extracts latest release tag from GitHub html', () {
+      expect(
+        WindowsIntegrationService.releaseTagFromHtml(
+          '<a href="/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.40-windows">latest</a>',
+        ),
+        'v1.0.40-windows',
+      );
+    });
+
+    test('extracts latest release tag from GitHub atom feed', () {
+      const atom = '''
+<feed>
+  <entry>
+    <id>tag:github.com,2008:Repository/1246885860/v1.0.41-windows</id>
+    <link rel="alternate" type="text/html" href="https://github.com/ivan-yurich/yurich-connect-windows/releases/tag/v1.0.41-windows"/>
+    <title>Yurich Connect for Windows v1.0.41</title>
+  </entry>
+</feed>
+''';
+
+      expect(
+        WindowsIntegrationService.releaseTagFromAtom(atom),
+        'v1.0.41-windows',
       );
     });
   });

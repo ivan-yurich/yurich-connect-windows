@@ -73,7 +73,7 @@ Invoke-Step 'Repack portable archive' {
 }
 
 Invoke-Step 'Windows runtime files' {
-  foreach ($name in @('sing-box.exe', 'wintun.dll', 'libcronet.dll')) {
+  foreach ($name in @('sing-box.exe', 'xray.exe', 'wintun.dll', 'libcronet.dll')) {
     $path = Join-Path $runtimeDir $name
     if (-not (Test-Path -LiteralPath $path)) {
       throw "Missing runtime file: $path"
@@ -90,6 +90,7 @@ Invoke-Step 'Windows runtime files' {
     Write-Host ("{0}  {1} bytes  {2}" -f $item.Name, $item.Length, $item.LastWriteTime)
   }
   & (Join-Path $runtimeDir 'sing-box.exe') version
+  & (Join-Path $runtimeDir 'xray.exe') version
 }
 
 Invoke-Step 'Active sing-box config check' {
@@ -113,6 +114,8 @@ Invoke-Step 'Portable archive contents' {
     'Yurich Connect/tray_manager_plugin.dll',
     'Yurich Connect/window_manager_plugin.dll',
     'Yurich Connect/runtime/sing-box.exe',
+    'Yurich Connect/runtime/xray.exe',
+    'Yurich Connect/runtime/XRAY_LICENSE.txt',
     'Yurich Connect/runtime/naive.exe',
     'Yurich Connect/runtime/NAIVE_LICENSE.txt',
     'Yurich Connect/runtime/wintun.dll',
@@ -145,6 +148,7 @@ Invoke-Step 'Installer payload safety scan' {
     'YurichConnect.exe',
     'flutter_windows.dll',
     'runtime/sing-box.exe',
+    'runtime/xray.exe',
     'runtime/naive.exe',
     'runtime/wintun.dll',
     'runtime/libcronet.dll',
@@ -182,7 +186,7 @@ Invoke-Step 'Installer payload safety scan' {
     '(?:Remnawave|Yurich ID)[^\r\n]+https?://'
   )
   $pattern = ($patterns -join '|')
-  $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' $pattern $portableRootDir 2>$null)
+  $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' --glob '!runtime/XRAY_LICENSE.txt' $pattern $portableRootDir 2>$null)
   if ($matches.Count -gt 0) {
     throw "Payload safety scan found sensitive/dev data in $portableRootDir`n$($matches -join [Environment]::NewLine)"
   }

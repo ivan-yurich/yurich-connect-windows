@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../branding.dart';
+import 'sing_box_config_builder.dart';
 
 class WindowsUpdateInfo {
   const WindowsUpdateInfo({
@@ -38,18 +39,39 @@ class WindowsIntegrationService {
     'api.github.com',
     '/repos/$githubOwner/$githubRepo/releases/latest',
   );
+  static final latestReleaseWeb = Uri.https(
+    'github.com',
+    '/$githubOwner/$githubRepo/releases/latest',
+  );
+  static final latestReleaseAtom = Uri.https(
+    'github.com',
+    '/$githubOwner/$githubRepo/releases.atom',
+  );
 
   static const _taskName = YurichBranding.appName;
   static const _legacyTaskName = 'Aurum VPN';
-  static const _startupDelayIso8601 = 'PT0S';
+  static const _runKeyPath =
+      r'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';
+  static const _internetSettingsKey =
+      r'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';
+  static const _proxyBackupEnableName = 'YurichConnectProxyBackupEnable';
+  static const _proxyBackupServerName = 'YurichConnectProxyBackupServer';
+  static const _systemProxyServer =
+      'http=127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort};'
+      'https=127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort};'
+      'socks=127.0.0.1:${SingBoxConfigBuilder.localSocksProxyPort}';
 
   Future<bool> isAutoStartEnabled() async {
     if (!Platform.isWindows) {
       return false;
     }
-    final xml =
-        await _queryTaskXml(_taskName) ?? await _queryTaskXml(_legacyTaskName);
-    return xml != null && isAutoStartTaskHealthyXml(xml);
+    final command = await _readAutoStartRunValue();
+    if (command == null || command.isEmpty) {
+      return false;
+    }
+    return _normalizedAutoStartCommand(
+      command,
+    ).contains(_normalizedAutoStartCommand(Platform.resolvedExecutable));
   }
 
   Future<void> repairAutoStartIfNeeded() async {
@@ -58,23 +80,16 @@ class WindowsIntegrationService {
     }
 
     final currentXml = await _queryTaskXml(_taskName);
-    if (currentXml != null &&
-        isAutoStartTaskInstalledXml(currentXml) &&
-        !isAutoStartTaskHealthyXml(currentXml)) {
-      try {
-        await setAutoStart(true, requestElevation: false);
-      } on Object {
-        // The app may be opened without elevation. In that case the UI should
-        // keep working and let the user reinstall or toggle startup later.
-      }
-    }
-
     final legacyXml = await _queryTaskXml(_legacyTaskName);
-    if (legacyXml != null && isAutoStartTaskInstalledXml(legacyXml)) {
+    final hasLegacyTask =
+        (currentXml != null && isAutoStartTaskInstalledXml(currentXml)) ||
+        (legacyXml != null && isAutoStartTaskInstalledXml(legacyXml));
+    if (hasLegacyTask) {
       try {
         await setAutoStart(true, requestElevation: false);
       } on Object {
-        // Same best-effort behavior as the regular startup repair.
+        // Best-effort migration: the app should keep working even if Windows
+        // denies removal of an old elevated scheduled task.
       }
     }
   }
@@ -124,87 +139,95 @@ try {
     }
 
     if (!enabled) {
-      await _runStartupTaskScript(
-        _deleteStartupTaskScript(),
-        requestElevation: requestElevation,
-      );
+      await _deleteAutoStartRunValue();
+      await _deleteLegacyStartupTasks();
       return;
     }
 
     final executable = Platform.resolvedExecutable;
-    await _runStartupTaskScript(
-      _createStartupTaskScript(executable),
-      requestElevation: requestElevation,
-    );
+    await _writeAutoStartRunValue(executable);
+    await _deleteLegacyStartupTasks();
   }
 
-  Future<void> _runStartupTaskScript(
-    String script, {
-    required bool requestElevation,
-  }) async {
-    final elevated = await _isCurrentProcessElevated();
-    final wrappedScript = _wrapPowerShellScript(script);
-    if (elevated) {
-      final result = await Process.run('powershell', [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        wrappedScript,
-      ]).timeout(const Duration(seconds: 45));
-      if (result.exitCode != 0) {
-        final error = '${result.stderr}${result.stdout}'.trim();
-        throw StateError(
-          error.isEmpty ? 'Could not update startup task.' : error,
-        );
-      }
+  Future<bool> isSystemProxyEnabled() async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+    final script =
+        '''
+\$enable = Get-ItemPropertyValue -Path ${_quotePowerShell(_internetSettingsKey)} -Name ProxyEnable -ErrorAction SilentlyContinue
+\$server = Get-ItemPropertyValue -Path ${_quotePowerShell(_internetSettingsKey)} -Name ProxyServer -ErrorAction SilentlyContinue
+Write-Output "\$enable|\$server"
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 8),
+    );
+    if (result.exitCode != 0) {
+      return false;
+    }
+    final text = '${result.stdout}'.trim();
+    final separator = text.indexOf('|');
+    if (separator < 0) {
+      return false;
+    }
+    final enabled = text.substring(0, separator).trim() == '1';
+    final server = text.substring(separator + 1).trim();
+    return enabled && server == _systemProxyServer;
+  }
+
+  Future<void> setSystemProxyEnabled(bool enabled) async {
+    if (!Platform.isWindows) {
       return;
     }
-
-    if (!requestElevation) {
-      throw StateError('Administrator rights are required.');
-    }
-
-    await _runPowerShellScriptAsAdmin(script);
+    final key = _quotePowerShell(_internetSettingsKey);
+    final server = _quotePowerShell(_systemProxyServer);
+    final backupEnable = _quotePowerShell(_proxyBackupEnableName);
+    final backupServer = _quotePowerShell(_proxyBackupServerName);
+    final script = enabled
+        ? '''
+New-Item -Path $key -Force | Out-Null
+\$currentEnable = Get-ItemPropertyValue -Path $key -Name ProxyEnable -ErrorAction SilentlyContinue
+\$currentServer = Get-ItemPropertyValue -Path $key -Name ProxyServer -ErrorAction SilentlyContinue
+if (\$currentServer -ne $server) {
+  \$currentEnableValue = 0
+  if (\$null -ne \$currentEnable) { \$currentEnableValue = [int]\$currentEnable }
+  New-ItemProperty -Path $key -Name $backupEnable -PropertyType DWord -Value \$currentEnableValue -Force | Out-Null
+  if (\$null -ne \$currentServer) {
+    New-ItemProperty -Path $key -Name $backupServer -PropertyType String -Value \$currentServer -Force | Out-Null
+  } else {
+    Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyContinue
   }
-
-  Future<void> _runPowerShellScriptAsAdmin(String script) async {
-    final dir = Directory('${Directory.systemTemp.path}\\YurichConnect');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    final file = File(
-      '${dir.path}\\startup_${DateTime.now().millisecondsSinceEpoch}.ps1',
+}
+New-ItemProperty -Path $key -Name ProxyEnable -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $key -Name ProxyServer -PropertyType String -Value $server -Force | Out-Null
+'''
+        : '''
+New-Item -Path $key -Force | Out-Null
+\$backupEnableValue = Get-ItemPropertyValue -Path $key -Name $backupEnable -ErrorAction SilentlyContinue
+\$backupServerValue = Get-ItemPropertyValue -Path $key -Name $backupServer -ErrorAction SilentlyContinue
+if (\$null -ne \$backupEnableValue) {
+  New-ItemProperty -Path $key -Name ProxyEnable -PropertyType DWord -Value ([int]\$backupEnableValue) -Force | Out-Null
+} else {
+  New-ItemProperty -Path $key -Name ProxyEnable -PropertyType DWord -Value 0 -Force | Out-Null
+}
+if (-not [string]::IsNullOrWhiteSpace([string]\$backupServerValue)) {
+  New-ItemProperty -Path $key -Name ProxyServer -PropertyType String -Value \$backupServerValue -Force | Out-Null
+} else {
+  Remove-ItemProperty -Path $key -Name ProxyServer -Force -ErrorAction SilentlyContinue
+}
+Remove-ItemProperty -Path $key -Name $backupEnable -Force -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyContinue
+''';
+    final result = await _runPowerShell(
+      '${_proxyChangeType()}\n$script\n${_notifyProxyChangedScript()}',
+      timeout: const Duration(seconds: 12),
     );
-    await file.writeAsString(_wrapPowerShellScript(script), flush: true);
-    try {
-      final filePath = _quotePowerShell(file.path);
-      final result = await Process.run('powershell', [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        '''
-\$ErrorActionPreference = 'Stop'
-\$process = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$filePath) -Verb RunAs -Wait -PassThru
-if (\$null -eq \$process) { exit 1 }
-exit \$process.ExitCode
-''',
-      ]);
-      if (result.exitCode != 0) {
-        final error = '${result.stderr}${result.stdout}'.trim();
-        throw StateError(
-          error.isEmpty
-              ? 'Windows UAC did not allow startup task update.'
-              : error,
-        );
-      }
-    } finally {
-      try {
-        await file.delete();
-      } on Object {
-        // Best effort cleanup.
-      }
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not update Windows system proxy.' : error,
+      );
     }
   }
 
@@ -227,25 +250,71 @@ exit \$process.ExitCode
   }
 
   Future<WindowsUpdateInfo> checkForUpdate(String currentVersion) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final errors = <String>[];
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _checkForUpdateViaApi(
+          currentVersion,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on _TransientUpdateException catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)}: ${error.message}');
+      } on Object catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)}: $error');
+      }
+    }
+
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _checkForUpdateViaAtom(
+          currentVersion,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on Object catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)} atom: $error');
+      }
+    }
+
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        return await _checkForUpdateViaWeb(
+          currentVersion,
+          viaLocalProxy: viaLocalProxy,
+        );
+      } on Object catch (error) {
+        errors.add('${_updateRouteLabel(viaLocalProxy)} web: $error');
+      }
+    }
+
+    final details = errors.take(3).join('; ');
+    return WindowsUpdateInfo(
+      message: details.isEmpty
+          ? 'GitHub is temporarily unavailable. Try again later.'
+          : 'GitHub is temporarily unavailable. Try again later. Details: $details',
+    );
+  }
+
+  Future<WindowsUpdateInfo> _checkForUpdateViaApi(
+    String currentVersion, {
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy);
     try {
       final request = await client.getUrl(latestReleaseApi);
-      request.headers.set(
-        HttpHeaders.userAgentHeader,
-        'YurichConnect/$currentVersion',
-      );
-      request.headers.set(
-        HttpHeaders.acceptHeader,
-        'application/vnd.github+json',
-      );
+      _setGitHubHeaders(request, currentVersion);
       final response = await request.close().timeout(
-        const Duration(seconds: 10),
+        const Duration(seconds: 12),
       );
       final body = await response.transform(utf8.decoder).join();
 
       if (response.statusCode == HttpStatus.notFound) {
         return const WindowsUpdateInfo(
           message: 'GitHub releases are not published yet.',
+        );
+      }
+      if (response.statusCode >= 500 && response.statusCode < 600) {
+        throw _TransientUpdateException(
+          'GitHub API HTTP ${response.statusCode}',
         );
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -262,36 +331,154 @@ exit \$process.ExitCode
         return const WindowsUpdateInfo(message: 'Latest release has no tag.');
       }
 
-      final versionComparison = compareReleaseVersions(tag, currentVersion);
-      final available = versionComparison > 0;
-      final latestIsOlder = versionComparison < 0;
-      return WindowsUpdateInfo(
-        available: available,
-        latestIsOlder: latestIsOlder,
+      return _buildUpdateInfo(
         currentVersion: currentVersion,
-        latestVersion: tag,
+        tag: tag,
         releaseUrl: htmlUrl == null || htmlUrl.isEmpty
             ? null
             : Uri.parse(htmlUrl),
-        installerUrl: installerAsset?.downloadUrl,
-        installerName: installerAsset?.name,
-        installerSize: installerAsset?.size,
-        message: available
-            ? 'Update available: $tag'
-            : latestIsOlder
-            ? 'Installed build $currentVersion is newer than GitHub latest $tag.'
-            : 'You are up to date: $tag',
+        installerAsset: installerAsset,
       );
-    } on Object catch (e) {
-      return WindowsUpdateInfo(message: 'Update check failed: $e');
     } finally {
       client.close(force: true);
     }
   }
 
+  Future<WindowsUpdateInfo> _checkForUpdateViaWeb(
+    String currentVersion, {
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy);
+    try {
+      final request = await client.getUrl(latestReleaseWeb);
+      request.followRedirects = false;
+      _setGitHubHeaders(request, currentVersion);
+      request.headers.set(HttpHeaders.acceptHeader, 'text/html, */*');
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      final body = await response.transform(utf8.decoder).join();
+
+      if (response.statusCode >= 500 && response.statusCode < 600) {
+        throw _TransientUpdateException(
+          'GitHub web HTTP ${response.statusCode}',
+        );
+      }
+      if (response.statusCode < 200 || response.statusCode >= 400) {
+        throw StateError('GitHub web returned HTTP ${response.statusCode}.');
+      }
+
+      final location = response.headers.value(HttpHeaders.locationHeader);
+      final tag = releaseTagFromLocation(location) ?? releaseTagFromHtml(body);
+      if (tag == null || tag.isEmpty) {
+        throw StateError('GitHub web latest page has no release tag.');
+      }
+
+      final releaseUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/tag/$tag',
+      );
+      final installerUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe',
+      );
+      return _buildUpdateInfo(
+        currentVersion: currentVersion,
+        tag: tag,
+        releaseUrl: releaseUrl,
+        installerAsset: _ReleaseAsset(
+          name: 'YurichConnect_Setup.exe',
+          downloadUrl: installerUrl,
+          size: null,
+        ),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<WindowsUpdateInfo> _checkForUpdateViaAtom(
+    String currentVersion, {
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy);
+    try {
+      final request = await client.getUrl(latestReleaseAtom);
+      _setGitHubHeaders(request, currentVersion);
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        'application/atom+xml, application/xml, text/xml, */*',
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      final body = await response.transform(utf8.decoder).join();
+
+      if (response.statusCode >= 500 && response.statusCode < 600) {
+        throw _TransientUpdateException(
+          'GitHub atom HTTP ${response.statusCode}',
+        );
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('GitHub atom returned HTTP ${response.statusCode}.');
+      }
+
+      final tag = releaseTagFromAtom(body);
+      if (tag == null || tag.isEmpty) {
+        throw StateError('GitHub atom feed has no release tag.');
+      }
+
+      final releaseUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/tag/$tag',
+      );
+      final installerUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe',
+      );
+      return _buildUpdateInfo(
+        currentVersion: currentVersion,
+        tag: tag,
+        releaseUrl: releaseUrl,
+        installerAsset: _ReleaseAsset(
+          name: 'YurichConnect_Setup.exe',
+          downloadUrl: installerUrl,
+          size: null,
+        ),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  WindowsUpdateInfo _buildUpdateInfo({
+    required String currentVersion,
+    required String tag,
+    required Uri? releaseUrl,
+    required _ReleaseAsset? installerAsset,
+  }) {
+    final versionComparison = compareReleaseVersions(tag, currentVersion);
+    final available = versionComparison > 0;
+    final latestIsOlder = versionComparison < 0;
+    return WindowsUpdateInfo(
+      available: available,
+      latestIsOlder: latestIsOlder,
+      currentVersion: currentVersion,
+      latestVersion: tag,
+      releaseUrl: releaseUrl,
+      installerUrl: installerAsset?.downloadUrl,
+      installerName: installerAsset?.name,
+      installerSize: installerAsset?.size,
+      message: available
+          ? 'Update available: $tag'
+          : latestIsOlder
+          ? 'Installed build $currentVersion is newer than GitHub latest $tag.'
+          : 'You are up to date: $tag',
+    );
+  }
+
   Future<File> downloadInstaller(WindowsUpdateInfo update) async {
-    final url = update.installerUrl;
-    if (url == null) {
+    if (update.installerUrl == null) {
       throw StateError('Latest release has no Windows installer asset.');
     }
 
@@ -303,11 +490,101 @@ exit \$process.ExitCode
     final target = File(
       '${Directory.systemTemp.path}\\YurichConnect_Update_$safeVersion\\$fileName',
     );
+    final partial = File('${target.path}.download');
     if (!await target.parent.exists()) {
       await target.parent.create(recursive: true);
     }
 
-    final client = HttpClient()
+    if (await _isValidDownloadedInstaller(target, update.installerSize)) {
+      return target;
+    }
+
+    final errors = <String>[];
+    Future<File?> tryDownload(
+      String label,
+      Future<File> Function() action,
+    ) async {
+      try {
+        if (await partial.exists()) {
+          await partial.delete();
+        }
+        return await action();
+      } on Object catch (error) {
+        errors.add('$label: ${_shortUpdateError(error)}');
+        try {
+          if (await partial.exists()) {
+            await partial.delete();
+          }
+        } on Object {
+          // Best-effort cleanup of an incomplete update payload.
+        }
+        return null;
+      }
+    }
+
+    for (final viaLocalProxy in const [false, true]) {
+      final result = await tryDownload(
+        'Dart ${_updateRouteLabel(viaLocalProxy)}',
+        () => _downloadInstaller(
+          update,
+          target: target,
+          partial: partial,
+          viaLocalProxy: viaLocalProxy,
+        ),
+      );
+      if (result != null) {
+        return result;
+      }
+    }
+
+    if (Platform.isWindows) {
+      for (final viaLocalProxy in const [false, true]) {
+        final result = await tryDownload(
+          'curl.exe ${_updateRouteLabel(viaLocalProxy)}',
+          () => _downloadInstallerWithCurl(
+            update,
+            target: target,
+            partial: partial,
+            viaLocalProxy: viaLocalProxy,
+          ),
+        );
+        if (result != null) {
+          return result;
+        }
+      }
+
+      for (final viaLocalProxy in const [false, true]) {
+        final result = await tryDownload(
+          'PowerShell ${_updateRouteLabel(viaLocalProxy)}',
+          () => _downloadInstallerWithPowerShell(
+            update,
+            target: target,
+            partial: partial,
+            viaLocalProxy: viaLocalProxy,
+          ),
+        );
+        if (result != null) {
+          return result;
+        }
+      }
+    }
+
+    final details = errors.take(6).join('; ');
+    throw StateError(
+      details.isEmpty
+          ? 'Could not download update installer.'
+          : 'Could not download update installer. Tried ${errors.length} methods. $details',
+    );
+  }
+
+  Future<File> _downloadInstaller(
+    WindowsUpdateInfo update, {
+    required File target,
+    required File partial,
+    required bool viaLocalProxy,
+  }) async {
+    final url = update.installerUrl!;
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy)
       ..connectionTimeout = const Duration(seconds: 15);
     try {
       final request = await client.getUrl(url);
@@ -319,11 +596,176 @@ exit \$process.ExitCode
         throw StateError('GitHub asset returned HTTP ${response.statusCode}.');
       }
 
-      await response.pipe(target.openWrite());
-      return target;
+      await response
+          .pipe(partial.openWrite())
+          .timeout(const Duration(minutes: 15));
+      return await _finalizeDownloadedInstaller(
+        target,
+        partial,
+        update.installerSize,
+      );
+    } on Object {
+      try {
+        if (await partial.exists()) {
+          await partial.delete();
+        }
+      } on Object {
+        // Best-effort cleanup of an incomplete update payload.
+      }
+      rethrow;
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<File> _downloadInstallerWithCurl(
+    WindowsUpdateInfo update, {
+    required File target,
+    required File partial,
+    required bool viaLocalProxy,
+  }) async {
+    final args = <String>[
+      '--fail',
+      '--location',
+      '--show-error',
+      '--silent',
+      '--connect-timeout',
+      '30',
+      '--max-time',
+      '900',
+      '--retry',
+      '3',
+      '--retry-delay',
+      '2',
+      '--retry-all-errors',
+      '--tlsv1.2',
+      '--ssl-no-revoke',
+      '--proto',
+      '=https',
+      '--user-agent',
+      'YurichConnect updater',
+      '--output',
+      partial.path,
+    ];
+    if (viaLocalProxy) {
+      args.addAll([
+        '--proxy',
+        'http://127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}',
+      ]);
+    } else {
+      args.addAll(['--noproxy', '*']);
+    }
+    args.add(update.installerUrl!.toString());
+
+    final result = await Process.run(
+      'curl.exe',
+      args,
+    ).timeout(const Duration(minutes: 16));
+    if (result.exitCode != 0) {
+      final output = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        output.isEmpty
+            ? 'curl.exe exited with code ${result.exitCode}.'
+            : 'curl.exe exited with code ${result.exitCode}: $output',
+      );
+    }
+    return _finalizeDownloadedInstaller(target, partial, update.installerSize);
+  }
+
+  Future<File> _downloadInstallerWithPowerShell(
+    WindowsUpdateInfo update, {
+    required File target,
+    required File partial,
+    required bool viaLocalProxy,
+  }) async {
+    final url = _quotePowerShell(update.installerUrl!.toString());
+    final outFile = _quotePowerShell(partial.path);
+    final proxy = viaLocalProxy
+        ? "-Proxy ${_quotePowerShell('http://127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}')}"
+        : '';
+    final script =
+        '''
+\$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 900 -Headers @{ 'User-Agent' = 'YurichConnect updater' } $proxy
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(minutes: 16),
+    );
+    if (result.exitCode != 0) {
+      final output = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        output.isEmpty
+            ? 'PowerShell downloader exited with code ${result.exitCode}.'
+            : output,
+      );
+    }
+    return _finalizeDownloadedInstaller(target, partial, update.installerSize);
+  }
+
+  Future<File> _finalizeDownloadedInstaller(
+    File target,
+    File partial,
+    int? expectedSize,
+  ) async {
+    final actualSize = await partial.length();
+    if (expectedSize != null && actualSize != expectedSize) {
+      throw StateError(
+        'Downloaded installer size mismatch: $actualSize of $expectedSize bytes.',
+      );
+    }
+    if (actualSize < 1024 * 1024) {
+      throw StateError('Downloaded installer is too small: $actualSize bytes.');
+    }
+    if (await target.exists()) {
+      await target.delete();
+    }
+    await partial.rename(target.path);
+    return target;
+  }
+
+  Future<bool> _isValidDownloadedInstaller(File file, int? expectedSize) async {
+    if (!await file.exists()) {
+      return false;
+    }
+    final size = await file.length();
+    if (size < 1024 * 1024) {
+      return false;
+    }
+    return expectedSize == null || size == expectedSize;
+  }
+
+  HttpClient _githubHttpClient({required bool viaLocalProxy}) {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    if (viaLocalProxy) {
+      client.findProxy = (_) =>
+          'PROXY 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}';
+    }
+    return client;
+  }
+
+  void _setGitHubHeaders(HttpClientRequest request, String currentVersion) {
+    request.headers.set(
+      HttpHeaders.userAgentHeader,
+      'YurichConnect/$currentVersion',
+    );
+    request.headers.set(
+      HttpHeaders.acceptHeader,
+      'application/vnd.github+json',
+    );
+  }
+
+  String _updateRouteLabel(bool viaLocalProxy) {
+    return viaLocalProxy ? 'local VPN proxy' : 'direct';
+  }
+
+  String _shortUpdateError(Object error) {
+    final text = '$error'.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.length <= 260) {
+      return text;
+    }
+    return '${text.substring(0, 260)}...';
   }
 
   Future<void> runInstallerAsAdmin(File installer) async {
@@ -404,13 +846,10 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
       }
     }
     for (final asset in parsed) {
-      if (asset.name.toLowerCase() == 'aurumvpn_setup.exe') {
-        return asset;
-      }
-    }
-    for (final asset in parsed) {
       final name = asset.name.toLowerCase();
-      if (name.endsWith('.exe') && name.contains('setup')) {
+      if (name.endsWith('.exe') &&
+          name.contains('setup') &&
+          name.contains('yurich')) {
         return asset;
       }
     }
@@ -421,8 +860,16 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
     return "'${value.replaceAll("'", "''")}'";
   }
 
-  static String _wrapPowerShellScript(String script) {
-    return '''
+  Future<ProcessResult> _runPowerShell(
+    String script, {
+    Duration timeout = const Duration(seconds: 20),
+  }) {
+    return Process.run('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '''
 \$ErrorActionPreference = 'Stop'
 try {
 $script
@@ -435,6 +882,100 @@ $script
   Write-Output \$message
   exit 1
 }
+''',
+    ]).timeout(timeout);
+  }
+
+  Future<String?> _readAutoStartRunValue() async {
+    final script =
+        '''
+\$value = Get-ItemPropertyValue -Path ${_quotePowerShell(_runKeyPath)} -Name ${_quotePowerShell(_taskName)} -ErrorAction SilentlyContinue
+if (\$null -ne \$value) { Write-Output \$value }
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 8),
+    );
+    if (result.exitCode != 0) {
+      return null;
+    }
+    return '${result.stdout}'.trim();
+  }
+
+  Future<void> _writeAutoStartRunValue(String executable) async {
+    final key = _quotePowerShell(_runKeyPath);
+    final name = _quotePowerShell(_taskName);
+    final value = _quotePowerShell('"$executable"');
+    final script =
+        '''
+New-Item -Path $key -Force | Out-Null
+New-ItemProperty -Path $key -Name $name -PropertyType String -Value $value -Force | Out-Null
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 12),
+    );
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not update Windows startup.' : error,
+      );
+    }
+  }
+
+  Future<void> _deleteAutoStartRunValue() async {
+    final script =
+        '''
+Remove-ItemProperty -Path ${_quotePowerShell(_runKeyPath)} -Name ${_quotePowerShell(_taskName)} -Force -ErrorAction SilentlyContinue
+''';
+    final result = await _runPowerShell(
+      script,
+      timeout: const Duration(seconds: 8),
+    );
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not remove Windows startup.' : error,
+      );
+    }
+  }
+
+  Future<void> _deleteLegacyStartupTasks() async {
+    for (final taskName in const [_taskName, _legacyTaskName]) {
+      try {
+        await Process.run('schtasks', [
+          '/Delete',
+          '/TN',
+          taskName,
+          '/F',
+        ]).timeout(const Duration(seconds: 8));
+      } on Object {
+        // Old elevated task removal is best-effort from a regular process.
+      }
+    }
+  }
+
+  static String _normalizedAutoStartCommand(String value) {
+    return value.replaceAll('"', '').trim().replaceAll('/', '\\').toLowerCase();
+  }
+
+  static String _proxyChangeType() {
+    return '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class YurichWinInet {
+  [DllImport("wininet.dll", SetLastError = true)]
+  public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
+}
+"@
+''';
+  }
+
+  static String _notifyProxyChangedScript() {
+    return '''
+[YurichWinInet]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
+[YurichWinInet]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null
 ''';
   }
 
@@ -451,128 +992,13 @@ $script
     return '${result.stdout}${result.stderr}';
   }
 
-  static String _deleteStartupTaskScript() {
-    final taskName = _quotePowerShell(_taskName);
-    final legacyTaskName = _quotePowerShell(_legacyTaskName);
-    return '''
-\$taskName = $taskName
-\$legacyTaskName = $legacyTaskName
-& schtasks.exe /Delete /TN \$taskName /F 2>\$null | Out-Null
-& schtasks.exe /Delete /TN \$legacyTaskName /F 2>\$null | Out-Null
-''';
-  }
-
-  static String _createStartupTaskScript(String executable) {
-    final taskName = _quotePowerShell(_taskName);
-    final legacyTaskName = _quotePowerShell(_legacyTaskName);
-    final exe = _quotePowerShell(executable);
-    final workingDirectory = _quotePowerShell(File(executable).parent.path);
-    return '''
-\$taskName = $taskName
-\$legacyTaskName = $legacyTaskName
-\$exePath = $exe
-\$workingDirectory = $workingDirectory
-function Escape-Xml([string]\$Value) {
-  return [System.Security.SecurityElement]::Escape(\$Value)
-}
-\$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-\$exeXml = Escape-Xml \$exePath
-\$workingDirectoryXml = Escape-Xml \$workingDirectory
-\$xmlPath = Join-Path \$env:TEMP ("YurichConnectStartup_" + [guid]::NewGuid().ToString("N") + ".xml")
-\$xml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Author>Yurich Connect</Author>
-    <Description>Starts Yurich Connect with highest available privileges at Windows logon.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>\$sid</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>5</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>\$exeXml</Command>
-      <WorkingDirectory>\$workingDirectoryXml</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"@
-try {
-  Set-Content -LiteralPath \$xmlPath -Value \$xml -Encoding Unicode
-  \$createOutput = & schtasks.exe /Create /TN \$taskName /XML \$xmlPath /F 2>&1
-  if (\$LASTEXITCODE -ne 0) {
-    throw "schtasks /Create failed (\$LASTEXITCODE): \$(\$createOutput -join [Environment]::NewLine)"
-  }
-  \$queryOutput = & schtasks.exe /Query /TN \$taskName /XML 2>&1
-  if (\$LASTEXITCODE -ne 0) {
-    throw "schtasks /Query failed (\$LASTEXITCODE): \$(\$queryOutput -join [Environment]::NewLine)"
-  }
-  \$queryText = \$queryOutput -join [Environment]::NewLine
-  if (\$queryText -notmatch '<RunLevel>HighestAvailable</RunLevel>') {
-    throw 'Startup task was created without HighestAvailable run level.'
-  }
-  if (\$queryText -notmatch '<WorkingDirectory>') {
-    throw 'Startup task was created without working directory.'
-  }
-  & schtasks.exe /Delete /TN \$legacyTaskName /F 2>\$null | Out-Null
-} finally {
-  Remove-Item -LiteralPath \$xmlPath -Force -ErrorAction SilentlyContinue
-}
-''';
-  }
-
   static bool isAutoStartTaskInstalledXml(String xml) {
     final normalized = xml.toLowerCase();
     return normalized.contains('<runlevel>highestavailable</runlevel>');
   }
 
   static bool isAutoStartTaskHealthyXml(String xml) {
-    final normalized = xml.toLowerCase();
-    final delays =
-        RegExp(r'<delay>\s*([^<]+?)\s*</delay>', caseSensitive: false)
-            .allMatches(normalized)
-            .map((match) => (match[1] ?? '').trim())
-            .where((delay) => delay.isNotEmpty);
-    final hasUnsupportedDelay = delays.any(
-      (delay) => delay != _startupDelayIso8601.toLowerCase(),
-    );
-    return isAutoStartTaskInstalledXml(xml) &&
-        !hasUnsupportedDelay &&
-        normalized.contains('<workingdirectory>') &&
-        !normalized.contains(
-          '<disallowstartifonbatteries>true</disallowstartifonbatteries>',
-        ) &&
-        !normalized.contains(
-          '<stopifgoingonbatteries>true</stopifgoingonbatteries>',
-        );
+    return false;
   }
 
   static int compareReleaseVersions(String left, String right) {
@@ -601,6 +1027,53 @@ try {
     }
     return 0;
   }
+
+  static String? releaseTagFromLocation(String? location) {
+    if (location == null || location.trim().isEmpty) {
+      return null;
+    }
+    final uri = Uri.tryParse(location.trim());
+    if (uri == null) {
+      return null;
+    }
+    return _releaseTagFromPathSegments(uri.pathSegments);
+  }
+
+  static String? releaseTagFromHtml(String html) {
+    final match = RegExp(
+      "/ivan-yurich/yurich-connect-windows/releases/tag/([^\"'<>\\s?#]+)",
+      caseSensitive: false,
+    ).firstMatch(html);
+    if (match == null) {
+      return null;
+    }
+    return Uri.decodeComponent(match.group(1)!);
+  }
+
+  static String? releaseTagFromAtom(String atom) {
+    final linkTag = releaseTagFromHtml(atom);
+    if (linkTag != null) {
+      return linkTag;
+    }
+    final idMatch = RegExp(
+      r'<id>[^<]*/([^/<]+-windows)</id>',
+      caseSensitive: false,
+    ).firstMatch(atom);
+    if (idMatch != null) {
+      return Uri.decodeComponent(idMatch.group(1)!);
+    }
+    return null;
+  }
+
+  static String? _releaseTagFromPathSegments(List<String> segments) {
+    for (var i = 0; i < segments.length - 2; i++) {
+      if (segments[i] == 'releases' && segments[i + 1] == 'tag') {
+        final tag = segments[i + 2].trim();
+        return tag.isEmpty ? null : Uri.decodeComponent(tag);
+      }
+    }
+    return null;
+  }
 }
 
 class _ReleaseAsset {
@@ -626,4 +1099,13 @@ class _ReleaseAsset {
       size: (json['size'] as num?)?.round(),
     );
   }
+}
+
+class _TransientUpdateException implements Exception {
+  const _TransientUpdateException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }

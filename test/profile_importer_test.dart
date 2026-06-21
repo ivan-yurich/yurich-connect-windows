@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/models/vpn_profile.dart';
 import 'package:yurich_connect_windows/src/services/profile_importer.dart';
 import 'package:yurich_connect_windows/src/services/sing_box_config_builder.dart';
+import 'package:yurich_connect_windows/src/services/xray_config_builder.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -30,6 +31,67 @@ void main() {
     expect(
       profiles.first.expiresAt?.toIso8601String().startsWith('2026-12-31'),
       isTrue,
+    );
+  });
+
+  test('imports VLESS packet encoding and HTTPUpgrade transport', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=httpupgrade&sni=cdn.example.com&host=edge.example.com&path=%2Fup&packet_encoding=xudp#VLESS-UP';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(proxy['packet_encoding'], 'xudp');
+    expect(proxy['transport'], {
+      'type': 'httpupgrade',
+      'host': 'edge.example.com',
+      'path': '/up',
+    });
+  });
+
+  test('imports VLESS XHTTP for Xray backend', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=www.example.com&fp=chrome&pbk=abc123&path=%2Fxhttp&mode=auto#XHTTP';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+
+    expect(profile.coreBackend, VpnCoreBackend.xray);
+    expect(profile.outbound?['transport']['type'], 'xhttp');
+    expect(stream['network'], 'xhttp');
+    expect(stream['security'], 'reality');
+    expect(stream['xhttpSettings'], {
+      'host': 'www.example.com',
+      'path': '/xhttp',
+      'mode': 'auto',
+    });
+  });
+
+  test('rejects invalid VLESS flow before config start', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=tcp&flow=xtls-rprx-direct&sni=cdn.example.com#BadFlow';
+
+    expect(
+      () => ProfileImporter().importFromText(link),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('flow'),
+        ),
+      ),
     );
   });
 
@@ -329,9 +391,16 @@ void main() {
             as Map<String, dynamic>;
     final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
     final route = config['route'] as Map<String, dynamic>;
+    final dns = config['dns'] as Map<String, dynamic>;
     final routeRules = (route['rules'] as List)
         .whereType<Map<String, dynamic>>()
         .toList();
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final globalDns = dnsServers.firstWhere(
+      (server) => server['tag'] == 'global-dns',
+    );
     final naiveConfig =
         jsonDecode(builder.buildNaiveProxyConfig(profile))
             as Map<String, dynamic>;
@@ -340,6 +409,15 @@ void main() {
     expect(proxy['server'], '127.0.0.1');
     expect(proxy['server_port'], SingBoxConfigBuilder.naiveProxySocksPort);
     expect(proxy['network'], 'tcp');
+    expect(proxy['domain_resolver'], {
+      'server': 'global-dns',
+      'strategy': 'ipv4_only',
+    });
+    expect(globalDns['detour'], isNull);
+    expect(route['default_domain_resolver'], {
+      'server': 'global-dns',
+      'strategy': 'ipv4_only',
+    });
     expect(route['find_process'], isTrue);
     expect(
       routeRules.any(
@@ -370,6 +448,47 @@ void main() {
     );
     expect(naiveConfig['proxy'], 'quic://user:pass@example.com:443');
   });
+
+  test(
+    'keeps NaiveProxy core DNS out of proxy loop when DNS hardening is on',
+    () async {
+      const link =
+          'naive+https://user:pass@example.com:443?quic=true#NaiveCore';
+
+      final profile = (await ProfileImporter().importFromText(link)).first;
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  target: SingBoxConfigTarget.windows,
+                  naiveMode: NaiveOutboundMode.externalCore,
+                  dnsOnlyThroughVpn: true,
+                ),
+              )
+              as Map<String, dynamic>;
+      final dns = config['dns'] as Map<String, dynamic>;
+      final route = config['route'] as Map<String, dynamic>;
+      final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+      final dnsServers = (dns['servers'] as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final globalDns = dnsServers.firstWhere(
+        (server) => server['tag'] == 'global-dns',
+      );
+
+      expect(proxy['type'], 'socks');
+      expect(proxy['server_port'], SingBoxConfigBuilder.naiveProxySocksPort);
+      expect(globalDns['detour'], isNull);
+      expect(route['default_domain_resolver'], {
+        'server': 'global-dns',
+        'strategy': 'ipv4_only',
+      });
+      expect(proxy['domain_resolver'], {
+        'server': 'global-dns',
+        'strategy': 'ipv4_only',
+      });
+    },
+  );
 
   test('normalizes legacy Naive TLS fields from saved profiles', () {
     const profile = VpnProfile(
@@ -445,7 +564,7 @@ void main() {
     );
   });
 
-  test('builds Windows TUN config without Android package exclusions', () async {
+  test('builds Windows Stable Proxy config by default', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
 
@@ -467,17 +586,31 @@ void main() {
               ),
             )
             as Map<String, dynamic>;
-    final tunInbound =
-        (config['inbounds'] as List).first as Map<String, dynamic>;
+    final inbounds = (config['inbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
     final route = config['route'] as Map<String, dynamic>;
     final routeRules = (route['rules'] as List)
         .whereType<Map<String, dynamic>>()
         .toList();
 
-    expect(tunInbound['interface_name'], 'YurichConnect');
-    expect(tunInbound['exclude_package'], isNull);
-    expect(tunInbound['mtu'], 1500);
-    expect(tunInbound['stack'], 'system');
+    expect(inbounds.any((inbound) => inbound['type'] == 'tun'), isFalse);
+    expect(
+      inbounds.any(
+        (inbound) =>
+            inbound['type'] == 'mixed' &&
+            inbound['listen_port'] == SingBoxConfigBuilder.localMixedProxyPort,
+      ),
+      isTrue,
+    );
+    expect(
+      inbounds.any(
+        (inbound) =>
+            inbound['type'] == 'socks' &&
+            inbound['listen_port'] == SingBoxConfigBuilder.localSocksProxyPort,
+      ),
+      isTrue,
+    );
     expect((config['dns'] as Map<String, dynamic>)['strategy'], 'ipv4_only');
     expect(route['default_domain_resolver'], {
       'server': 'local-dns',
@@ -547,14 +680,7 @@ void main() {
       ),
       isTrue,
     );
-    expect(route['rule_set'], [
-      {
-        'type': 'remote',
-        'tag': SingBoxConfigBuilder.russianGeoIpRuleSet,
-        'format': 'binary',
-        'url': SingBoxConfigBuilder.russianGeoIpRuleSetUrl,
-      },
-    ]);
+    expect(route['rule_set'], isNull);
     expect(
       routeRules.any(
         (rule) =>
@@ -583,6 +709,181 @@ void main() {
     );
     expect(
       routeRules.any(
+        (rule) => rule['rule_set'] == SingBoxConfigBuilder.russianGeoIpRuleSet,
+      ),
+      isFalse,
+    );
+    final vpnOnlyIndex = routeRules.indexWhere(
+      (rule) => rule['outbound'] == 'proxy' && rule['process_name'] is List,
+    );
+    expect(vpnOnlyIndex, greaterThanOrEqualTo(0));
+  });
+
+  test('can harden Windows DNS to avoid local provider leaks', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                dnsOnlyThroughVpn: true,
+              ),
+            )
+            as Map<String, dynamic>;
+    final dns = config['dns'] as Map<String, dynamic>;
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final dnsRules = (dns['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final route = config['route'] as Map<String, dynamic>;
+    final proxyOutbound = ((config['outbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .firstWhere((outbound) => outbound['tag'] == 'proxy'));
+
+    expect(
+      dnsServers.any(
+        (server) =>
+            server['tag'] == 'bootstrap-dns' &&
+            server['type'] == 'https' &&
+            !server.containsKey('detour'),
+      ),
+      isTrue,
+    );
+    expect(
+      dnsServers.any(
+        (server) =>
+            server['tag'] == 'global-dns' &&
+            server['type'] == 'https' &&
+            server['detour'] == 'proxy',
+      ),
+      isTrue,
+    );
+    expect(
+      dnsRules.any((rule) {
+        final suffixes = rule['domain_suffix'];
+        return rule['server'] == 'local-dns' &&
+            suffixes is List &&
+            suffixes.contains('.ru');
+      }),
+      isFalse,
+    );
+    expect(
+      dnsRules.any((rule) {
+        final domains = rule['domain'];
+        final suffixes = rule['domain_suffix'];
+        return rule['server'] == 'local-dns' &&
+            domains is List &&
+            domains.contains('github.com') &&
+            suffixes is List &&
+            suffixes.contains('githubusercontent.com');
+      }),
+      isTrue,
+    );
+    expect(route['default_domain_resolver'], {
+      'server': 'bootstrap-dns',
+      'strategy': 'ipv4_only',
+    });
+    expect(proxyOutbound['domain_resolver'], {
+      'server': 'bootstrap-dns',
+      'strategy': 'ipv4_only',
+    });
+  });
+
+  test('routes Windows updater GitHub traffic direct in TUN mode', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                windowsTunMode: true,
+                dnsOnlyThroughVpn: true,
+              ),
+            )
+            as Map<String, dynamic>;
+    final dnsRules = ((config['dns'] as Map<String, dynamic>)['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final routeRules =
+        ((config['route'] as Map<String, dynamic>)['rules'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+
+    expect(
+      dnsRules.any((rule) {
+        final domains = rule['domain'];
+        final suffixes = rule['domain_suffix'];
+        return rule['server'] == 'local-dns' &&
+            domains is List &&
+            domains.contains('release-assets.githubusercontent.com') &&
+            suffixes is List &&
+            suffixes.contains('githubusercontent.com');
+      }),
+      isTrue,
+    );
+    expect(
+      routeRules.any((rule) {
+        final domains = rule['domain'];
+        final suffixes = rule['domain_suffix'];
+        return rule['outbound'] == 'direct' &&
+            domains is List &&
+            domains.contains('api.github.com') &&
+            suffixes is List &&
+            suffixes.contains('githubusercontent.com');
+      }),
+      isTrue,
+    );
+  });
+
+  test('builds Windows Advanced TUN config only when requested', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                windowsTunMode: true,
+                vpnOnlyProcesses: const ['Codex.exe'],
+              ),
+            )
+            as Map<String, dynamic>;
+    final inbounds = (config['inbounds'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final tunInbound = inbounds.firstWhere(
+      (inbound) => inbound['type'] == 'tun',
+    );
+    final route = config['route'] as Map<String, dynamic>;
+    final routeRules = (route['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
+    expect(tunInbound['interface_name'], 'YurichConnect');
+    expect(tunInbound['exclude_package'], isNull);
+    expect(tunInbound['mtu'], 1500);
+    expect(tunInbound['stack'], 'system');
+    expect(routeRules.any((rule) => rule['action'] == 'hijack-dns'), isTrue);
+    expect(route['rule_set'], [
+      {
+        'type': 'remote',
+        'tag': SingBoxConfigBuilder.russianGeoIpRuleSet,
+        'format': 'binary',
+        'url': SingBoxConfigBuilder.russianGeoIpRuleSetUrl,
+      },
+    ]);
+    expect(
+      routeRules.any(
         (rule) =>
             rule['outbound'] == 'direct' &&
             rule['rule_set'] == SingBoxConfigBuilder.russianGeoIpRuleSet,
@@ -600,7 +901,7 @@ void main() {
     expect(vpnOnlyIndex, lessThan(geoIpRuIndex));
   });
 
-  test('routes Codex domains and executables directly on Windows', () async {
+  test('routes developer terminal and SSH tools directly on Windows', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
 
@@ -610,69 +911,160 @@ void main() {
               SingBoxConfigBuilder().build(
                 profile,
                 target: SingBoxConfigTarget.windows,
-                codexDirect: true,
-                vpnOnlyProcesses: const [
-                  'Codex.exe',
-                  'codex.exe',
-                  'openai-codex.exe',
-                  'OtherForeignApp.exe',
-                ],
+                developerMode: true,
+                vpnOnlyProcesses: const ['ssh.exe', 'git.exe', 'Codex.exe'],
               ),
             )
             as Map<String, dynamic>;
-    final dnsRules = ((config['dns'] as Map<String, dynamic>)['rules'] as List)
-        .whereType<Map<String, dynamic>>()
-        .toList();
     final route = config['route'] as Map<String, dynamic>;
     final routeRules = (route['rules'] as List)
         .whereType<Map<String, dynamic>>()
         .toList();
+    final directProcessRule = routeRules.firstWhere(
+      (rule) => rule['outbound'] == 'direct' && rule['process_name'] is List,
+    );
+    final directProcesses = directProcessRule['process_name'] as List;
 
     expect(route['find_process'], isTrue);
-    expect(
-      dnsRules.any(
-        (rule) =>
-            rule['server'] == 'local-dns' &&
-            rule['domain_suffix'] is List &&
-            (rule['domain_suffix'] as List).contains('chatgpt.com') &&
-            (rule['domain_suffix'] as List).contains('openai.com'),
-      ),
-      isTrue,
+    expect(directProcesses, contains('ssh.exe'));
+    expect(directProcesses, contains('git.exe'));
+    expect(directProcesses, contains('gh.exe'));
+    expect(directProcesses, contains('powershell.exe'));
+    expect(directProcesses, contains('WindowsTerminal.exe'));
+
+    final proxyProcessRule = routeRules.firstWhere(
+      (rule) => rule['outbound'] == 'proxy' && rule['process_name'] is List,
     );
-    expect(
-      routeRules.any(
-        (rule) =>
-            rule['outbound'] == 'direct' &&
-            rule['domain_suffix'] is List &&
-            (rule['domain_suffix'] as List).contains('chatgpt.com') &&
-            (rule['domain_suffix'] as List).contains('openai.com'),
-      ),
-      isTrue,
-    );
-    expect(
-      routeRules.any((rule) {
-        final processName = rule['process_name'];
-        return rule['outbound'] == 'direct' &&
-            processName is List &&
-            processName.contains('Codex.exe') &&
-            processName.contains('codex.exe') &&
-            processName.contains('openai-codex.exe') &&
-            !processName.contains('node.exe');
-      }),
-      isTrue,
-    );
-    expect(
-      routeRules.any((rule) {
-        final processName = rule['process_name'];
-        return rule['outbound'] == 'proxy' &&
-            processName is List &&
-            processName.contains('OtherForeignApp.exe') &&
-            !processName.contains('Codex.exe') &&
-            !processName.contains('codex.exe');
-      }),
-      isTrue,
-    );
+    final proxyProcesses = proxyProcessRule['process_name'] as List;
+    expect(proxyProcesses, contains('Codex.exe'));
+    expect(proxyProcesses, isNot(contains('ssh.exe')));
+    expect(proxyProcesses, isNot(contains('git.exe')));
   });
+
+  test(
+    'routes Codex executables directly without bypassing ChatGPT web',
+    () async {
+      const link =
+          'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+      final profile = (await ProfileImporter().importFromText(link)).first;
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  target: SingBoxConfigTarget.windows,
+                  codexDirect: true,
+                  vpnOnlyProcesses: const [
+                    'Codex.exe',
+                    'codex.exe',
+                    'openai-codex.exe',
+                    'OtherForeignApp.exe',
+                  ],
+                ),
+              )
+              as Map<String, dynamic>;
+      final dnsRules =
+          ((config['dns'] as Map<String, dynamic>)['rules'] as List)
+              .whereType<Map<String, dynamic>>()
+              .toList();
+      final route = config['route'] as Map<String, dynamic>;
+      final routeRules = (route['rules'] as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+
+      expect(route['find_process'], isTrue);
+      expect(
+        dnsRules.any(
+          (rule) =>
+              rule['server'] == 'local-dns' &&
+              rule['domain_suffix'] is List &&
+              (rule['domain_suffix'] as List).contains('chatgpt.com'),
+        ),
+        isFalse,
+      );
+      expect(
+        routeRules.any(
+          (rule) =>
+              rule['outbound'] == 'direct' &&
+              rule['domain_suffix'] is List &&
+              (rule['domain_suffix'] as List).contains('chatgpt.com'),
+        ),
+        isFalse,
+      );
+      expect(
+        routeRules.any((rule) {
+          final processName = rule['process_name'];
+          return rule['outbound'] == 'direct' &&
+              processName is List &&
+              processName.contains('Codex.exe') &&
+              processName.contains('codex.exe') &&
+              processName.contains('openai-codex.exe') &&
+              !processName.contains('node.exe');
+        }),
+        isTrue,
+      );
+      expect(
+        routeRules.any((rule) {
+          final processName = rule['process_name'];
+          return rule['outbound'] == 'proxy' &&
+              processName is List &&
+              processName.contains('OtherForeignApp.exe') &&
+              !processName.contains('Codex.exe') &&
+              !processName.contains('codex.exe');
+        }),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'can route ChatGPT web domains directly when explicitly requested',
+    () async {
+      const link =
+          'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+      final profile = (await ProfileImporter().importFromText(link)).first;
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  target: SingBoxConfigTarget.windows,
+                  codexDirect: true,
+                  chatGptThroughVpn: false,
+                ),
+              )
+              as Map<String, dynamic>;
+      final dnsRules =
+          ((config['dns'] as Map<String, dynamic>)['rules'] as List)
+              .whereType<Map<String, dynamic>>()
+              .toList();
+      final routeRules =
+          ((config['route'] as Map<String, dynamic>)['rules'] as List)
+              .whereType<Map<String, dynamic>>()
+              .toList();
+
+      expect(
+        dnsRules.any(
+          (rule) =>
+              rule['server'] == 'local-dns' &&
+              rule['domain_suffix'] is List &&
+              (rule['domain_suffix'] as List).contains('chatgpt.com') &&
+              (rule['domain_suffix'] as List).contains('openai.com'),
+        ),
+        isTrue,
+      );
+      expect(
+        routeRules.any(
+          (rule) =>
+              rule['outbound'] == 'direct' &&
+              rule['domain_suffix'] is List &&
+              (rule['domain_suffix'] as List).contains('chatgpt.com') &&
+              (rule['domain_suffix'] as List).contains('openai.com'),
+        ),
+        isTrue,
+      );
+    },
+  );
 
   test('imports base64 subscription list', () async {
     const raw =
@@ -790,5 +1182,116 @@ void main() {
     expect(profiles.first.kind, VpnProfileKind.vlessReality);
     expect(profiles.first.originalInput, startsWith('vless://'));
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
+  });
+
+  test('imports VLESS gRPC transport from Xray JSON subscription', () async {
+    final payload = jsonEncode([
+      {
+        'remarks': 'Germany gRPC',
+        'outbounds': [
+          {
+            'protocol': 'vless',
+            'settings': {
+              'vnext': [
+                {
+                  'address': 'grpc.example.com',
+                  'port': 443,
+                  'users': [
+                    {
+                      'id': '11111111-1111-4111-8111-111111111111',
+                      'encryption': 'none',
+                    },
+                  ],
+                },
+              ],
+            },
+            'streamSettings': {
+              'network': 'grpc',
+              'security': 'tls',
+              'tlsSettings': {'serverName': 'cdn.example.com'},
+              'grpcSettings': {'serviceName': 'TunService'},
+            },
+          },
+        ],
+      },
+    ]);
+
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(proxy['transport'], {
+      'type': 'grpc',
+      'service_name': 'TunService',
+      'idle_timeout': '30s',
+      'ping_timeout': '15s',
+    });
+  });
+
+  test('imports VLESS XHTTP from Xray JSON subscription', () async {
+    final payload = jsonEncode([
+      {
+        'remarks': 'XHTTP',
+        'outbounds': [
+          {
+            'protocol': 'vless',
+            'settings': {
+              'vnext': [
+                {
+                  'address': 'xhttp.example.com',
+                  'port': 443,
+                  'users': [
+                    {
+                      'id': '11111111-1111-4111-8111-111111111111',
+                      'encryption': 'none',
+                    },
+                  ],
+                },
+              ],
+            },
+            'streamSettings': {
+              'network': 'xhttp',
+              'security': 'tls',
+              'tlsSettings': {'serverName': 'cdn.example.com'},
+              'xhttpSettings': {
+                'host': 'cdn.example.com',
+                'path': '/xhttp',
+                'mode': 'stream-one',
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    final profile = (await ProfileImporter().importFromText(payload)).first;
+    final config =
+        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
+    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+
+    expect(profile.coreBackend, VpnCoreBackend.xray);
+    expect(profile.kind, VpnProfileKind.vlessTls);
+    expect(profile.outbound?['transport'], {
+      'type': 'xhttp',
+      'host': 'cdn.example.com',
+      'path': '/xhttp',
+      'mode': 'stream-one',
+    });
+    expect(stream['network'], 'xhttp');
+    expect(stream['security'], 'tls');
+    expect(stream['xhttpSettings'], {
+      'host': 'cdn.example.com',
+      'path': '/xhttp',
+      'mode': 'stream-one',
+    });
   });
 }

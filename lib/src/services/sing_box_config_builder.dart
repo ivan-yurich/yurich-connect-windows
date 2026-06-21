@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../models/vpn_profile.dart';
+import 'vless_profile_tools.dart';
 
 enum SingBoxConfigTarget { android, windows }
 
@@ -9,7 +10,8 @@ enum NaiveOutboundMode { auto, externalCore, native, httpConnect }
 class SingBoxConfigBuilder {
   static const windowsClashApiPort = 19090;
   static const localMixedProxyPort = 20808;
-  static const naiveProxySocksPort = 20809;
+  static const localSocksProxyPort = 20809;
+  static const naiveProxySocksPort = 20810;
   static const russianGeoIpRuleSet = 'geoip-ru';
   static const russianGeoIpRuleSetUrl =
       'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs';
@@ -33,6 +35,35 @@ class SingBoxConfigBuilder {
     'Codex.exe',
     'openai-codex.exe',
     'OpenAI Codex.exe',
+  ];
+  static const developerDirectProcesses = [
+    'ssh.exe',
+    'scp.exe',
+    'sftp.exe',
+    'git.exe',
+    'gh.exe',
+    'plink.exe',
+    'putty.exe',
+    'pageant.exe',
+    'winscp.exe',
+    'rsync.exe',
+    'curl.exe',
+    'powershell.exe',
+    'pwsh.exe',
+    'cmd.exe',
+    'wt.exe',
+    'WindowsTerminal.exe',
+  ];
+  static const updaterDirectDomains = [
+    'github.com',
+    'api.github.com',
+    'uploads.github.com',
+    'objects.githubusercontent.com',
+    'release-assets.githubusercontent.com',
+  ];
+  static const updaterDirectDomainSuffixes = [
+    'github.com',
+    'githubusercontent.com',
   ];
   static const russianDirectDomains = [
     '.ru',
@@ -64,6 +95,10 @@ class SingBoxConfigBuilder {
     List<String> splitTunnelExcludedProcesses = const [],
     List<String> vpnOnlyProcesses = const [],
     bool codexDirect = false,
+    bool chatGptThroughVpn = true,
+    bool developerMode = false,
+    bool dnsOnlyThroughVpn = false,
+    bool windowsTunMode = false,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -82,10 +117,21 @@ class SingBoxConfigBuilder {
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
-    _applyDialStability(proxyOutbound, target);
     final usesNaiveProxyCore =
         target == SingBoxConfigTarget.windows &&
         proxyOutbound['type'] == 'socks';
+    _applyDialStability(
+      proxyOutbound,
+      target,
+      dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+      usesNaiveProxyCore: usesNaiveProxyCore,
+    );
+    final useWindowsTun =
+        target == SingBoxConfigTarget.windows && windowsTunMode;
+    final codexWebDomainsDirect =
+        target == SingBoxConfigTarget.windows &&
+        codexDirect &&
+        !chatGptThroughVpn;
     final rejectQuicUdp =
         profile.kind == VpnProfileKind.naive ||
         (target == SingBoxConfigTarget.windows &&
@@ -96,11 +142,22 @@ class SingBoxConfigBuilder {
     final codexProcesses = target == SingBoxConfigTarget.windows && codexDirect
         ? _normalizeProcessNames(codexDirectProcesses)
         : const <String>[];
+    final developerProcesses =
+        target == SingBoxConfigTarget.windows && developerMode
+        ? _normalizeProcessNames(developerDirectProcesses)
+        : const <String>[];
     final codexProcessLookup = codexProcesses
         .map((process) => process.toLowerCase())
         .toSet();
+    final developerProcessLookup = developerProcesses
+        .map((process) => process.toLowerCase())
+        .toSet();
     final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses)
-        .where((process) => !codexProcessLookup.contains(process.toLowerCase()))
+        .where(
+          (process) =>
+              !codexProcessLookup.contains(process.toLowerCase()) &&
+              !developerProcessLookup.contains(process.toLowerCase()),
+        )
         .toList(growable: false);
     final forcedProxyLookup = forcedProxyProcesses
         .map((process) => process.toLowerCase())
@@ -109,6 +166,7 @@ class SingBoxConfigBuilder {
         _normalizeProcessNames([
               ...splitTunnelExcludedProcesses,
               ...codexProcesses,
+              ...developerProcesses,
             ])
             .where(
               (process) => !forcedProxyLookup.contains(process.toLowerCase()),
@@ -117,8 +175,14 @@ class SingBoxConfigBuilder {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn', 'timestamp': true},
-      'dns': _dnsConfig(target, codexDirect: codexDirect),
-      'inbounds': [_tunInbound(target), _mixedInbound()],
+      'dns': _dnsConfig(
+        target,
+        codexWebDomainsDirect: codexWebDomainsDirect,
+        windowsTunMode: useWindowsTun,
+        dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+        usesNaiveProxyCore: usesNaiveProxyCore,
+      ),
+      'inbounds': _inbounds(target, windowsTunMode: useWindowsTun),
       'outbounds': [
         proxyOutbound,
         {'type': 'direct', 'tag': 'direct'},
@@ -126,15 +190,16 @@ class SingBoxConfigBuilder {
       'route': {
         'rules': [
           {'action': 'sniff'},
-          {
-            'type': 'logical',
-            'mode': 'or',
-            'rules': [
-              {'protocol': 'dns'},
-              {'port': 53},
-            ],
-            'action': 'hijack-dns',
-          },
+          if (target != SingBoxConfigTarget.windows || useWindowsTun)
+            {
+              'type': 'logical',
+              'mode': 'or',
+              'rules': [
+                {'protocol': 'dns'},
+                {'port': 53},
+              ],
+              'action': 'hijack-dns',
+            },
           if (usesNaiveProxyCore)
             {
               'process_name': ['naive.exe'],
@@ -146,10 +211,16 @@ class SingBoxConfigBuilder {
             if (excludedProcesses.isNotEmpty)
               {'process_name': excludedProcesses, 'outbound': 'direct'},
           ],
-          if (target == SingBoxConfigTarget.windows && codexDirect)
+          if (codexWebDomainsDirect)
             {
               'domain': codexDirectDomains,
               'domain_suffix': codexDirectDomainSuffixes,
+              'outbound': 'direct',
+            },
+          if (target == SingBoxConfigTarget.windows)
+            {
+              'domain': updaterDirectDomains,
+              'domain_suffix': updaterDirectDomainSuffixes,
               'outbound': 'direct',
             },
           _unsupportedUdpRule(
@@ -163,10 +234,11 @@ class SingBoxConfigBuilder {
             if (forcedProxyProcesses.isNotEmpty)
               {'process_name': forcedProxyProcesses, 'outbound': 'proxy'},
             {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
-            {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
+            if (useWindowsTun)
+              {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},
           ],
         ],
-        if (target == SingBoxConfigTarget.windows)
+        if (useWindowsTun)
           'rule_set': [
             {
               'type': 'remote',
@@ -175,7 +247,11 @@ class SingBoxConfigBuilder {
               'url': russianGeoIpRuleSetUrl,
             },
           ],
-        'default_domain_resolver': _domainResolver(target),
+        'default_domain_resolver': _domainResolver(
+          target,
+          dnsOnlyThroughVpn: dnsOnlyThroughVpn,
+          usesNaiveProxyCore: usesNaiveProxyCore,
+        ),
         'auto_detect_interface': true,
         'find_process':
             target == SingBoxConfigTarget.windows &&
@@ -197,6 +273,25 @@ class SingBoxConfigBuilder {
     }
 
     return const JsonEncoder.withIndent('  ').convert(config);
+  }
+
+  List<Map<String, dynamic>> _inbounds(
+    SingBoxConfigTarget target, {
+    required bool windowsTunMode,
+  }) {
+    if (target == SingBoxConfigTarget.android) {
+      return [_tunInbound(target), _mixedInbound()];
+    }
+
+    if (target == SingBoxConfigTarget.windows) {
+      return [
+        if (windowsTunMode) _tunInbound(target),
+        _mixedInbound(),
+        _socksInbound(),
+      ];
+    }
+
+    return [_mixedInbound()];
   }
 
   Map<String, dynamic> _tunInbound(SingBoxConfigTarget target) {
@@ -234,12 +329,33 @@ class SingBoxConfigBuilder {
     };
   }
 
+  Map<String, dynamic> _socksInbound() {
+    return {
+      'type': 'socks',
+      'tag': 'socks-in',
+      'listen': '127.0.0.1',
+      'listen_port': localSocksProxyPort,
+    };
+  }
+
   Map<String, dynamic> _dnsConfig(
     SingBoxConfigTarget target, {
-    required bool codexDirect,
+    required bool codexWebDomainsDirect,
+    required bool windowsTunMode,
+    required bool dnsOnlyThroughVpn,
+    required bool usesNaiveProxyCore,
   }) {
     final servers = <Map<String, dynamic>>[
       {'type': 'local', 'tag': 'local-dns'},
+      if (target == SingBoxConfigTarget.windows && dnsOnlyThroughVpn)
+        {
+          'type': 'https',
+          'tag': 'bootstrap-dns',
+          'server': '1.1.1.1',
+          'server_port': 443,
+          'path': '/dns-query',
+          'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
+        },
       if (target == SingBoxConfigTarget.android)
         {
           'type': 'fakeip',
@@ -256,7 +372,7 @@ class SingBoxConfigBuilder {
           'server_port': 443,
           'path': '/dns-query',
           'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
-          'detour': 'proxy',
+          if (!usesNaiveProxyCore) 'detour': 'proxy',
         },
     ];
 
@@ -277,22 +393,30 @@ class SingBoxConfigBuilder {
             'action': 'route',
             'server': 'local-dns',
           },
-          if (codexDirect)
+          {
+            'domain': updaterDirectDomains,
+            'domain_suffix': updaterDirectDomainSuffixes,
+            'action': 'route',
+            'server': 'local-dns',
+          },
+          if (codexWebDomainsDirect && !dnsOnlyThroughVpn)
             {
               'domain': codexDirectDomains,
               'domain_suffix': codexDirectDomainSuffixes,
               'action': 'route',
               'server': 'local-dns',
             },
-          {
-            'domain_suffix': russianDirectDomains,
-            'action': 'route',
-            'server': 'local-dns',
-          },
+          if (!dnsOnlyThroughVpn)
+            {
+              'domain_suffix': russianDirectDomains,
+              'action': 'route',
+              'server': 'local-dns',
+            },
         ],
       'strategy': 'ipv4_only',
       'cache_capacity': target == SingBoxConfigTarget.windows ? 32768 : 8192,
-      'reverse_mapping': true,
+      'reverse_mapping':
+          target != SingBoxConfigTarget.windows || windowsTunMode,
       'final': 'global-dns',
     };
   }
@@ -329,15 +453,19 @@ class SingBoxConfigBuilder {
 
   void _applyDialStability(
     Map<String, dynamic> proxyOutbound,
-    SingBoxConfigTarget target,
-  ) {
+    SingBoxConfigTarget target, {
+    required bool dnsOnlyThroughVpn,
+    required bool usesNaiveProxyCore,
+  }) {
     proxyOutbound.putIfAbsent('connect_timeout', () => '8s');
     proxyOutbound.putIfAbsent('tcp_keep_alive', () => '3m');
     proxyOutbound.putIfAbsent('tcp_keep_alive_interval', () => '30s');
     if (target == SingBoxConfigTarget.windows) {
-      proxyOutbound['domain_resolver'] = _normalizeDomainResolver(
-        proxyOutbound['domain_resolver'],
-      );
+      proxyOutbound['domain_resolver'] = usesNaiveProxyCore
+          ? _normalizeDomainResolver('global-dns')
+          : dnsOnlyThroughVpn
+          ? _normalizeDomainResolver('bootstrap-dns')
+          : _normalizeDomainResolver(proxyOutbound['domain_resolver']);
     } else {
       proxyOutbound.putIfAbsent('domain_resolver', () => 'local-dns');
     }
@@ -347,9 +475,20 @@ class SingBoxConfigBuilder {
     }
   }
 
-  Object _domainResolver(SingBoxConfigTarget target) {
+  Object _domainResolver(
+    SingBoxConfigTarget target, {
+    required bool dnsOnlyThroughVpn,
+    required bool usesNaiveProxyCore,
+  }) {
     if (target == SingBoxConfigTarget.windows) {
-      return {'server': 'local-dns', 'strategy': 'ipv4_only'};
+      return {
+        'server': usesNaiveProxyCore
+            ? 'global-dns'
+            : dnsOnlyThroughVpn
+            ? 'bootstrap-dns'
+            : 'local-dns',
+        'strategy': 'ipv4_only',
+      };
     }
     return 'local-dns';
   }
@@ -371,11 +510,8 @@ class SingBoxConfigBuilder {
     Map<String, dynamic> proxyOutbound,
     NaiveOutboundMode naiveMode,
   ) {
-    if (profile.kind == VpnProfileKind.vlessReality ||
-        profile.kind == VpnProfileKind.vlessTls) {
-      if (proxyOutbound['network'] == 'tcp') {
-        proxyOutbound.remove('network');
-      }
+    if (VlessProfileTools.isVlessProfile(profile)) {
+      _normalizeVlessOutbound(proxyOutbound);
       return;
     }
 
@@ -433,6 +569,54 @@ class SingBoxConfigBuilder {
       () => profile.server ?? proxyOutbound['server'],
     );
     proxyOutbound['tls'] = normalizedTls;
+  }
+
+  void _normalizeVlessOutbound(Map<String, dynamic> proxyOutbound) {
+    final flow = VlessProfileTools.normalizeFlow(
+      '${proxyOutbound['flow'] ?? ''}',
+    );
+    if (flow == null) {
+      proxyOutbound.remove('flow');
+    } else {
+      proxyOutbound['flow'] = flow;
+    }
+
+    final packetEncoding = VlessProfileTools.normalizePacketEncoding(
+      '${proxyOutbound['packet_encoding'] ?? ''}',
+    );
+    if (packetEncoding == null) {
+      proxyOutbound.remove('packet_encoding');
+    } else {
+      proxyOutbound['packet_encoding'] = packetEncoding;
+    }
+
+    if (proxyOutbound['network'] == 'tcp') {
+      proxyOutbound.remove('network');
+    }
+
+    final transport = (proxyOutbound['transport'] as Map?)
+        ?.cast<String, dynamic>();
+    if (transport == null) {
+      return;
+    }
+
+    final type = VlessProfileTools.normalizeTransportType(
+      '${transport['type'] ?? 'tcp'}',
+    );
+    if (type == 'tcp') {
+      proxyOutbound.remove('transport');
+      return;
+    }
+    transport['type'] = type;
+
+    if (type == 'grpc') {
+      transport.putIfAbsent('idle_timeout', () => '30s');
+      transport.putIfAbsent('ping_timeout', () => '15s');
+    }
+    if (type == 'http') {
+      transport.putIfAbsent('idle_timeout', () => '30s');
+      transport.putIfAbsent('ping_timeout', () => '15s');
+    }
   }
 
   String buildNaiveProxyConfig(VpnProfile profile) {
