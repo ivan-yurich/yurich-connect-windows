@@ -764,11 +764,25 @@ void main() {
       isTrue,
     );
     expect(
-      dnsRules.any(
-        (rule) =>
-            rule['server'] == 'local-dns' && rule['domain_suffix'] is List,
-      ),
+      dnsRules.any((rule) {
+        final suffixes = rule['domain_suffix'];
+        return rule['server'] == 'local-dns' &&
+            suffixes is List &&
+            suffixes.contains('.ru');
+      }),
       isFalse,
+    );
+    expect(
+      dnsRules.any((rule) {
+        final domains = rule['domain'];
+        final suffixes = rule['domain_suffix'];
+        return rule['server'] == 'local-dns' &&
+            domains is List &&
+            domains.contains('github.com') &&
+            suffixes is List &&
+            suffixes.contains('githubusercontent.com');
+      }),
+      isTrue,
     );
     expect(route['default_domain_resolver'], {
       'server': 'bootstrap-dns',
@@ -778,6 +792,55 @@ void main() {
       'server': 'bootstrap-dns',
       'strategy': 'ipv4_only',
     });
+  });
+
+  test('routes Windows updater GitHub traffic direct in TUN mode', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                windowsTunMode: true,
+                dnsOnlyThroughVpn: true,
+              ),
+            )
+            as Map<String, dynamic>;
+    final dnsRules = ((config['dns'] as Map<String, dynamic>)['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final routeRules =
+        ((config['route'] as Map<String, dynamic>)['rules'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+
+    expect(
+      dnsRules.any((rule) {
+        final domains = rule['domain'];
+        final suffixes = rule['domain_suffix'];
+        return rule['server'] == 'local-dns' &&
+            domains is List &&
+            domains.contains('release-assets.githubusercontent.com') &&
+            suffixes is List &&
+            suffixes.contains('githubusercontent.com');
+      }),
+      isTrue,
+    );
+    expect(
+      routeRules.any((rule) {
+        final domains = rule['domain'];
+        final suffixes = rule['domain_suffix'];
+        return rule['outbound'] == 'direct' &&
+            domains is List &&
+            domains.contains('api.github.com') &&
+            suffixes is List &&
+            suffixes.contains('githubusercontent.com');
+      }),
+      isTrue,
+    );
   });
 
   test('builds Windows Advanced TUN config only when requested', () async {
