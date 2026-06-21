@@ -15,6 +15,7 @@ import '../branding.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_failover.dart';
 import '../services/profile_store.dart';
+import '../services/runtime_log_classifier.dart';
 import '../services/secret_redactor.dart';
 import '../services/sing_box_config_builder.dart';
 import '../services/vless_profile_tools.dart';
@@ -35,7 +36,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.49';
+const _appVersion = '1.0.50';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -50,7 +51,6 @@ const _healthWatchdogProbeDelay = Duration(milliseconds: 800);
 const _softRecoveryCooldown = Duration(minutes: 2);
 const _vlessEofStormWindow = Duration(seconds: 25);
 const _vlessEofStormThreshold = 8;
-const _vlessEofStormQuarantine = Duration(minutes: 15);
 const _vlessEofStormFailoverCooldown = Duration(minutes: 2);
 const _vlessStartupProbeQuarantine = Duration(minutes: 12);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
@@ -702,8 +702,11 @@ class _HomeScreenState extends State<HomeScreen>
       if (message == null || message.isEmpty) {
         return;
       }
-      _queueLog(message);
       _observeRuntimeLogForFailover(message);
+      if (RuntimeLogClassifier.isUserFacingNoise(message)) {
+        return;
+      }
+      _queueLog(message);
     });
 
     try {
@@ -1579,6 +1582,7 @@ class _HomeScreenState extends State<HomeScreen>
                         : null,
                   );
             if (probeResult.success) {
+              _resetHealthProbeHistoryForStableConnection(probeResult);
               _setConnectionLifecycle(
                 _ConnectionLifecycle.stable,
                 reason: plan.label,
@@ -2077,6 +2081,13 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  void _resetHealthProbeHistoryForStableConnection(_HealthProbeResult result) {
+    final successfulAttempts = result.attempts.where((entry) => entry.success);
+    _healthProbeHistory
+      ..clear()
+      ..addAll(successfulAttempts);
+  }
+
   int _healthProbeP99LatencyMs() {
     return _healthProbePercentileLatencyMs(99);
   }
@@ -2412,26 +2423,22 @@ class _HomeScreenState extends State<HomeScreen>
       _queueLog(
         'VLESS upstream failure storm detected: $count errors within '
         '${_vlessEofStormWindow.inSeconds}s for '
-        '${_redactSensitive(profile.name)}. Profile will be quarantined for '
-        '${_vlessEofStormQuarantine.inMinutes}m and failover will try another server.',
+        '${_redactSensitive(profile.name)}. Automatic reconnect is disabled; '
+        'the current tunnel will not be restarted while user sessions may be active.',
       );
-      await _recordProfileRuntimeFailure(
-        profile,
-        reason,
-        quarantineFor: _vlessEofStormQuarantine,
-      );
+      await _recordProfileRuntimeFailure(profile, reason);
 
       if (!mounted || _status != YurichConnectStatus.started) {
         return;
       }
 
-      await _runBusy(
-        () => _connectWithFailover(profile),
-        message: s.switchingProfile,
-      );
+      setState(() {
+        _message = s.runtimeReconnectDisabledWarning;
+        _lastError = s.runtimeReconnectDisabledWarning;
+      });
     } on Object catch (error) {
       _queueLog(
-        'VLESS upstream failure failover failed: ${_redactSensitive('$error')}',
+        'VLESS upstream failure handling failed: ${_redactSensitive('$error')}',
       );
       if (mounted) {
         setState(() {
@@ -4011,7 +4018,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
   bool _isDiagnosticNoise(String log) {
     return log.contains('router: found package name:') ||
         log.contains('router: found user id:') ||
-        log.contains('router: failed to search process: process not found');
+        log.contains('router: failed to search process: process not found') ||
+        RuntimeLogClassifier.isDiagnosticNoise(log);
   }
 
   String _redactSensitive(String value) {
@@ -6164,6 +6172,7 @@ class _Strings {
     required this.systemProxyDisabled,
     required this.systemProxyFailed,
     required this.healthWatchdogWarning,
+    required this.runtimeReconnectDisabledWarning,
     required this.autoStart,
     required this.autoStartHint,
     required this.autoStartEnabled,
@@ -6287,6 +6296,7 @@ class _Strings {
   final String systemProxyDisabled;
   final String systemProxyFailed;
   final String healthWatchdogWarning;
+  final String runtimeReconnectDisabledWarning;
   final String autoStart;
   final String autoStartHint;
   final String autoStartEnabled;
@@ -6713,6 +6723,8 @@ class _Strings {
     systemProxyFailed: 'Не удалось изменить системный proxy',
     healthWatchdogWarning:
         'Проверка сети видит сбой, но VPN не перезапущен автоматически. Проверь логи или нажми “Починить подключение”.',
+    runtimeReconnectDisabledWarning:
+        'Соединение нестабильно, но автопереподключение отключено, чтобы не рвать консоль, SSH, Git и Codex. Переподключи VPN вручную при необходимости.',
     autoStart: 'Автостарт с Windows',
     autoStartHint:
         'Запускает Yurich Connect при входе в Windows обычным пользователем без UAC.',
@@ -6885,6 +6897,8 @@ class _Strings {
     systemProxyFailed: 'Could not change system proxy',
     healthWatchdogWarning:
         'Network health check sees a failure, but VPN was not restarted automatically. Check logs or use Repair connection.',
+    runtimeReconnectDisabledWarning:
+        'Connection is unstable, but automatic reconnect is disabled to preserve console, SSH, Git, and Codex sessions. Reconnect manually if needed.',
     autoStart: 'Start with Windows',
     autoStartHint:
         'Starts Yurich Connect at Windows sign-in as the current user without UAC.',
