@@ -140,6 +140,21 @@ void main() {
       await store.removeProfileRuntimeStats('profile-a');
       expect(await store.loadProfileRuntimeStats(), isEmpty);
     });
+
+    test('quarantines profile immediately for fail-fast failures', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      final failed = await store.recordProfileRuntimeFailure(
+        'profile-a',
+        'vless_upstream_timeout',
+        quarantineFor: const Duration(minutes: 12),
+      );
+
+      expect(failed.consecutiveFailures, 1);
+      expect(failed.lastFailureReason, 'vless_upstream_timeout');
+      expect(failed.isQuarantined(), isTrue);
+    });
   });
 
   group('ProfileStore connection history', () {
