@@ -35,7 +35,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.47';
+const _appVersion = '1.0.48';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -52,6 +52,7 @@ const _vlessEofStormWindow = Duration(seconds: 25);
 const _vlessEofStormThreshold = 8;
 const _vlessEofStormQuarantine = Duration(minutes: 15);
 const _vlessEofStormFailoverCooldown = Duration(minutes: 2);
+const _vlessStartupProbeQuarantine = Duration(minutes: 12);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
 const _healthProbeHistoryWindow = Duration(hours: 1);
 const _healthProbeHistoryLimit = 240;
@@ -91,6 +92,21 @@ class _HealthProbeResult {
   final bool success;
   final List<_HealthProbeAttempt> attempts;
   final _HealthProbeAttempt? lastFailure;
+}
+
+class _ProfileStartFailure implements Exception {
+  const _ProfileStartFailure(
+    this.message, {
+    required this.reason,
+    this.quarantineFor,
+  });
+
+  final String message;
+  final String reason;
+  final Duration? quarantineFor;
+
+  @override
+  String toString() => message;
 }
 
 class _ConnectionConfigPlan {
@@ -1410,10 +1426,12 @@ class _HomeScreenState extends State<HomeScreen>
         failover: failover,
       );
     } on Object catch (error) {
-      final reason = _classifyStartFailure(error);
+      final typedFailure = error is _ProfileStartFailure ? error : null;
+      final reason = typedFailure?.reason ?? _classifyStartFailure(error);
       final stats = await _store.recordProfileRuntimeFailure(
         profile.id,
         reason,
+        quarantineFor: typedFailure?.quarantineFor,
       );
       if (mounted) {
         setState(() {
@@ -1542,6 +1560,7 @@ class _HomeScreenState extends State<HomeScreen>
               _ConnectionLifecycle.probing,
               reason: plan.label,
             );
+            final isVlessProfile = VlessProfileTools.isVlessProfile(profile);
             final probeResult =
                 _vpnEngine.configTarget != SingBoxConfigTarget.windows
                 ? const _HealthProbeResult(
@@ -1549,7 +1568,16 @@ class _HomeScreenState extends State<HomeScreen>
                     attempts: <_HealthProbeAttempt>[],
                     lastFailure: null,
                   )
-                : await _probeLocalMixedProxy();
+                : await _probeLocalMixedProxy(
+                    startupProbe: true,
+                    attemptsPerEndpoint: isVlessProfile ? 1 : null,
+                    connectionTimeout: isVlessProfile
+                        ? const Duration(seconds: 4)
+                        : null,
+                    responseTimeout: isVlessProfile
+                        ? const Duration(seconds: 5)
+                        : null,
+                  );
             if (probeResult.success) {
               _setConnectionLifecycle(
                 _ConnectionLifecycle.stable,
@@ -1580,6 +1608,27 @@ class _HomeScreenState extends State<HomeScreen>
               );
               connected = true;
               break;
+            }
+            final startupFailureReason = _startupProbeFailFastReason(
+              profile,
+              probeResult,
+            );
+            if (startupFailureReason != null) {
+              _queueLog(
+                'VLESS startup probe fail-fast: $startupFailureReason. '
+                'Current profile will be quarantined and failover will try another server. '
+                'Reason: $probeInfo.',
+              );
+              if (fastReconnect) {
+                await _stopVpnForProfileSwitch();
+              } else {
+                await _stopVpnCore(updateMessage: false);
+              }
+              throw _ProfileStartFailure(
+                s.connectionProbeFailed,
+                reason: startupFailureReason,
+                quarantineFor: _vlessStartupProbeQuarantine,
+              );
             }
             lastStartError = s.connectionProbeFailed;
           } else {
@@ -1834,8 +1883,17 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<_HealthProbeResult> _probeLocalMixedProxy({
     bool logFailures = true,
+    bool startupProbe = false,
+    int? attemptsPerEndpoint,
+    Duration? connectionTimeout,
+    Duration? responseTimeout,
+    Duration? retryDelay,
   }) async {
     final totalStopwatch = Stopwatch()..start();
+    final maxAttempts = attemptsPerEndpoint ?? _healthWatchdogProbeAttempts;
+    final connectTimeout = connectionTimeout ?? const Duration(seconds: 6);
+    final closeTimeout = responseTimeout ?? const Duration(seconds: 8);
+    final probeDelay = retryDelay ?? _healthWatchdogProbeDelay;
     final endpoints = <({Uri uri, bool allowCertificateMismatch})>[
       (
         uri: Uri.https('cp.cloudflare.com', '/generate_204'),
@@ -1859,15 +1917,11 @@ class _HomeScreenState extends State<HomeScreen>
       endpointIndex += 1
     ) {
       final endpoint = endpoints[endpointIndex];
-      for (
-        var attempt = 1;
-        attempt <= _healthWatchdogProbeAttempts;
-        attempt += 1
-      ) {
+      for (var attempt = 1; attempt <= maxAttempts; attempt += 1) {
         final startedAt = DateTime.now();
         final stopwatch = Stopwatch()..start();
         final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 6)
+          ..connectionTimeout = connectTimeout
           ..badCertificateCallback = endpoint.allowCertificateMismatch
               ? (_, host, _) => host == endpoint.uri.host
               : null
@@ -1877,15 +1931,13 @@ class _HomeScreenState extends State<HomeScreen>
         try {
           final request = await client
               .getUrl(endpoint.uri)
-              .timeout(const Duration(seconds: 6));
+              .timeout(connectTimeout);
           request.headers.set(
             HttpHeaders.userAgentHeader,
             'YurichConnect/$_appVersion',
           );
           request.followRedirects = false;
-          final response = await request.close().timeout(
-            const Duration(seconds: 8),
-          );
+          final response = await request.close().timeout(closeTimeout);
           await response.drain<void>().timeout(
             const Duration(seconds: 4),
             onTimeout: () {},
@@ -1977,15 +2029,15 @@ class _HomeScreenState extends State<HomeScreen>
         }
 
         if (logFailures &&
-            attempt == _healthWatchdogProbeAttempts &&
+            attempt == maxAttempts &&
             endpointIndex == endpoints.length - 1) {
           _queueLog(
             'VPN health probe failed: ${_healthProbeDescription(attemptLog)}.',
           );
         }
 
-        if (attempt < _healthWatchdogProbeAttempts) {
-          await Future<void>.delayed(_healthWatchdogProbeDelay);
+        if (attempt < maxAttempts) {
+          await Future<void>.delayed(probeDelay);
         }
       }
     }
@@ -2001,7 +2053,8 @@ class _HomeScreenState extends State<HomeScreen>
       'health_probe.total',
       totalStopwatch.elapsed,
       detail:
-          'result=${_healthProbeFailureClass(lastFailure)} attempts=${attempts.length}',
+          'result=${_healthProbeFailureClass(lastFailure)} attempts=${attempts.length}'
+          '${startupProbe ? ' startup=true' : ''}',
     );
     return _HealthProbeResult(
       success: false,
@@ -2086,7 +2139,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
     if (message.contains('connection refused') ||
         message.contains('connection reset') ||
-        message.contains('connection closed')) {
+        message.contains('connection closed') ||
+        message.contains('connection attempt failed') ||
+        message.contains('failed to respond') ||
+        message.contains('wsarecv')) {
       return 'tcp';
     }
     if (message.contains('network is unreachable') ||
@@ -2104,6 +2160,34 @@ class _HomeScreenState extends State<HomeScreen>
       return 'socket';
     }
     return errorType.isEmpty ? 'unknown' : errorType;
+  }
+
+  String? _startupProbeFailFastReason(
+    VpnProfile profile,
+    _HealthProbeResult result,
+  ) {
+    if (!VlessProfileTools.isVlessProfile(profile) || result.success) {
+      return null;
+    }
+    final attempts = result.attempts;
+    if (attempts.isEmpty) {
+      return null;
+    }
+    var networkFailures = 0;
+    for (final attempt in attempts) {
+      final failureClass = _healthProbeFailureClass(attempt);
+      if (failureClass == 'proxy_probe_timeout' ||
+          failureClass == 'tcp' ||
+          failureClass == 'socket' ||
+          failureClass == 'route') {
+        networkFailures += 1;
+      }
+    }
+    final quorum = attempts.length <= 2 ? attempts.length : attempts.length - 1;
+    if (networkFailures >= quorum) {
+      return 'vless_upstream_timeout';
+    }
+    return null;
   }
 
   String _formatLatency(int ms) => ms <= 0 ? 'n/a' : '${ms}ms';
@@ -2274,7 +2358,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
     final lower = message.toLowerCase();
     if (!lower.contains('using outbound/vless[proxy]') ||
-        !lower.contains('eof')) {
+        !_isVlessUpstreamFailureLog(lower)) {
       return;
     }
 
@@ -2292,10 +2376,26 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    unawaited(_handleVlessEofStorm(profile, _vlessEofEvents.length));
+    unawaited(
+      _handleVlessUpstreamFailureStorm(profile, _vlessEofEvents.length),
+    );
   }
 
-  Future<void> _handleVlessEofStorm(VpnProfile profile, int count) async {
+  bool _isVlessUpstreamFailureLog(String lowerLog) {
+    return lowerLog.contains('eof') ||
+        lowerLog.contains('i/o timeout') ||
+        lowerLog.contains('context deadline exceeded') ||
+        lowerLog.contains('connection attempt failed') ||
+        lowerLog.contains('failed to respond') ||
+        lowerLog.contains('wsarecv') ||
+        lowerLog.contains('connection reset') ||
+        lowerLog.contains('connection closed');
+  }
+
+  Future<void> _handleVlessUpstreamFailureStorm(
+    VpnProfile profile,
+    int count,
+  ) async {
     if (_vlessEofFailoverRunning || _busy || !mounted) {
       return;
     }
@@ -2306,11 +2406,11 @@ class _HomeScreenState extends State<HomeScreen>
     );
     _vlessEofEvents.clear();
 
-    const reason = 'vless_eof_storm';
+    const reason = 'vless_upstream_failure_storm';
     try {
       _setConnectionLifecycle(_ConnectionLifecycle.degraded, reason: reason);
       _queueLog(
-        'VLESS EOF storm detected: $count EOF errors within '
+        'VLESS upstream failure storm detected: $count errors within '
         '${_vlessEofStormWindow.inSeconds}s for '
         '${_redactSensitive(profile.name)}. Profile will be quarantined for '
         '${_vlessEofStormQuarantine.inMinutes}m and failover will try another server.',
@@ -2331,7 +2431,7 @@ class _HomeScreenState extends State<HomeScreen>
       );
     } on Object catch (error) {
       _queueLog(
-        'VLESS EOF storm failover failed: ${_redactSensitive('$error')}',
+        'VLESS upstream failure failover failed: ${_redactSensitive('$error')}',
       );
       if (mounted) {
         setState(() {
