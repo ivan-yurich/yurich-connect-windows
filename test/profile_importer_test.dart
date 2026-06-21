@@ -391,9 +391,16 @@ void main() {
             as Map<String, dynamic>;
     final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
     final route = config['route'] as Map<String, dynamic>;
+    final dns = config['dns'] as Map<String, dynamic>;
     final routeRules = (route['rules'] as List)
         .whereType<Map<String, dynamic>>()
         .toList();
+    final dnsServers = (dns['servers'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final globalDns = dnsServers.firstWhere(
+      (server) => server['tag'] == 'global-dns',
+    );
     final naiveConfig =
         jsonDecode(builder.buildNaiveProxyConfig(profile))
             as Map<String, dynamic>;
@@ -402,6 +409,15 @@ void main() {
     expect(proxy['server'], '127.0.0.1');
     expect(proxy['server_port'], SingBoxConfigBuilder.naiveProxySocksPort);
     expect(proxy['network'], 'tcp');
+    expect(proxy['domain_resolver'], {
+      'server': 'global-dns',
+      'strategy': 'ipv4_only',
+    });
+    expect(globalDns['detour'], isNull);
+    expect(route['default_domain_resolver'], {
+      'server': 'global-dns',
+      'strategy': 'ipv4_only',
+    });
     expect(route['find_process'], isTrue);
     expect(
       routeRules.any(
@@ -432,6 +448,47 @@ void main() {
     );
     expect(naiveConfig['proxy'], 'quic://user:pass@example.com:443');
   });
+
+  test(
+    'keeps NaiveProxy core DNS out of proxy loop when DNS hardening is on',
+    () async {
+      const link =
+          'naive+https://user:pass@example.com:443?quic=true#NaiveCore';
+
+      final profile = (await ProfileImporter().importFromText(link)).first;
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  target: SingBoxConfigTarget.windows,
+                  naiveMode: NaiveOutboundMode.externalCore,
+                  dnsOnlyThroughVpn: true,
+                ),
+              )
+              as Map<String, dynamic>;
+      final dns = config['dns'] as Map<String, dynamic>;
+      final route = config['route'] as Map<String, dynamic>;
+      final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
+      final dnsServers = (dns['servers'] as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final globalDns = dnsServers.firstWhere(
+        (server) => server['tag'] == 'global-dns',
+      );
+
+      expect(proxy['type'], 'socks');
+      expect(proxy['server_port'], SingBoxConfigBuilder.naiveProxySocksPort);
+      expect(globalDns['detour'], isNull);
+      expect(route['default_domain_resolver'], {
+        'server': 'global-dns',
+        'strategy': 'ipv4_only',
+      });
+      expect(proxy['domain_resolver'], {
+        'server': 'global-dns',
+        'strategy': 'ipv4_only',
+      });
+    },
+  );
 
   test('normalizes legacy Naive TLS fields from saved profiles', () {
     const profile = VpnProfile(
