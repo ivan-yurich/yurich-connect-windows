@@ -36,7 +36,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.50';
+const _appVersion = '1.0.53';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -576,6 +576,14 @@ class _HomeScreenState extends State<HomeScreen>
       );
       await _connect();
       if (!mounted || _connected) {
+        return;
+      }
+      final lastError = _lastError;
+      if (lastError != null && lastError.isNotEmpty) {
+        _queueLog(
+          'Startup auto-connect stopped after explicit failure: '
+          '${_redactSensitive(lastError)}',
+        );
         return;
       }
     }
@@ -1135,141 +1143,9 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     await _runBusy(
-      () => _connectWithFailover(profile),
+      () => _startVpnCore(profile),
       message: s.connectingTo(profile.name),
     );
-  }
-
-  Future<void> _connectWithFailover(VpnProfile preferred) async {
-    _setConnectionLifecycle(
-      _ConnectionLifecycle.preparing,
-      reason: 'connect requested',
-    );
-    if (!_checkingServerLatency) {
-      await _refreshServerLatencies();
-    }
-
-    final candidates = _connectCandidateProfiles(preferred);
-    Object? lastError;
-    for (var index = 0; index < candidates.length; index += 1) {
-      final candidate = candidates[index];
-      final attemptNumber = index + 1;
-      if (candidate.id != preferred.id || index > 0) {
-        final message = _failoverTryingMessage(
-          candidate,
-          attemptNumber,
-          candidates.length,
-        );
-        _queueLog(message);
-        if (mounted) {
-          setState(() => _message = message);
-        }
-      }
-
-      if (index > 0) {
-        await Future<void>.delayed(
-          Duration(milliseconds: index == 1 ? 1200 : 3000),
-        );
-      }
-
-      try {
-        await _startVpnCore(
-          candidate,
-          fastReconnect: index > 0,
-          failover: index > 0 || candidate.id != preferred.id,
-        );
-        if (candidate.id != preferred.id) {
-          final message = _failoverConnectedMessage(candidate);
-          _queueLog(message);
-          if (mounted) {
-            setState(() => _message = message);
-            _showSnack(message);
-          }
-        }
-        return;
-      } on Object catch (error) {
-        lastError = error;
-        _queueLog(
-          'Profile connect failed [${candidate.name}] '
-          '$attemptNumber/${candidates.length}: '
-          '${_redactSensitive('$error')}',
-        );
-      }
-    }
-
-    await _store.saveSelectedProfileId(preferred.id);
-    if (mounted) {
-      setState(() => _selectedProfileId = preferred.id);
-    }
-    throw StateError('${lastError ?? s.vpnStartFailed}');
-  }
-
-  List<VpnProfile> _connectCandidateProfiles(VpnProfile preferred) {
-    final latencySnapshots = _profileLatencySnapshots();
-    final failoverProfiles = VlessProfileTools.isVlessProfile(preferred)
-        ? _profiles.where(VlessProfileTools.isVlessProfile).toList()
-        : _profiles;
-    final ranked = rankProfilesForFailover(
-      profiles: failoverProfiles,
-      preferred: preferred,
-      runtimeStats: _profileRuntimeStats,
-      latencies: latencySnapshots,
-    );
-    if (ranked.isEmpty) {
-      return [preferred];
-    }
-
-    final best = ranked.first;
-    final useBest = shouldAutoSelectBestProfile(
-      preferred: preferred,
-      best: best,
-      runtimeStats: _profileRuntimeStats,
-      latencies: latencySnapshots,
-    );
-    final preferredScore = profileFailoverScore(
-      profile: preferred,
-      preferred: preferred,
-      runtimeStats: _profileRuntimeStats[preferred.id],
-      latency: latencySnapshots[preferred.id],
-    );
-
-    final ordered = <VpnProfile>[];
-    void add(VpnProfile profile) {
-      if (!ordered.any((item) => item.id == profile.id)) {
-        ordered.add(profile);
-      }
-    }
-
-    if (useBest) {
-      add(best.profile);
-      if (preferredScore > -1000) {
-        add(preferred);
-      }
-      _queueLog(
-        'Auto-selected better profile: ${_redactSensitive(best.profile.name)} '
-        'score=${best.score}; preferred=${_redactSensitive(preferred.name)}.',
-      );
-    } else {
-      add(preferred);
-    }
-
-    for (final candidate in ranked) {
-      add(candidate.profile);
-      if (ordered.length >= _maxProfileFailoverAttempts) {
-        break;
-      }
-    }
-    final quarantined = failoverProfiles.where(
-      (profile) => _profileRuntimeStats[profile.id]?.isQuarantined() == true,
-    );
-    for (final profile in quarantined) {
-      _queueLog(
-        'Profile quarantined and skipped by failover: '
-        '${_redactSensitive(profile.name)} until '
-        '${_profileRuntimeStats[profile.id]?.quarantinedUntil?.toIso8601String() ?? 'unknown'}.',
-      );
-    }
-    return ordered.take(_maxProfileFailoverAttempts).toList();
   }
 
   Map<String, ProfileLatencySnapshot> _profileLatencySnapshots() {
@@ -1284,22 +1160,6 @@ class _HomeScreenState extends State<HomeScreen>
       };
       return MapEntry(profileId, snapshot);
     });
-  }
-
-  String _failoverTryingMessage(VpnProfile profile, int attempt, int total) {
-    final score = _profileRuntimeStats[profile.id]?.score;
-    final scoreLabel = score == null ? '' : ' score=$score';
-    if (_isRu(s)) {
-      return 'Пробую резервный профиль ${profile.name} ($attempt/$total)$scoreLabel';
-    }
-    return 'Trying fallback profile ${profile.name} ($attempt/$total)$scoreLabel';
-  }
-
-  String _failoverConnectedMessage(VpnProfile profile) {
-    if (_isRu(s)) {
-      return 'Подключено через резервный профиль: ${profile.name}';
-    }
-    return 'Connected through fallback profile: ${profile.name}';
   }
 
   Future<void> _showAdminRequiredDialog() async {
@@ -1623,13 +1483,17 @@ class _HomeScreenState extends State<HomeScreen>
                 'Current profile will be quarantined and failover will try another server. '
                 'Reason: $probeInfo.',
               );
+              final failureMessage =
+                  startupFailureReason == 'vless_upstream_closed'
+                  ? s.vlessUpstreamClosed
+                  : s.connectionProbeFailed;
               if (fastReconnect) {
                 await _stopVpnForProfileSwitch();
               } else {
                 await _stopVpnCore(updateMessage: false);
               }
               throw _ProfileStartFailure(
-                s.connectionProbeFailed,
+                failureMessage,
                 reason: startupFailureReason,
                 quarantineFor: _vlessStartupProbeQuarantine,
               );
@@ -2184,17 +2048,31 @@ class _HomeScreenState extends State<HomeScreen>
     if (attempts.isEmpty) {
       return null;
     }
+    if (_vlessEofEvents.length >= 2) {
+      return 'vless_upstream_closed';
+    }
     var networkFailures = 0;
+    var upstreamClosedFailures = 0;
     for (final attempt in attempts) {
       final failureClass = _healthProbeFailureClass(attempt);
+      final message = (attempt.errorMessage ?? '').toLowerCase();
       if (failureClass == 'proxy_probe_timeout' ||
           failureClass == 'tcp' ||
           failureClass == 'socket' ||
           failureClass == 'route') {
         networkFailures += 1;
       }
+      if (failureClass == 'tls' ||
+          message.contains('handshake') ||
+          message.contains('connection terminated') ||
+          message.contains('eof')) {
+        upstreamClosedFailures += 1;
+      }
     }
     final quorum = attempts.length <= 2 ? attempts.length : attempts.length - 1;
+    if (upstreamClosedFailures >= quorum) {
+      return 'vless_upstream_closed';
+    }
     if (networkFailures >= quorum) {
       return 'vless_upstream_timeout';
     }
@@ -4340,8 +4218,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
                     sessionTotal: _sessionTotal,
                     sessionDuration: _sessionDuration,
                   ),
-                  if (_status == YurichConnectStatus.adminRequired ||
-                      _lastError != null) ...[
+                  if (_status == YurichConnectStatus.adminRequired) ...[
                     const SizedBox(height: 10),
                     _IssueActionPanel(
                       strings: s,
@@ -4363,7 +4240,6 @@ if ($null -ne $match) { 'true' } else { 'false' }
                     profiles: _profiles,
                     selectedId: selected?.id,
                     serverLatencies: _serverLatencies,
-                    profileRuntimeStats: _profileRuntimeStats,
                     checkingServerLatency: _checkingServerLatency,
                     refreshingSubscriptions: _refreshingSubscriptions,
                     showAllProfiles: _showAllProfiles,
@@ -4938,7 +4814,6 @@ class _ProfilePanel extends StatelessWidget {
     required this.profiles,
     required this.selectedId,
     required this.serverLatencies,
-    required this.profileRuntimeStats,
     required this.checkingServerLatency,
     required this.refreshingSubscriptions,
     required this.showAllProfiles,
@@ -4959,7 +4834,6 @@ class _ProfilePanel extends StatelessWidget {
   final List<VpnProfile> profiles;
   final String? selectedId;
   final Map<String, _ServerLatencyResult> serverLatencies;
-  final Map<String, ProfileRuntimeStats> profileRuntimeStats;
   final bool checkingServerLatency;
   final bool refreshingSubscriptions;
   final bool showAllProfiles;
@@ -5055,7 +4929,6 @@ class _ProfilePanel extends StatelessWidget {
                 profile: profile,
                 selected: profile.id == selectedId,
                 latency: serverLatencies[profile.id],
-                runtimeStats: profileRuntimeStats[profile.id],
                 checkingLatency: checkingServerLatency,
                 onTap: () => onSelect(profile),
                 onRefreshLatency: onRefreshLatency,
@@ -5182,7 +5055,6 @@ class _ProfileTile extends StatelessWidget {
     required this.profile,
     required this.selected,
     required this.latency,
-    required this.runtimeStats,
     required this.checkingLatency,
     required this.onTap,
     required this.onRefreshLatency,
@@ -5194,7 +5066,6 @@ class _ProfileTile extends StatelessWidget {
   final VpnProfile profile;
   final bool selected;
   final _ServerLatencyResult? latency;
-  final ProfileRuntimeStats? runtimeStats;
   final bool checkingLatency;
   final VoidCallback onTap;
   final VoidCallback onRefreshLatency;
@@ -5213,12 +5084,11 @@ class _ProfileTile extends StatelessWidget {
         ? _goldSoft
         : Colors.redAccent.shade100;
     final expiryLabel = _formatProfileExpiry(profile.expiresAt, strings);
-    final stabilityLabel = _formatProfileStability(runtimeStats, strings);
-    final stabilityColor = runtimeStats == null
-        ? _mutedGold
-        : runtimeStats!.unstable
-        ? Colors.orangeAccent.shade100
-        : const Color(0xFFB8F7D4);
+    final routeLatencyLabel = _formatProfileRouteLatency(
+      latency: latency,
+      checkingLatency: checkingLatency,
+      strings: strings,
+    );
 
     return InkWell(
       onTap: onTap,
@@ -5267,16 +5137,18 @@ class _ProfileTile extends StatelessWidget {
                         ),
                       ),
                     ),
-                  if (stabilityLabel != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        stabilityLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12, color: stabilityColor),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      routeLatencyLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFFB8D3EF),
                       ),
                     ),
+                  ),
                 ],
               ),
             ),
@@ -5421,18 +5293,35 @@ String? _formatProfileExpiry(DateTime? expiresAt, _Strings strings) {
   return 'Subscription until $formattedDate ($daysLeft days left)';
 }
 
-String? _formatProfileStability(ProfileRuntimeStats? stats, _Strings strings) {
-  if (stats == null || (stats.successes == 0 && stats.failures == 0)) {
-    return null;
+String _formatProfileRouteLatency({
+  required _ServerLatencyResult? latency,
+  required bool checkingLatency,
+  required _Strings strings,
+}) {
+  final city = _isRu(strings) ? 'Новосибирск' : 'Novosibirsk';
+  final route = _isRu(strings) ? '$city → сервер' : '$city → server';
+  if (latency == null) {
+    final value = checkingLatency
+        ? (_isRu(strings) ? 'проверка' : 'checking')
+        : (_isRu(strings) ? 'не проверено' : 'not checked');
+    return '$route · $value';
   }
-  final score = stats.score;
-  final avg = stats.averageStartMs;
+
+  if (latency.ok) {
+    return '$route · ${strings.pingMs(latency.milliseconds ?? 0)}';
+  }
+
   if (_isRu(strings)) {
-    final prefix = stats.unstable ? 'Нестабильно' : 'Стабильность';
-    return avg > 0 ? '$prefix $score · старт ~$avgмс' : '$prefix $score';
+    final value = latency.state == _ServerLatencyState.failed
+        ? 'тайм-аут'
+        : 'нет адреса';
+    return '$route · $value';
   }
-  final prefix = stats.unstable ? 'Unstable' : 'Stability';
-  return avg > 0 ? '$prefix $score · start ~${avg}ms' : '$prefix $score';
+
+  final value = latency.state == _ServerLatencyState.failed
+      ? 'timeout'
+      : 'no endpoint';
+  return '$route · $value';
 }
 
 bool _isRu(_Strings strings) {
@@ -6411,6 +6300,13 @@ class _Strings {
   String get connectionProbeFailed => switch (this) {
     _Strings.en => 'VPN started, but the proxy health check failed.',
     _ => 'VPN стартовал, но проверка прокси не прошла.',
+  };
+
+  String get vlessUpstreamClosed => switch (this) {
+    _Strings.en =>
+      'VLESS server closed the connection during startup. Check this profile on the server side or select another profile manually.',
+    _ =>
+      'VLESS сервер закрыл соединение при старте. Проверь этот профиль на сервере или выбери другой профиль вручную.',
   };
 
   String vpnStopTimeout(String status) => switch (this) {
