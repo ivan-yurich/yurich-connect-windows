@@ -36,7 +36,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.50';
+const _appVersion = '1.0.90';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -236,6 +236,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _codexDiagnosticsBusy = false;
   bool _terminalDiagnosticsBusy = false;
   bool _dnsDiagnosticsBusy = false;
+  bool _vpnDiagnosticsBusy = false;
   String? _dismissedUpdateVersion;
   String? _lastConfigSummary;
   DateTime? _lastVpnReconnectAt;
@@ -3217,6 +3218,75 @@ if ($null -ne $match) { 'true' } else { 'false' }
     }
   }
 
+  Future<void> _runVpnDiagnostics() async {
+    if (_vpnDiagnosticsBusy) {
+      return;
+    }
+    setState(() => _vpnDiagnosticsBusy = true);
+    final lines = <String>[
+      'VPN diagnostics started. connected=$_connected, status=$_status, '
+          'advanced_tun=$_advancedTunMode, developer_mode=$_developerMode, '
+          'system_proxy=$_systemProxyEnabled.',
+      'VPN trace uses Yurich Connect internal HTTP client through 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}; terminal process exclusions do not affect this check.',
+    ];
+    try {
+      final ports = <int>[
+        SingBoxConfigBuilder.localMixedProxyPort,
+        SingBoxConfigBuilder.localSocksProxyPort,
+        if (Platform.isWindows) SingBoxConfigBuilder.windowsClashApiPort,
+      ];
+      for (final port in ports) {
+        final open = await _diagnoseLocalTcpPort(port);
+        lines.add('Local port 127.0.0.1:$port: ${open ? 'open' : 'closed'}.');
+      }
+      if (_connected) {
+        final probe = await _probeLocalMixedProxy(
+          logFailures: false,
+          attemptsPerEndpoint: 1,
+          connectionTimeout: const Duration(seconds: 5),
+          responseTimeout: const Duration(seconds: 7),
+        );
+        lines.add(
+          'VPN health probe: ${probe.success ? 'ok' : 'failed'}'
+          '${probe.lastFailure == null ? '' : ' (${_healthProbeDescription(probe.lastFailure)})'}.',
+        );
+        lines.add(await _diagnoseCloudflareTrace(viaProxy: true));
+      } else {
+        lines.add('VPN trace via proxy: skipped because VPN is not connected.');
+      }
+      lines.add(await _diagnoseCloudflareTrace(viaProxy: false));
+    } on Object catch (error) {
+      lines.add('VPN diagnostics failed: ${_redactSensitive('$error')}');
+    } finally {
+      for (final line in lines) {
+        _queueLog(line);
+      }
+      if (mounted) {
+        setState(() {
+          _vpnDiagnosticsBusy = false;
+          _message = s.vpnDiagnosticsDone;
+        });
+        _showSnack(s.vpnDiagnosticsDone);
+      }
+    }
+  }
+
+  Future<bool> _diagnoseLocalTcpPort(int port) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        port,
+        timeout: const Duration(seconds: 2),
+      );
+      return true;
+    } on Object {
+      return false;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
   Future<void> _runDnsDiagnostics() async {
     if (_dnsDiagnosticsBusy) {
       return;
@@ -4406,6 +4476,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
                       codexDiagnosticsBusy: _codexDiagnosticsBusy,
                       terminalDiagnosticsBusy: _terminalDiagnosticsBusy,
                       dnsDiagnosticsBusy: _dnsDiagnosticsBusy,
+                      vpnDiagnosticsBusy: _vpnDiagnosticsBusy,
                       excludedProcessCount:
                           _splitTunnelExcludedProcesses.length,
                       vpnOnlyProcessCount: _vpnOnlyProcesses.length,
@@ -4433,6 +4504,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
                       onTerminalDiagnostics: () =>
                           unawaited(_runTerminalDiagnostics()),
                       onDnsDiagnostics: () => unawaited(_runDnsDiagnostics()),
+                      onVpnDiagnostics: () => unawaited(_runVpnDiagnostics()),
                       onCheckUpdate: _checkForUpdates,
                       onOpenReleases: () =>
                           _openUrl(WindowsIntegrationService.releasesUrl),
@@ -5507,6 +5579,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.codexDiagnosticsBusy,
     required this.terminalDiagnosticsBusy,
     required this.dnsDiagnosticsBusy,
+    required this.vpnDiagnosticsBusy,
     required this.excludedProcessCount,
     required this.vpnOnlyProcessCount,
     required this.updateInfo,
@@ -5523,6 +5596,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onCodexDiagnostics,
     required this.onTerminalDiagnostics,
     required this.onDnsDiagnostics,
+    required this.onVpnDiagnostics,
     required this.onCheckUpdate,
     required this.onOpenReleases,
     required this.onRepairConnection,
@@ -5545,6 +5619,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool codexDiagnosticsBusy;
   final bool terminalDiagnosticsBusy;
   final bool dnsDiagnosticsBusy;
+  final bool vpnDiagnosticsBusy;
   final int excludedProcessCount;
   final int vpnOnlyProcessCount;
   final WindowsUpdateInfo? updateInfo;
@@ -5561,6 +5636,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final VoidCallback onCodexDiagnostics;
   final VoidCallback onTerminalDiagnostics;
   final VoidCallback onDnsDiagnostics;
+  final VoidCallback onVpnDiagnostics;
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenReleases;
   final VoidCallback onRepairConnection;
@@ -5717,6 +5793,16 @@ class _WindowsToolsPanel extends StatelessWidget {
                         )
                       : const Icon(Icons.dns_outlined),
                   label: Text(strings.dnsDiagnostics),
+                ),
+                _ActionTile(
+                  onPressed: vpnDiagnosticsBusy ? null : onVpnDiagnostics,
+                  icon: vpnDiagnosticsBusy
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.network_check_outlined),
+                  label: Text(strings.vpnDiagnostics),
                 ),
                 _ActionTile(
                   onPressed: checkingUpdate || installingUpdate
@@ -6197,6 +6283,8 @@ class _Strings {
     required this.terminalDiagnosticsDone,
     required this.dnsDiagnostics,
     required this.dnsDiagnosticsDone,
+    required this.vpnDiagnostics,
+    required this.vpnDiagnosticsDone,
     required this.splitTunnelTitle,
     required this.splitTunnelDescription,
     required this.splitTunnelHint,
@@ -6321,6 +6409,8 @@ class _Strings {
   final String terminalDiagnosticsDone;
   final String dnsDiagnostics;
   final String dnsDiagnosticsDone;
+  final String vpnDiagnostics;
+  final String vpnDiagnosticsDone;
   final String splitTunnelTitle;
   final String splitTunnelDescription;
   final String splitTunnelHint;
@@ -6755,6 +6845,8 @@ class _Strings {
     terminalDiagnosticsDone: 'Диагностика терминала записана в логи',
     dnsDiagnostics: 'Диагностика DNS',
     dnsDiagnosticsDone: 'Диагностика DNS записана в логи',
+    vpnDiagnostics: 'Диагностика VPN',
+    vpnDiagnosticsDone: 'Диагностика VPN записана в логи',
     splitTunnelTitle: 'Исключения приложений',
     splitTunnelDescription:
         'Укажи exe-файлы, которые должны идти напрямую, минуя VPN. По одному в строке.',
@@ -6929,6 +7021,8 @@ class _Strings {
     terminalDiagnosticsDone: 'Terminal diagnostics written to logs',
     dnsDiagnostics: 'DNS diagnostics',
     dnsDiagnosticsDone: 'DNS diagnostics written to logs',
+    vpnDiagnostics: 'VPN diagnostics',
+    vpnDiagnosticsDone: 'VPN diagnostics written to logs',
     splitTunnelTitle: 'App exclusions',
     splitTunnelDescription:
         'Enter exe files that should go directly and bypass the VPN. One per line.',

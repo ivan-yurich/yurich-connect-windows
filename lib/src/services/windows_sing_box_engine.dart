@@ -4,6 +4,7 @@ import 'dart:io';
 
 import '../branding.dart';
 import '../models/vpn_profile.dart';
+import 'runtime_log_classifier.dart';
 import 'secret_redactor.dart';
 import 'sing_box_config_builder.dart';
 import 'vpn_engine.dart';
@@ -13,6 +14,7 @@ class WindowsSingBoxEngine implements VpnEngine {
   final _trafficController = StreamController<Map<String, dynamic>>.broadcast();
   final _logController = StreamController<Map<String, dynamic>>.broadcast();
   final _logs = <String>[];
+  final Map<String, Future<void>> _logWriteChains = {};
 
   Process? _process;
   Process? _naiveProcess;
@@ -31,6 +33,7 @@ class WindowsSingBoxEngine implements VpnEngine {
   bool _transitioning = false;
   bool _lastConfigNeedsTun = false;
   int _runtimeFailureCount = 0;
+  int _suppressedDiagnosticLogCount = 0;
   DateTime? _lastRuntimeFailureAt;
   String? _lastRuntimeFailureReason;
   bool _lastStartupFailureIsFatal = false;
@@ -43,6 +46,8 @@ class WindowsSingBoxEngine implements VpnEngine {
     'VCRUNTIME140.dll',
     'VCRUNTIME140_1.dll',
   ];
+  static const _maxLogFileBytes = 8 * 1024 * 1024;
+  static const _maxLogBackups = 4;
 
   @override
   SingBoxConfigTarget get configTarget => SingBoxConfigTarget.windows;
@@ -1491,8 +1496,17 @@ Write-Output \$stopped
         }
         if (_process != null && _status != YurichConnectStatus.stopping) {
           _recordRuntimeFailure('naive', code);
-          _appendLog('NaiveProxy core stopped while VPN was running.');
-          _process?.kill();
+          _appendLog(
+            'NaiveProxy core stopped while VPN was running; keeping Yurich Core alive and reporting a degraded Naive runtime event. Reconnect manually or try another Naive mode.',
+          );
+          if (!_statusController.isClosed) {
+            _statusController.add({
+              'type': 'alert',
+              'code': 'naiveRuntimeStopped',
+              'message':
+                  'NaiveProxy остановился. VPN не перезапущен автоматически, чтобы не рвать активные сессии. Переподключи профиль вручную или выбери другой режим Naive.',
+            });
+          }
         }
       }),
     );
@@ -1544,6 +1558,9 @@ Write-Output \$stopped
     if (trimmed.isEmpty) {
       return;
     }
+    if (_isSuppressedDiagnosticLog(trimmed)) {
+      return;
+    }
     if (!_reportedAdminIssue &&
         trimmed.toLowerCase().contains('access is denied')) {
       _reportedAdminIssue = true;
@@ -1568,22 +1585,86 @@ Write-Output \$stopped
     }
   }
 
+  bool _isSuppressedDiagnosticLog(String message) {
+    if (!RuntimeLogClassifier.isDiagnosticNoise(message)) {
+      return false;
+    }
+    _suppressedDiagnosticLogCount += 1;
+    if (_suppressedDiagnosticLogCount == 1 ||
+        _suppressedDiagnosticLogCount % 100 == 0) {
+      final summary =
+          'Suppressed repetitive runtime diagnostic noise: $_suppressedDiagnosticLogCount entries.';
+      _logs.add(summary);
+      if (_logs.length > 300) {
+        _logs.removeRange(0, _logs.length - 300);
+      }
+      if (!_logController.isClosed) {
+        _logController.add({'type': 'log', 'message': summary});
+      }
+      unawaited(_writeLogFile('yurich.log', summary));
+    }
+    return true;
+  }
+
   Future<void> _writeLogFile(String fileName, String message) async {
+    final previous = _logWriteChains[fileName] ?? Future<void>.value();
+    late final Future<void> next;
+    next = previous
+        .catchError((_) {})
+        .then((_) => _writeLogFileLocked(fileName, message));
+    _logWriteChains[fileName] = next;
     try {
-      final base = await _configDir();
-      final dir = Directory('${base.path}\\logs');
-      await dir.create(recursive: true);
-      final file = File('${dir.path}\\$fileName');
-      final timestamp = DateTime.now().toIso8601String();
-      await file.writeAsString(
-        '[$timestamp] $message${Platform.lineTerminator}',
-        mode: FileMode.append,
-        encoding: utf8,
-        flush: false,
-      );
+      await next;
     } on Object {
       // File logging must never break the VPN control flow.
+    } finally {
+      if (_logWriteChains[fileName] == next) {
+        _logWriteChains.remove(fileName);
+      }
     }
+  }
+
+  Future<void> _writeLogFileLocked(String fileName, String message) async {
+    final base = await _configDir();
+    final dir = Directory('${base.path}\\logs');
+    await dir.create(recursive: true);
+    final file = File('${dir.path}\\$fileName');
+    await _rotateLogFileIfNeeded(file);
+    final timestamp = DateTime.now().toIso8601String();
+    await file.writeAsString(
+      '[$timestamp] $message${Platform.lineTerminator}',
+      mode: FileMode.append,
+      encoding: utf8,
+      flush: false,
+    );
+  }
+
+  Future<void> _rotateLogFileIfNeeded(File file) async {
+    if (!await file.exists()) {
+      return;
+    }
+    final length = await file.length();
+    if (length < _maxLogFileBytes) {
+      return;
+    }
+
+    for (var index = _maxLogBackups - 1; index >= 1; index -= 1) {
+      final source = File('${file.path}.$index');
+      if (!await source.exists()) {
+        continue;
+      }
+      final target = File('${file.path}.${index + 1}');
+      if (await target.exists()) {
+        await target.delete();
+      }
+      await source.rename(target.path);
+    }
+
+    final firstBackup = File('${file.path}.1');
+    if (await firstBackup.exists()) {
+      await firstBackup.delete();
+    }
+    await file.rename(firstBackup.path);
   }
 
   String _redactSensitive(String value) {
