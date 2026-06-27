@@ -763,6 +763,10 @@ void main() {
       ),
       isTrue,
     );
+    final globalDns = dnsServers.firstWhere(
+      (server) => server['tag'] == 'global-dns',
+    );
+    expect(globalDns['detour'], 'proxy');
     expect(
       dnsRules.any((rule) {
         final suffixes = rule['domain_suffix'];
@@ -792,6 +796,7 @@ void main() {
       'server': 'bootstrap-dns',
       'strategy': 'ipv4_only',
     });
+    expect(proxyOutbound['domain_resolver']['server'], isNot('global-dns'));
   });
 
   test('routes Windows updater GitHub traffic direct in TUN mode', () async {

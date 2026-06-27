@@ -36,7 +36,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.90';
+const _appVersion = '1.0.91';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 6;
 const _maxProfileFailoverAttempts = 3;
@@ -53,6 +53,9 @@ const _vlessEofStormWindow = Duration(seconds: 25);
 const _vlessEofStormThreshold = 8;
 const _vlessEofStormFailoverCooldown = Duration(minutes: 2);
 const _vlessStartupProbeQuarantine = Duration(minutes: 12);
+const _vlessStartupProbeAttempts = 2;
+const _vlessStartupProbeConnectTimeout = Duration(seconds: 6);
+const _vlessStartupProbeResponseTimeout = Duration(seconds: 8);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
 const _healthProbeHistoryWindow = Duration(hours: 1);
 const _healthProbeHistoryLimit = 240;
@@ -1574,12 +1577,14 @@ class _HomeScreenState extends State<HomeScreen>
                   )
                 : await _probeLocalMixedProxy(
                     startupProbe: true,
-                    attemptsPerEndpoint: isVlessProfile ? 1 : null,
+                    attemptsPerEndpoint: isVlessProfile
+                        ? _vlessStartupProbeAttempts
+                        : null,
                     connectionTimeout: isVlessProfile
-                        ? const Duration(seconds: 4)
+                        ? _vlessStartupProbeConnectTimeout
                         : null,
                     responseTimeout: isVlessProfile
-                        ? const Duration(seconds: 5)
+                        ? _vlessStartupProbeResponseTimeout
                         : null,
                   );
             if (probeResult.success) {
@@ -4059,6 +4064,11 @@ if ($null -ne $match) { 'true' } else { 'false' }
         (server) => server['tag'] == dnsFinal,
         orElse: () => const <String, dynamic>{},
       );
+      final bootstrapDns = dnsServers.firstWhere(
+        (server) => server['tag'] == 'bootstrap-dns',
+        orElse: () => const <String, dynamic>{},
+      );
+      final proxyResolver = _dnsResolverTag(proxy['domain_resolver']);
       return [
         'target=${target.name}',
         'mode=${tun.isEmpty ? 'stable_proxy' : 'advanced_tun'}',
@@ -4069,6 +4079,9 @@ if ($null -ne $match) { 'true' } else { 'false' }
         if (proxy['type'] == 'vless')
           'vless_packet_encoding=${proxy['packet_encoding'] ?? 'none'}',
         'dns=$dnsFinal/${dnsServer['type'] ?? 'unknown'}',
+        'dns_detour=${dnsServer['detour'] ?? 'direct'}',
+        'bootstrap=${bootstrapDns.isEmpty ? 'missing' : '${bootstrapDns['type']}/${bootstrapDns['detour'] ?? 'direct'}'}',
+        'proxy_resolver=${proxyResolver.isEmpty ? 'none' : proxyResolver}',
         if (hasFakeDns) 'fake_dns=true',
         'mtu=${tun['mtu'] ?? 'unknown'}',
         'strict_route=${tun['strict_route'] ?? 'unknown'}',
@@ -4083,6 +4096,16 @@ if ($null -ne $match) { 'true' } else { 'false' }
     } on Object {
       return 'target=${target.name}; raw/custom config';
     }
+  }
+
+  String _dnsResolverTag(Object? resolver) {
+    if (resolver is String) {
+      return resolver.trim();
+    }
+    if (resolver is Map) {
+      return '${resolver['server'] ?? ''}'.trim();
+    }
+    return '';
   }
 
   bool _isDiagnosticNoise(String log) {

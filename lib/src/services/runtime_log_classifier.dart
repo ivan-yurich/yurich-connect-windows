@@ -9,7 +9,8 @@ class RuntimeLogClassifier {
   }
 
   static bool isDiagnosticNoise(String message) {
-    return isUserFacingNoise(message);
+    final log = _normalize(message);
+    return isUserFacingNoise(message) || _isHealthProbeDnsNoise(log);
   }
 
   static String _normalize(String message) {
@@ -26,5 +27,23 @@ class RuntimeLogClassifier {
   static bool _isDirectRouteTimeoutNoise(String log) {
     return log.contains('using outbound/direct[direct]') &&
         log.contains('i/o timeout');
+  }
+
+  static bool _isHealthProbeDnsNoise(String log) {
+    if (!log.contains('dns:')) {
+      return false;
+    }
+    final isHealthProbeHost =
+        log.contains('cp.cloudflare.com') ||
+        log.contains('connectivitycheck.gstatic.com') ||
+        log.contains('www.msftconnecttest.com');
+    if (!isHealthProbeHost) {
+      return false;
+    }
+    return log.contains('exchange failed') ||
+        log.contains('i/o timeout') ||
+        log.contains('context deadline exceeded') ||
+        log.contains('no such host') ||
+        log.contains('failed host lookup');
   }
 }

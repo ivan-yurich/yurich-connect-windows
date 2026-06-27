@@ -31,5 +31,18 @@ void main() {
       expect(RuntimeLogClassifier.isUserFacingNoise(log), isFalse);
       expect(RuntimeLogClassifier.isDiagnosticNoise(log), isFalse);
     });
+
+    test('hides DNS noise only for health probe endpoints', () {
+      const healthProbeLog =
+          'ERROR [123 5.0s] dns: exchange failed for '
+          'connectivitycheck.gstatic.com. IN A: i/o timeout';
+      const realDnsLog =
+          'ERROR [456 5.0s] dns: exchange failed for '
+          'customer.example.com. IN A: i/o timeout';
+
+      expect(RuntimeLogClassifier.isUserFacingNoise(healthProbeLog), isFalse);
+      expect(RuntimeLogClassifier.isDiagnosticNoise(healthProbeLog), isTrue);
+      expect(RuntimeLogClassifier.isDiagnosticNoise(realDnsLog), isFalse);
+    });
   });
 }

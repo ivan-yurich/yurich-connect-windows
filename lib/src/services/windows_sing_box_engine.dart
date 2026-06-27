@@ -745,10 +745,132 @@ class WindowsSingBoxEngine implements VpnEngine {
       );
     }
 
+    if (!usesXrayCore) {
+      final dnsAudit = await _auditSingBoxDnsConfig(configFile);
+      for (final warning in dnsAudit.warnings) {
+        _appendLog('DNS config audit warning: $warning');
+      }
+      _appendLog('DNS config audit: ${dnsAudit.summary}');
+      if (dnsAudit.fatalIssues.isNotEmpty) {
+        _emitUserAlert(
+          'DNS-конфиг небезопасен или рекурсивен. Отключи строгий DNS-режим или импортируй профиль заново.',
+          code: 'dnsConfigAuditFailed',
+        );
+        return fail(
+          'Preflight failed: DNS config audit failed: ${dnsAudit.fatalIssues.join('; ')}.',
+        );
+      }
+    }
+
     _appendLog(
       'Windows preflight check passed in ${stopwatch.elapsedMilliseconds}ms.',
     );
     return true;
+  }
+
+  Future<_DnsConfigAuditResult> _auditSingBoxDnsConfig(File configFile) async {
+    try {
+      final decoded = jsonDecode(await configFile.readAsString(encoding: utf8));
+      if (decoded is! Map) {
+        return const _DnsConfigAuditResult(
+          summary: 'raw/non-object config',
+          warnings: ['DNS audit skipped: config root is not an object'],
+        );
+      }
+      final map = decoded.cast<String, dynamic>();
+      final dns = (map['dns'] as Map?)?.cast<String, dynamic>();
+      final route = (map['route'] as Map?)?.cast<String, dynamic>();
+      final outbounds = (map['outbounds'] as List?)
+          ?.whereType<Map>()
+          .map((outbound) => outbound.cast<String, dynamic>())
+          .toList();
+      if (dns == null || route == null || outbounds == null) {
+        return const _DnsConfigAuditResult(
+          summary: 'missing dns/route/outbounds',
+          warnings: [
+            'DNS audit skipped: config has no dns, route or outbounds',
+          ],
+        );
+      }
+
+      final servers = (dns['servers'] as List?)
+          ?.whereType<Map>()
+          .map((server) => server.cast<String, dynamic>())
+          .toList();
+      final byTag = <String, Map<String, dynamic>>{};
+      for (final server in servers ?? const <Map<String, dynamic>>[]) {
+        final tag = '${server['tag'] ?? ''}'.trim();
+        if (tag.isNotEmpty) {
+          byTag[tag] = server;
+        }
+      }
+
+      final globalDns = byTag['global-dns'];
+      final bootstrapDns = byTag['bootstrap-dns'];
+      final finalDns = '${dns['final'] ?? 'unknown'}';
+      final routeResolver = _dnsResolverTag(route['default_domain_resolver']);
+      final proxyResolvers = outbounds
+          .where((outbound) => outbound['tag'] == 'proxy')
+          .map((outbound) => _dnsResolverTag(outbound['domain_resolver']))
+          .where((tag) => tag.isNotEmpty)
+          .toSet();
+      final fatalIssues = <String>[];
+      final warnings = <String>[];
+
+      final globalDetour = '${globalDns?['detour'] ?? 'direct'}';
+      final bootstrapDetour = '${bootstrapDns?['detour'] ?? 'direct'}';
+      if (globalDns == null) {
+        warnings.add('global-dns server is missing');
+      }
+      if (finalDns == 'local-dns') {
+        warnings.add('dns.final uses local-dns; Windows DNS may leak locally');
+      }
+      if (bootstrapDns != null && bootstrapDns.containsKey('detour')) {
+        fatalIssues.add('bootstrap-dns must be direct, not detoured');
+      }
+      if (globalDns?['detour'] == 'proxy' &&
+          (routeResolver == 'global-dns' ||
+              proxyResolvers.contains('global-dns'))) {
+        fatalIssues.add(
+          'global-dns detours through proxy while proxy/route resolver points back to global-dns',
+        );
+      }
+      if (finalDns == 'global-dns' &&
+          globalDns != null &&
+          !globalDns.containsKey('detour') &&
+          !proxyResolvers.contains('global-dns')) {
+        warnings.add(
+          'global-dns is direct; acceptable only for bootstrap/external-core profiles',
+        );
+      }
+
+      return _DnsConfigAuditResult(
+        summary: [
+          'final=$finalDns',
+          'global=${globalDns?['type'] ?? 'missing'}/$globalDetour',
+          'bootstrap=${bootstrapDns?['type'] ?? 'missing'}/$bootstrapDetour',
+          'route_resolver=${routeResolver.isEmpty ? 'none' : routeResolver}',
+          'proxy_resolver=${proxyResolvers.isEmpty ? 'none' : proxyResolvers.join(',')}',
+        ].join('; '),
+        fatalIssues: fatalIssues,
+        warnings: warnings,
+      );
+    } on Object catch (e) {
+      return _DnsConfigAuditResult(
+        summary: 'failed: $e',
+        warnings: ['DNS audit failed: $e'],
+      );
+    }
+  }
+
+  String _dnsResolverTag(Object? resolver) {
+    if (resolver is String) {
+      return resolver.trim();
+    }
+    if (resolver is Map) {
+      return '${resolver['server'] ?? ''}'.trim();
+    }
+    return '';
   }
 
   bool _shouldRunStartupCanary(String config) {
@@ -1869,4 +1991,16 @@ class _StartupCanaryResult {
   final bool fatal;
   final bool suggestsDnsFallback;
   final String? message;
+}
+
+class _DnsConfigAuditResult {
+  const _DnsConfigAuditResult({
+    required this.summary,
+    this.fatalIssues = const [],
+    this.warnings = const [],
+  });
+
+  final String summary;
+  final List<String> fatalIssues;
+  final List<String> warnings;
 }
