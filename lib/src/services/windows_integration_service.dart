@@ -159,10 +159,15 @@ try {
 \$server = Get-ItemPropertyValue -Path ${_quotePowerShell(_internetSettingsKey)} -Name ProxyServer -ErrorAction SilentlyContinue
 Write-Output "\$enable|\$server"
 ''';
-    final result = await _runPowerShell(
-      script,
-      timeout: const Duration(seconds: 8),
-    );
+    final ProcessResult result;
+    try {
+      result = await _runPowerShell(
+        script,
+        timeout: const Duration(seconds: 8),
+      );
+    } on Object {
+      return false;
+    }
     if (result.exitCode != 0) {
       return false;
     }
@@ -232,21 +237,25 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
   }
 
   Future<bool> _isCurrentProcessElevated() async {
-    final result = await Process.run('powershell', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      '''
+    try {
+      final result = await Process.run('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        '''
 \$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 \$principal = [Security.Principal.WindowsPrincipal]::new(\$identity)
 \$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 ''',
-    ]);
-    if (result.exitCode != 0) {
+      ]).timeout(const Duration(seconds: 8));
+      if (result.exitCode != 0) {
+        return false;
+      }
+      return '${result.stdout}'.trim().toLowerCase() == 'true';
+    } on Object {
       return false;
     }
-    return '${result.stdout}'.trim().toLowerCase() == 'true';
   }
 
   Future<WindowsUpdateInfo> checkForUpdate(String currentVersion) async {
@@ -892,10 +901,15 @@ $script
 \$value = Get-ItemPropertyValue -Path ${_quotePowerShell(_runKeyPath)} -Name ${_quotePowerShell(_taskName)} -ErrorAction SilentlyContinue
 if (\$null -ne \$value) { Write-Output \$value }
 ''';
-    final result = await _runPowerShell(
-      script,
-      timeout: const Duration(seconds: 8),
-    );
+    final ProcessResult result;
+    try {
+      result = await _runPowerShell(
+        script,
+        timeout: const Duration(seconds: 8),
+      );
+    } on Object {
+      return null;
+    }
     if (result.exitCode != 0) {
       return null;
     }
@@ -980,16 +994,20 @@ public static class YurichWinInet {
   }
 
   Future<String?> _queryTaskXml(String taskName) async {
-    final result = await Process.run('schtasks', [
-      '/Query',
-      '/TN',
-      taskName,
-      '/XML',
-    ]);
-    if (result.exitCode != 0) {
+    try {
+      final result = await Process.run('schtasks', [
+        '/Query',
+        '/TN',
+        taskName,
+        '/XML',
+      ]).timeout(const Duration(seconds: 8));
+      if (result.exitCode != 0) {
+        return null;
+      }
+      return '${result.stdout}${result.stderr}';
+    } on Object {
       return null;
     }
-    return '${result.stdout}${result.stderr}';
   }
 
   static bool isAutoStartTaskInstalledXml(String xml) {

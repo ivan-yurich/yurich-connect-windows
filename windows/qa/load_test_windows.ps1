@@ -5,7 +5,7 @@ param(
   [string[]]$Urls = @(
     'https://cp.cloudflare.com/generate_204',
     'https://connectivitycheck.gstatic.com/generate_204',
-    'https://www.msftconnecttest.com/connecttest.txt',
+    'http://www.msftconnecttest.com/connecttest.txt',
     'https://chatgpt.com/'
   )
 )

@@ -10,7 +10,10 @@ class RuntimeLogClassifier {
 
   static bool isDiagnosticNoise(String message) {
     final log = _normalize(message);
-    return isUserFacingNoise(message) || _isHealthProbeDnsNoise(log);
+    return isUserFacingNoise(message) ||
+        _isHealthProbeDnsNoise(log) ||
+        _isDnsBadRdataNoise(log) ||
+        _isNaiveHandshakeNoise(log);
   }
 
   static String _normalize(String message) {
@@ -45,5 +48,18 @@ class RuntimeLogClassifier {
         log.contains('context deadline exceeded') ||
         log.contains('no such host') ||
         log.contains('failed host lookup');
+  }
+
+  static bool _isDnsBadRdataNoise(String log) {
+    return log.contains('router: process dns packet') &&
+        log.contains('bad question name') &&
+        log.contains('dns: bad rdata');
+  }
+
+  static bool _isNaiveHandshakeNoise(String log) {
+    return log.contains('naive:') &&
+        log.contains('handshake failed') &&
+        log.contains('ssl_client_socket_impl') &&
+        log.contains('net_error -101');
   }
 }

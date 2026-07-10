@@ -44,7 +44,8 @@ class ProfileRuntimeStats {
   int get averageStartMs => successes <= 0 ? 0 : totalStartMs ~/ successes;
 
   int get score {
-    var value = 100 - (consecutiveFailures * 18) - (failures * 4);
+    final recentFailurePenalty = failures.clamp(0, 5).toInt() * 4;
+    var value = 100 - (consecutiveFailures * 18) - recentFailurePenalty;
     if (averageStartMs > 8000) {
       value -= 15;
     } else if (averageStartMs > 4000) {
@@ -69,7 +70,7 @@ class ProfileRuntimeStats {
   ProfileRuntimeStats recordSuccess(Duration startDuration) {
     return ProfileRuntimeStats(
       successes: successes + 1,
-      failures: failures,
+      failures: failures > 0 ? failures - 1 : 0,
       consecutiveFailures: 0,
       totalStartMs: totalStartMs + startDuration.inMilliseconds,
       lastSuccessAt: DateTime.now(),
@@ -235,6 +236,7 @@ class ProfileStore {
   static const _autoConnectKey = 'autoConnect';
   static const _subscriptionSourcesKey = 'subscriptionSources';
   static const _deletedProfileIdsKey = 'deletedProfileIds';
+  static const _deletedProfileKeysKey = 'deletedProfileKeys';
   static const _splitTunnelExcludedProcessesKey =
       'splitTunnelExcludedProcesses';
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
@@ -260,11 +262,23 @@ class ProfileStore {
       return const [];
     }
 
-    final decoded = jsonDecode(encoded) as List<dynamic>;
-    return decoded
-        .whereType<Map>()
-        .map((json) => VpnProfile.fromJson(json.cast<String, dynamic>()))
-        .toList();
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is! List) {
+        return const [];
+      }
+      final profiles = <VpnProfile>[];
+      for (final item in decoded.whereType<Map>()) {
+        try {
+          profiles.add(VpnProfile.fromJson(item.cast<String, dynamic>()));
+        } on Object {
+          // Skip one damaged record without blocking the whole application.
+        }
+      }
+      return profiles;
+    } on FormatException {
+      return const [];
+    }
   }
 
   Future<void> saveProfiles(List<VpnProfile> profiles) async {
@@ -340,6 +354,26 @@ class ProfileStore {
         ids.map((id) => id.trim()).where((id) => id.isNotEmpty).toSet().toList()
           ..sort();
     await prefs.setStringList(_deletedProfileIdsKey, normalized);
+  }
+
+  Future<Set<String>> loadDeletedProfileKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getStringList(_deletedProfileKeysKey) ?? const [])
+        .map((key) => key.trim())
+        .where((key) => key.isNotEmpty)
+        .toSet();
+  }
+
+  Future<void> saveDeletedProfileKeys(Iterable<String> keys) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized =
+        keys
+            .map((key) => key.trim())
+            .where((key) => key.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+    await prefs.setStringList(_deletedProfileKeysKey, normalized);
   }
 
   Future<void> markProfileDeleted(String id) async {
@@ -440,7 +474,12 @@ class ProfileStore {
       return const {};
     }
 
-    final decoded = jsonDecode(encoded);
+    Object? decoded;
+    try {
+      decoded = jsonDecode(encoded);
+    } on FormatException {
+      return const {};
+    }
     if (decoded is! Map) {
       return const {};
     }
@@ -513,18 +552,29 @@ class ProfileStore {
     if (encoded == null || encoded.isEmpty) {
       return const [];
     }
-    final decoded = jsonDecode(encoded);
+    Object? decoded;
+    try {
+      decoded = jsonDecode(encoded);
+    } on FormatException {
+      return const [];
+    }
     if (decoded is! List) {
       return const [];
     }
-    return decoded
-        .whereType<Map>()
-        .map(
-          (json) =>
-              ConnectionSessionRecord.fromJson(json.cast<String, dynamic>()),
-        )
-        .where((record) => record.profileId.trim().isNotEmpty)
-        .toList(growable: false);
+    final history = <ConnectionSessionRecord>[];
+    for (final item in decoded.whereType<Map>()) {
+      try {
+        final record = ConnectionSessionRecord.fromJson(
+          item.cast<String, dynamic>(),
+        );
+        if (record.profileId.trim().isNotEmpty) {
+          history.add(record);
+        }
+      } on Object {
+        // Keep valid diagnostics even if one cached entry is damaged.
+      }
+    }
+    return history;
   }
 
   Future<List<ConnectionSessionRecord>> appendConnectionSession(

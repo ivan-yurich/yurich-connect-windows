@@ -11,6 +11,31 @@ function Test-IsAdmin {
   return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-FullPathSafe([string]$Path) {
+  return [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+}
+
+function Test-SafeInstallPath([string]$Path) {
+  $full = Get-FullPathSafe $Path
+  $expected = Get-FullPathSafe (Join-Path $env:ProgramFiles 'Yurich Connect')
+  return $full -ieq $expected
+}
+
+function Stop-YurichProcessFromPath([string]$InstallDir) {
+  $prefix = (Get-FullPathSafe $InstallDir) + '\'
+  $names = @('YurichConnect.exe', 'AurumVPN.exe', 'sing-box.exe', 'naive.exe', 'xray.exe')
+
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $names -contains $_.Name -and
+      $_.ExecutablePath -and
+      $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+    } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 if (-not (Test-IsAdmin)) {
   $arguments = @(
     '-NoProfile',
@@ -34,7 +59,11 @@ $tempDir = Join-Path $env:TEMP ("YurichConnectInstall_" + [guid]::NewGuid().ToSt
 
 Write-Host "Installing $appName..."
 
-Get-Process -Name 'YurichConnect','AurumVPN' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+if (-not (Test-SafeInstallPath $installDir)) {
+  throw "Unsafe install path: $installDir"
+}
+
+Stop-YurichProcessFromPath $installDir
 
 if (Test-Path -LiteralPath $installDir) {
   Remove-Item -LiteralPath $installDir -Recurse -Force
@@ -68,7 +97,7 @@ $desktopShortcut.Save()
 $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect'
 New-Item -Path $uninstallKey -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'DisplayName' -Value 'Yurich Connect' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $uninstallKey -Name 'DisplayVersion' -Value '1.0.91' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $uninstallKey -Name 'DisplayVersion' -Value '1.0.95' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'Publisher' -Value 'Yurich' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'InstallLocation' -Value $installDir -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $uninstallKey -Name 'DisplayIcon' -Value $exePath -PropertyType String -Force | Out-Null

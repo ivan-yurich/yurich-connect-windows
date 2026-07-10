@@ -89,6 +89,27 @@ void main() {
 
       expect(await store.loadDeletedProfileIds(), {'profile-b'});
     });
+
+    test(
+      'stores deleted connection keys across subscription renames',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final store = ProfileStore();
+
+        await store.saveDeletedProfileKeys([' key-b ', '', 'key-a']);
+
+        expect(await store.loadDeletedProfileKeys(), {'key-a', 'key-b'});
+      },
+    );
+  });
+
+  group('ProfileStore recovery', () {
+    test('ignores damaged cached profile JSON', () async {
+      SharedPreferences.setMockInitialValues({'profiles': '{broken'});
+      final store = ProfileStore();
+
+      expect(await store.loadProfiles(), isEmpty);
+    });
   });
 
   group('ProfileStore runtime stats', () {
@@ -154,6 +175,22 @@ void main() {
       expect(failed.consecutiveFailures, 1);
       expect(failed.lastFailureReason, 'vless_upstream_timeout');
       expect(failed.isQuarantined(), isTrue);
+    });
+
+    test('decays old failure penalty after successful starts', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.recordProfileRuntimeFailure('profile-a', 'tcp');
+      await store.recordProfileRuntimeFailure('profile-a', 'tcp');
+      final recovered = await store.recordProfileRuntimeSuccess(
+        'profile-a',
+        const Duration(milliseconds: 700),
+      );
+
+      expect(recovered.failures, 1);
+      expect(recovered.consecutiveFailures, 0);
+      expect(recovered.isQuarantined(), isFalse);
     });
   });
 

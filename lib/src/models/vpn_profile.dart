@@ -62,6 +62,25 @@ class VpnProfile {
     return port == null ? server! : '$server:$port';
   }
 
+  VpnProfile withId(String value) {
+    if (value == id) {
+      return this;
+    }
+    return VpnProfile(
+      id: value,
+      name: name,
+      kind: kind,
+      originalInput: originalInput,
+      server: server,
+      port: port,
+      outbound: outbound,
+      rawConfig: rawConfig,
+      expiresAt: expiresAt,
+      subscriptionSource: subscriptionSource,
+      coreBackend: coreBackend,
+    );
+  }
+
   VpnProfile withExpiresAt(DateTime? value) {
     if (value == null || expiresAt != null) {
       return this;
