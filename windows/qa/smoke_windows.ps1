@@ -15,7 +15,27 @@ function Invoke-Step {
 
   Write-Host ""
   Write-Host "== $Name =="
+  $global:LASTEXITCODE = 0
   & $Script
+  if ($LASTEXITCODE -ne 0) {
+    $exitCode = $LASTEXITCODE
+    $global:LASTEXITCODE = 0
+    throw "$Name failed with exit code $exitCode"
+  }
+}
+
+function Complete-RipgrepScan {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ExitCode,
+    [Parameter(Mandatory = $true)]
+    [string]$ScanName
+  )
+
+  $global:LASTEXITCODE = 0
+  if ($ExitCode -gt 1) {
+    throw "$ScanName failed with ripgrep exit code $ExitCode"
+  }
 }
 
 $projectRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
@@ -187,6 +207,7 @@ Invoke-Step 'Installer payload safety scan' {
   )
   $pattern = ($patterns -join '|')
   $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' --glob '!runtime/XRAY_LICENSE.txt' $pattern $portableRootDir 2>$null)
+  Complete-RipgrepScan -ExitCode $LASTEXITCODE -ScanName 'Payload safety scan'
   if ($matches.Count -gt 0) {
     throw "Payload safety scan found sensitive/dev data in $portableRootDir`n$($matches -join [Environment]::NewLine)"
   }
@@ -218,6 +239,7 @@ Invoke-Step 'Installer safety scan' {
   }
   $pattern = 'C:\\Users\\ivan-|AndroidStudioProjects\\aurum_vpn_windows_repo|-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|vless://[0-9a-fA-F-]{32,}@|naive\+https://[^:\s]+:[^@\s]+@|hysteria2://[^@\s]+@|hy2://[^@\s]+@|access_token["=:\s]+[A-Za-z0-9._-]{20,}|refresh_token["=:\s]+[A-Za-z0-9._-]{20,}|(?:Remnawave|Yurich ID)[^\r\n]+https?://'
   $matches = @(rg -a -n $pattern $setupExe 2>$null)
+  Complete-RipgrepScan -ExitCode $LASTEXITCODE -ScanName 'Installer safety scan'
   if ($matches.Count -gt 0) {
     throw "Installer safety scan found sensitive/dev data:`n$($matches -join [Environment]::NewLine)"
   }
