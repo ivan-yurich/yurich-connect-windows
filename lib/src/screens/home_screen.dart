@@ -14,6 +14,7 @@ import '../models/vpn_profile.dart';
 import '../branding.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_failover.dart';
+import '../services/profile_identity.dart';
 import '../services/profile_store.dart';
 import '../services/runtime_log_classifier.dart';
 import '../services/secret_redactor.dart';
@@ -36,9 +37,9 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.91';
+const _appVersion = '1.0.95';
 const _collapsedProfileLimit = 4;
-const _maxConcurrentPingChecks = 6;
+const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 3;
 const _statusPanelHeight = 228.0;
 const _healthWatchdogTick = Duration(seconds: 45);
@@ -229,6 +230,7 @@ class _HomeScreenState extends State<HomeScreen>
   List<String> _vpnOnlyProcesses = ProfileStore.defaultVpnOnlyProcesses;
   List<String> _subscriptionSources = const [];
   Set<String> _deletedProfileIds = const {};
+  Set<String> _deletedProfileKeys = const {};
   WindowsUpdateInfo? _updateInfo;
   Map<String, _ServerLatencyResult> _serverLatencies = const {};
   Map<String, ProfileRuntimeStats> _profileRuntimeStats = const {};
@@ -295,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _startSessionTimer() {
-    _sessionTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+    _sessionTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
       if (!mounted) {
         return;
       }
@@ -454,11 +456,26 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _load() async {
-    var profiles = await _store.loadProfiles();
+    final loadedProfiles = await _store.loadProfiles();
+    var profiles = ProfileIdentity.merge(
+      current: const [],
+      incoming: loadedProfiles,
+      identitySource: loadedProfiles,
+    );
+    if (profiles.length != loadedProfiles.length) {
+      await _store.saveProfiles(profiles);
+    }
     final deletedProfileIds = await _store.loadDeletedProfileIds();
-    if (deletedProfileIds.isNotEmpty) {
+    final deletedProfileKeys = await _store.loadDeletedProfileKeys();
+    if (deletedProfileIds.isNotEmpty || deletedProfileKeys.isNotEmpty) {
       final visibleProfiles = profiles
-          .where((profile) => !deletedProfileIds.contains(profile.id))
+          .where(
+            (profile) =>
+                !deletedProfileIds.contains(profile.id) &&
+                !ProfileIdentity.deletionKeys(
+                  profile,
+                ).any(deletedProfileKeys.contains),
+          )
           .toList();
       if (visibleProfiles.length != profiles.length) {
         profiles = visibleProfiles;
@@ -476,7 +493,15 @@ class _HomeScreenState extends State<HomeScreen>
     final splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
     final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
-    final profileRuntimeStats = await _store.loadProfileRuntimeStats();
+    var profileRuntimeStats = await _store.loadProfileRuntimeStats();
+    final activeProfileIds = profiles.map((profile) => profile.id).toSet();
+    final activeRuntimeStats = Map<String, ProfileRuntimeStats>.of(
+      profileRuntimeStats,
+    )..removeWhere((profileId, _) => !activeProfileIds.contains(profileId));
+    if (activeRuntimeStats.length != profileRuntimeStats.length) {
+      profileRuntimeStats = activeRuntimeStats;
+      await _store.saveProfileRuntimeStats(profileRuntimeStats);
+    }
     final connectionSessionHistory = await _store
         .loadConnectionSessionHistory();
     var subscriptionSources = await _store.loadSubscriptionSources();
@@ -530,6 +555,7 @@ class _HomeScreenState extends State<HomeScreen>
       _vpnOnlyProcesses = vpnOnlyProcesses;
       _subscriptionSources = subscriptionSources;
       _deletedProfileIds = deletedProfileIds;
+      _deletedProfileKeys = deletedProfileKeys;
       _profileRuntimeStats = profileRuntimeStats;
       _connectionSessionHistory = connectionSessionHistory;
       _message = profiles.isEmpty
@@ -852,9 +878,13 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _importText(String text) async {
     await _runBusy(() async {
       final subscriptionSource = _normalizeSubscriptionSource(text);
-      final imported = _tagSubscriptionProfiles(
-        await _importer.importFromText(text),
-        subscriptionSource,
+      final imported = ProfileIdentity.merge(
+        current: const [],
+        incoming: _tagSubscriptionProfiles(
+          await _importer.importFromText(text),
+          subscriptionSource,
+        ),
+        identitySource: _profiles,
       );
       if (imported.isEmpty) {
         throw ProfileImportException(s.nothingToImport);
@@ -862,20 +892,27 @@ class _HomeScreenState extends State<HomeScreen>
 
       final deletedProfileIds = Set<String>.of(_deletedProfileIds)
         ..removeAll(imported.map((profile) => profile.id));
+      final importedKeys = imported
+          .expand(ProfileIdentity.deletionKeys)
+          .toSet();
+      final deletedProfileKeys = Set<String>.of(_deletedProfileKeys)
+        ..removeAll(importedKeys);
       final subscriptionSources = subscriptionSource == null
           ? _subscriptionSources
           : _mergeSubscriptionSources([
               ..._subscriptionSources,
               subscriptionSource,
             ]);
-      final merged = <String, VpnProfile>{
-        for (final profile in _profiles) profile.id: profile,
-        for (final profile in imported) profile.id: profile,
-      }.values.toList();
+      final merged = ProfileIdentity.merge(
+        current: _profiles,
+        incoming: imported,
+        identitySource: _profiles,
+      );
 
       await _store.saveProfiles(merged);
       await _store.saveSelectedProfileId(imported.first.id);
       await _store.saveDeletedProfileIds(deletedProfileIds);
+      await _store.saveDeletedProfileKeys(deletedProfileKeys);
       if (subscriptionSource != null) {
         await _store.saveSubscriptionSources(subscriptionSources);
       }
@@ -888,6 +925,7 @@ class _HomeScreenState extends State<HomeScreen>
         _profiles = merged;
         _subscriptionSources = subscriptionSources;
         _deletedProfileIds = deletedProfileIds;
+        _deletedProfileKeys = deletedProfileKeys;
         _selectedProfileId = imported.first.id;
         _serverLatencyLastUpdated = null;
         _message = s.imported(imported.length);
@@ -920,16 +958,25 @@ class _HomeScreenState extends State<HomeScreen>
 
     final imported = <VpnProfile>[];
     final errors = <String>[];
+    final successfulSources = <String>{};
     var skippedDeletedProfiles = 0;
     try {
       for (final source in sources) {
         try {
-          final fetched = _tagSubscriptionProfiles(
-            await _importer.importFromText(source),
-            source,
+          final fetched = ProfileIdentity.merge(
+            current: const [],
+            incoming: _tagSubscriptionProfiles(
+              await _importer.importFromText(source),
+              source,
+            ),
+            identitySource: _profiles,
           );
+          successfulSources.add(source);
           for (final profile in fetched) {
-            if (_deletedProfileIds.contains(profile.id)) {
+            if (_deletedProfileIds.contains(profile.id) ||
+                ProfileIdentity.deletionKeys(
+                  profile,
+                ).any(_deletedProfileKeys.contains)) {
               skippedDeletedProfiles += 1;
               continue;
             }
@@ -952,11 +999,23 @@ class _HomeScreenState extends State<HomeScreen>
         );
       }
 
-      final merged = <String, VpnProfile>{
-        for (final profile in _profiles)
-          if (!_deletedProfileIds.contains(profile.id)) profile.id: profile,
-        for (final profile in imported) profile.id: profile,
-      }.values.toList();
+      final retained = _profiles.where((profile) {
+        if (_deletedProfileIds.contains(profile.id) ||
+            ProfileIdentity.deletionKeys(
+              profile,
+            ).any(_deletedProfileKeys.contains)) {
+          return false;
+        }
+        final source = _normalizeSubscriptionSource(
+          profile.subscriptionSource ?? '',
+        );
+        return source == null || !successfulSources.contains(source);
+      });
+      final merged = ProfileIdentity.merge(
+        current: retained,
+        incoming: imported,
+        identitySource: _profiles,
+      );
       final selectedProfileId =
           _selectedProfileId != null &&
               merged.any((profile) => profile.id == _selectedProfileId)
@@ -1058,6 +1117,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<_ServerLatencyResult> _measureServerLatency(VpnProfile profile) async {
+    if (profile.kind == VpnProfileKind.hysteria ||
+        profile.kind == VpnProfileKind.hysteria2) {
+      return const _ServerLatencyResult.udp();
+    }
     final server = profile.server?.trim();
     final port = profile.port ?? 443;
     if (server == null || server.isEmpty) {
@@ -1131,6 +1194,14 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() => _status = YurichConnectStatus.noProfile);
       }
       return;
+    }
+
+    if (Platform.isWindows && _advancedTunMode && _systemProxyEnabled) {
+      await _setSystemProxy(false);
+      if (_systemProxyEnabled) {
+        _showSnack(s.systemProxyTunConflict);
+        return;
+      }
     }
 
     if (Platform.isWindows && _advancedTunMode && !_isWindowsAdmin) {
@@ -1285,6 +1356,7 @@ class _HomeScreenState extends State<HomeScreen>
         _ServerLatencyState.failed => const ProfileLatencySnapshot.failed(),
         _ServerLatencyState.unavailable =>
           const ProfileLatencySnapshot.unavailable(),
+        _ServerLatencyState.udp => const ProfileLatencySnapshot.unavailable(),
       };
       return MapEntry(profileId, snapshot);
     });
@@ -1720,6 +1792,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _validateProfileForStart(VpnProfile profile) {
+    if (ProfileIdentity.isUnsupportedXhttp(profile)) {
+      throw StateError(VlessProfileTools.unsupportedXhttpMessage);
+    }
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig?.trim();
       if (raw == null || raw.isEmpty) {
@@ -1737,13 +1812,6 @@ class _HomeScreenState extends State<HomeScreen>
     if (outbound == null) {
       throw StateError('Конфиг повреждён. Импортируйте профиль заново.');
     }
-    if (_advancedTunMode &&
-        _coreBackendForProfile(profile) == VpnCoreBackend.xray) {
-      throw StateError(
-        'VLESS XHTTP через Xray-core работает только в Stable Proxy Mode. Отключите Advanced TUN Mode для этого профиля.',
-      );
-    }
-
     final serverValue = profile.server ?? outbound['server'];
     final server = serverValue == null ? '' : '$serverValue'.trim();
     if (server.isEmpty) {
@@ -1914,7 +1982,7 @@ class _HomeScreenState extends State<HomeScreen>
         allowCertificateMismatch: false,
       ),
       (
-        uri: Uri.https('www.msftconnecttest.com', '/connecttest.txt'),
+        uri: Uri.http('www.msftconnecttest.com', '/connecttest.txt'),
         allowCertificateMismatch: false,
       ),
     ];
@@ -3042,6 +3110,13 @@ if ($null -ne $match) { 'true' } else { 'false' }
     if (!Platform.isWindows || _windowsSettingsBusy) {
       return;
     }
+    if (value && !_connected && _systemProxyEnabled) {
+      await _setSystemProxy(false);
+      if (_systemProxyEnabled) {
+        _showSnack(s.systemProxyTunConflict);
+        return;
+      }
+    }
     final mode = value
         ? WindowsConnectionMode.advancedTun
         : WindowsConnectionMode.stableProxy;
@@ -3069,6 +3144,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
 
   Future<void> _setSystemProxy(bool value) async {
     if (!Platform.isWindows || _windowsSettingsBusy) {
+      return;
+    }
+    if (value && _advancedTunMode) {
+      _showSnack(s.systemProxyTunConflict);
       return;
     }
     setState(() => _windowsSettingsBusy = true);
@@ -3619,6 +3698,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
         : _selectedProfileId;
     final deletedProfileIds = Set<String>.of(_deletedProfileIds)
       ..add(profile.id);
+    final deletedProfileKeys = Set<String>.of(_deletedProfileKeys)
+      ..addAll(ProfileIdentity.deletionKeys(profile));
     final subscriptionSources = _subscriptionSourcesAfterProfileDelete(
       profile,
       next,
@@ -3626,6 +3707,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     await _store.saveProfiles(next);
     await _store.saveSelectedProfileId(nextSelectedId);
     await _store.saveDeletedProfileIds(deletedProfileIds);
+    await _store.saveDeletedProfileKeys(deletedProfileKeys);
     await _store.saveSubscriptionSources(subscriptionSources);
     await _store.removeProfileRuntimeStats(profile.id);
     if (!mounted) {
@@ -3635,6 +3717,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       _profiles = next;
       _subscriptionSources = subscriptionSources;
       _deletedProfileIds = deletedProfileIds;
+      _deletedProfileKeys = deletedProfileKeys;
       _selectedProfileId = nextSelectedId;
       _serverLatencyLastUpdated = null;
       _serverLatencies = Map<String, _ServerLatencyResult>.of(_serverLatencies)
@@ -5443,14 +5526,17 @@ class _ProfileTile extends StatelessWidget {
 bool _profileMatchesFilter(VpnProfile profile, _ProfileFilter filter) {
   return switch (filter) {
     _ProfileFilter.all => true,
-    _ProfileFilter.vless =>
-      profile.kind == VpnProfileKind.vlessReality ||
-          profile.kind == VpnProfileKind.vlessTls,
+    _ProfileFilter.vless => _profileIsVless(profile),
     _ProfileFilter.naive => profile.kind == VpnProfileKind.naive,
     _ProfileFilter.hysteria =>
       profile.kind == VpnProfileKind.hysteria ||
           profile.kind == VpnProfileKind.hysteria2,
   };
+}
+
+bool _profileIsVless(VpnProfile profile) {
+  return profile.kind == VpnProfileKind.vlessReality ||
+      profile.kind == VpnProfileKind.vlessTls;
 }
 
 String _profileFilterLabel(_ProfileFilter filter, _Strings strings, int count) {
@@ -5567,6 +5653,8 @@ class _ServerLatencyResult {
   const _ServerLatencyResult.unavailable()
     : this._(state: _ServerLatencyState.unavailable);
 
+  const _ServerLatencyResult.udp() : this._(state: _ServerLatencyState.udp);
+
   final int? milliseconds;
   final _ServerLatencyState state;
 
@@ -5577,11 +5665,12 @@ class _ServerLatencyResult {
       _ServerLatencyState.ok => strings.pingMs(milliseconds ?? 0),
       _ServerLatencyState.failed => strings.pingFailed,
       _ServerLatencyState.unavailable => strings.pingUnavailable,
+      _ServerLatencyState.udp => strings.pingUdp,
     };
   }
 }
 
-enum _ServerLatencyState { ok, failed, unavailable }
+enum _ServerLatencyState { ok, failed, unavailable, udp }
 
 class _WindowsToolsPanel extends StatelessWidget {
   const _WindowsToolsPanel({
@@ -5711,9 +5800,13 @@ class _WindowsToolsPanel extends StatelessWidget {
             _SettingsSwitchRow(
               icon: Icons.public_outlined,
               value: systemProxyEnabled,
-              onChanged: busy ? null : onSystemProxyChanged,
+              onChanged: busy || advancedTunMode ? null : onSystemProxyChanged,
               title: Text(strings.systemProxy),
-              subtitle: Text(strings.systemProxyHint),
+              subtitle: Text(
+                advancedTunMode
+                    ? strings.systemProxyTunConflict
+                    : strings.systemProxyHint,
+              ),
             ),
             const SizedBox(height: 8),
             _SettingsSwitchRow(
@@ -6252,6 +6345,7 @@ class _Strings {
     required this.pingNotChecked,
     required this.pingFailed,
     required this.pingUnavailable,
+    required this.pingUdp,
     required this.protocolLabel,
     required this.networkLabel,
     required this.dnsLabel,
@@ -6280,6 +6374,7 @@ class _Strings {
     required this.systemProxyEnabled,
     required this.systemProxyDisabled,
     required this.systemProxyFailed,
+    required this.systemProxyTunConflict,
     required this.healthWatchdogWarning,
     required this.runtimeReconnectDisabledWarning,
     required this.autoStart,
@@ -6378,6 +6473,7 @@ class _Strings {
   final String pingNotChecked;
   final String pingFailed;
   final String pingUnavailable;
+  final String pingUdp;
   final String protocolLabel;
   final String networkLabel;
   final String dnsLabel;
@@ -6406,6 +6502,7 @@ class _Strings {
   final String systemProxyEnabled;
   final String systemProxyDisabled;
   final String systemProxyFailed;
+  final String systemProxyTunConflict;
   final String healthWatchdogWarning;
   final String runtimeReconnectDisabledWarning;
   final String autoStart;
@@ -6770,6 +6867,7 @@ class _Strings {
     pingNotChecked: '—',
     pingFailed: 'тайм-аут',
     pingUnavailable: 'нет адреса',
+    pingUdp: 'UDP · при подключении',
     protocolLabel: 'Протокол',
     networkLabel: 'Сеть',
     dnsLabel: 'Yurich DNS',
@@ -6834,6 +6932,8 @@ class _Strings {
     systemProxyEnabled: 'Системный proxy включён',
     systemProxyDisabled: 'Системный proxy выключен',
     systemProxyFailed: 'Не удалось изменить системный proxy',
+    systemProxyTunConflict:
+        'Системный proxy отключён в TUN-режиме, чтобы не создавать двойную маршрутизацию.',
     healthWatchdogWarning:
         'Проверка сети видит сбой, но VPN не перезапущен автоматически. Проверь логи или нажми “Починить подключение”.',
     runtimeReconnectDisabledWarning:
@@ -6946,6 +7046,7 @@ class _Strings {
     pingNotChecked: '—',
     pingFailed: 'timeout',
     pingUnavailable: 'no endpoint',
+    pingUdp: 'UDP · on connect',
     protocolLabel: 'Protocol',
     networkLabel: 'Network',
     dnsLabel: 'Yurich DNS',
@@ -7010,6 +7111,8 @@ class _Strings {
     systemProxyEnabled: 'System proxy enabled',
     systemProxyDisabled: 'System proxy disabled',
     systemProxyFailed: 'Could not change system proxy',
+    systemProxyTunConflict:
+        'System proxy is disabled in TUN mode to prevent double routing.',
     healthWatchdogWarning:
         'Network health check sees a failure, but VPN was not restarted automatically. Check logs or use Repair connection.',
     runtimeReconnectDisabledWarning:

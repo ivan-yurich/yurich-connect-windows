@@ -44,5 +44,23 @@ void main() {
       expect(RuntimeLogClassifier.isDiagnosticNoise(healthProbeLog), isTrue);
       expect(RuntimeLogClassifier.isDiagnosticNoise(realDnsLog), isFalse);
     });
+
+    test('hides repetitive malformed DNS packet noise from UI logs', () {
+      const log =
+          'ERROR [1543048149 2.3s] router: process DNS packet: '
+          'unpack request: bad question name: dns: bad rdata';
+
+      expect(RuntimeLogClassifier.isUserFacingNoise(log), isFalse);
+      expect(RuntimeLogClassifier.isDiagnosticNoise(log), isTrue);
+    });
+
+    test('hides repetitive Naive SSL handshake noise from UI logs', () {
+      const log =
+          'naive: [0707/133047.925:ERROR:net\\socket\\ssl_client_socket_impl.cc:924] '
+          'handshake failed; returned -1, SSL error code 1, net_error -101';
+
+      expect(RuntimeLogClassifier.isUserFacingNoise(log), isFalse);
+      expect(RuntimeLogClassifier.isDiagnosticNoise(log), isTrue);
+    });
   });
 }

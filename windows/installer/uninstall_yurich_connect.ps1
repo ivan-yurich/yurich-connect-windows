@@ -97,12 +97,20 @@ Remove-Item -LiteralPath $legacyDesktopShortcut -Force -ErrorAction SilentlyCont
 Remove-Item -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect' -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurum VPN' -Recurse -Force -ErrorAction SilentlyContinue
 
-$cleanup = Join-Path $env:TEMP ('YurichConnect_uninstall_cleanup_' + [guid]::NewGuid().ToString('N') + '.cmd')
-$command = '@echo off' + [Environment]::NewLine +
-  'timeout /t 2 /nobreak >nul' + [Environment]::NewLine +
-  'rmdir /s /q "' + $installDir + '"' + [Environment]::NewLine +
-  'del "%~f0"'
-Set-Content -LiteralPath $cleanup -Value $command -Encoding ASCII
-Start-Process -FilePath 'cmd.exe' -ArgumentList "/c `"$cleanup`"" -WindowStyle Hidden
+$cleanup = Join-Path $env:TEMP ('YurichConnect_uninstall_cleanup_' + [guid]::NewGuid().ToString('N') + '.ps1')
+$escapedInstallDir = $installDir.Replace("'", "''")
+$command = @"
+`$ErrorActionPreference = 'Stop'
+Start-Sleep -Seconds 2
+`$installDir = '$escapedInstallDir'
+`$full = [System.IO.Path]::GetFullPath(`$installDir).TrimEnd('\')
+if ((Split-Path -Leaf `$full) -ne 'Yurich Connect') {
+  throw "Unsafe cleanup path: `$full"
+}
+Remove-Item -LiteralPath `$full -Recurse -Force -ErrorAction Stop
+Remove-Item -LiteralPath `$PSCommandPath -Force -ErrorAction SilentlyContinue
+"@
+Set-Content -LiteralPath $cleanup -Value $command -Encoding UTF8
+Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $cleanup) -WindowStyle Hidden
 
 Write-Host 'Yurich Connect удаляется. Окно можно закрыть.'

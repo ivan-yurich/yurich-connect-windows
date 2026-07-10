@@ -146,19 +146,7 @@ class SingBoxConfigBuilder {
         target == SingBoxConfigTarget.windows && developerMode
         ? _normalizeProcessNames(developerDirectProcesses)
         : const <String>[];
-    final codexProcessLookup = codexProcesses
-        .map((process) => process.toLowerCase())
-        .toSet();
-    final developerProcessLookup = developerProcesses
-        .map((process) => process.toLowerCase())
-        .toSet();
-    final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses)
-        .where(
-          (process) =>
-              !codexProcessLookup.contains(process.toLowerCase()) &&
-              !developerProcessLookup.contains(process.toLowerCase()),
-        )
-        .toList(growable: false);
+    final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses);
     final forcedProxyLookup = forcedProxyProcesses
         .map((process) => process.toLowerCase())
         .toSet();

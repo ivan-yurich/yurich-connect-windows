@@ -11,10 +11,9 @@ class VlessProfileTools {
     'http',
     'httpupgrade',
   };
-  static const xrayOnlyTransports = {'xhttp', 'splithttp'};
   static const supportedPacketEncodings = {'packetaddr', 'xudp'};
   static const unsupportedXhttpMessage =
-      'VLESS XHTTP требует Xray-core backend. Обычный sing-box backend поддерживает TCP/WS/gRPC/HTTP/HTTPUpgrade.';
+      'VLESS XHTTP отключён в Yurich Connect Windows из-за нестабильности. Используй VLESS TCP/WS/gRPC/HTTP/HTTPUpgrade.';
 
   static bool isVlessKind(VpnProfileKind kind) =>
       kind == VpnProfileKind.vlessReality || kind == VpnProfileKind.vlessTls;
@@ -31,9 +30,6 @@ class VlessProfileTools {
 
   static String normalizeTransportType(String? value) {
     final type = normalizeImportTransportType(value);
-    if (xrayOnlyTransports.contains(type)) {
-      throw StateError(unsupportedXhttpMessage);
-    }
     if (!supportedTransports.contains(type)) {
       throw StateError('VLESS transport "$type" не поддерживается.');
     }
@@ -52,7 +48,7 @@ class VlessProfileTools {
       return 'ws';
     }
     if (type == 'splithttp' || type == 'xhttp') {
-      return 'xhttp';
+      throw StateError(unsupportedXhttpMessage);
     }
     if (!supportedTransports.contains(type)) {
       throw StateError('VLESS transport "$type" не поддерживается.');
@@ -90,19 +86,12 @@ class VlessProfileTools {
       'grpc' => 'gRPC',
       'http' => 'HTTP/H2',
       'httpupgrade' => 'HTTPUpgrade',
-      'xhttp' => 'XHTTP',
       _ => 'TCP',
     };
   }
 
   static bool requiresXrayBackend(VpnProfile profile) {
-    if (profile.coreBackend == VpnCoreBackend.xray) {
-      return true;
-    }
-    if (!isVlessProfile(profile)) {
-      return false;
-    }
-    return xrayOnlyTransports.contains(safeTransportType(profile));
+    return false;
   }
 
   static bool supportsSingBoxBackend(VpnProfile profile) {

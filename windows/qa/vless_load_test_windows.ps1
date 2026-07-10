@@ -21,7 +21,7 @@ Write-Host 'Before running, connect a VLESS profile in Yurich Connect.'
   -Urls @(
     'https://cp.cloudflare.com/generate_204',
     'https://connectivitycheck.gstatic.com/generate_204',
-    'https://www.msftconnecttest.com/connecttest.txt',
+    'http://www.msftconnecttest.com/connecttest.txt',
     'https://chatgpt.com/',
     'https://www.cloudflare.com/cdn-cgi/trace'
   )

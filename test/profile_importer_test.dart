@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/models/vpn_profile.dart';
 import 'package:yurich_connect_windows/src/services/profile_importer.dart';
 import 'package:yurich_connect_windows/src/services/sing_box_config_builder.dart';
-import 'package:yurich_connect_windows/src/services/xray_config_builder.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -58,25 +57,32 @@ void main() {
     });
   });
 
-  test('imports VLESS XHTTP for Xray backend', () async {
+  test('rejects VLESS XHTTP profiles', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=www.example.com&fp=chrome&pbk=abc123&path=%2Fxhttp&mode=auto#XHTTP';
 
-    final profile = (await ProfileImporter().importFromText(link)).first;
-    final config =
-        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
-    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
-    final stream = proxy['streamSettings'] as Map<String, dynamic>;
+    await expectLater(
+      ProfileImporter().importFromText(link),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('XHTTP отключён'),
+        ),
+      ),
+    );
+  });
 
-    expect(profile.coreBackend, VpnCoreBackend.xray);
-    expect(profile.outbound?['transport']['type'], 'xhttp');
-    expect(stream['network'], 'xhttp');
-    expect(stream['security'], 'reality');
-    expect(stream['xhttpSettings'], {
-      'host': 'www.example.com',
-      'path': '/xhttp',
-      'mode': 'auto',
-    });
+  test('skips XHTTP when a subscription also has supported VLESS', () async {
+    const payload =
+        'vless://11111111-1111-4111-8111-111111111111@xhttp.example.com:443?security=tls&type=xhttp&sni=cdn.example.com#XHTTP\n'
+        'vless://22222222-2222-4222-8222-222222222222@tcp.example.com:443?security=tls&type=tcp&sni=cdn.example.com#TCP';
+
+    final profiles = await ProfileImporter().importFromText(payload);
+
+    expect(profiles, hasLength(1));
+    expect(profiles.single.name, 'TCP');
+    expect(profiles.single.server, 'tcp.example.com');
   });
 
   test('rejects invalid VLESS flow before config start', () async {
@@ -906,7 +912,7 @@ void main() {
     expect(vpnOnlyIndex, lessThan(geoIpRuIndex));
   });
 
-  test('routes developer terminal and SSH tools directly on Windows', () async {
+  test('explicit VPN list overrides developer direct routing', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
 
@@ -931,8 +937,8 @@ void main() {
     final directProcesses = directProcessRule['process_name'] as List;
 
     expect(route['find_process'], isTrue);
-    expect(directProcesses, contains('ssh.exe'));
-    expect(directProcesses, contains('git.exe'));
+    expect(directProcesses, isNot(contains('ssh.exe')));
+    expect(directProcesses, isNot(contains('git.exe')));
     expect(directProcesses, contains('gh.exe'));
     expect(directProcesses, contains('powershell.exe'));
     expect(directProcesses, contains('WindowsTerminal.exe'));
@@ -942,8 +948,8 @@ void main() {
     );
     final proxyProcesses = proxyProcessRule['process_name'] as List;
     expect(proxyProcesses, contains('Codex.exe'));
-    expect(proxyProcesses, isNot(contains('ssh.exe')));
-    expect(proxyProcesses, isNot(contains('git.exe')));
+    expect(proxyProcesses, contains('ssh.exe'));
+    expect(proxyProcesses, contains('git.exe'));
   });
 
   test(
@@ -959,12 +965,7 @@ void main() {
                   profile,
                   target: SingBoxConfigTarget.windows,
                   codexDirect: true,
-                  vpnOnlyProcesses: const [
-                    'Codex.exe',
-                    'codex.exe',
-                    'openai-codex.exe',
-                    'OtherForeignApp.exe',
-                  ],
+                  vpnOnlyProcesses: const ['OtherForeignApp.exe'],
                 ),
               )
               as Map<String, dynamic>;
@@ -1241,7 +1242,7 @@ void main() {
     });
   });
 
-  test('imports VLESS XHTTP from Xray JSON subscription', () async {
+  test('rejects VLESS XHTTP from Xray JSON subscription', () async {
     final payload = jsonEncode([
       {
         'remarks': 'XHTTP',
@@ -1270,6 +1271,10 @@ void main() {
                 'host': 'cdn.example.com',
                 'path': '/xhttp',
                 'mode': 'stream-one',
+                'extra': {
+                  'headers': {'X-Trace': 'yes'},
+                  'xmux': {'maxConcurrency': '2-4'},
+                },
               },
             },
           },
@@ -1277,26 +1282,15 @@ void main() {
       },
     ]);
 
-    final profile = (await ProfileImporter().importFromText(payload)).first;
-    final config =
-        jsonDecode(XrayConfigBuilder().build(profile)) as Map<String, dynamic>;
-    final proxy = (config['outbounds'] as List).first as Map<String, dynamic>;
-    final stream = proxy['streamSettings'] as Map<String, dynamic>;
-
-    expect(profile.coreBackend, VpnCoreBackend.xray);
-    expect(profile.kind, VpnProfileKind.vlessTls);
-    expect(profile.outbound?['transport'], {
-      'type': 'xhttp',
-      'host': 'cdn.example.com',
-      'path': '/xhttp',
-      'mode': 'stream-one',
-    });
-    expect(stream['network'], 'xhttp');
-    expect(stream['security'], 'tls');
-    expect(stream['xhttpSettings'], {
-      'host': 'cdn.example.com',
-      'path': '/xhttp',
-      'mode': 'stream-one',
-    });
+    await expectLater(
+      ProfileImporter().importFromText(payload),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('XHTTP отключён'),
+        ),
+      ),
+    );
   });
 }

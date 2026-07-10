@@ -22,6 +22,7 @@ class _SubscriptionFetchResult {
 }
 
 class ProfileImporter {
+  static const _maxSubscriptionBytes = 2 * 1024 * 1024;
   static final _linkPattern = RegExp(
     "(?:vless://|naive\\+https://|naive://|hysteria2://|hy2://|hysteria://)[^\\s<>\"']+",
     caseSensitive: false,
@@ -48,7 +49,7 @@ class ProfileImporter {
 
   Future<_SubscriptionFetchResult> _fetchSubscription(Uri uri) async {
     final clients = [
-      'YurichConnect-Windows/1.0.39 YurichCore/sing-box/1.13.12',
+      'YurichConnect-Windows/1.0.95 YurichCore/sing-box/1.13.12',
       'HiddifyNext/2.5.7',
       'NekoBoxForAndroid/1.3.8',
       'v2rayNG/1.10.5',
@@ -129,10 +130,22 @@ class ProfileImporter {
       );
       request.followRedirects = true;
 
-      final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
+      request.maxRedirects = 5;
+      final response = await request.close().timeout(
+        Duration(seconds: viaLocalProxy ? 15 : 20),
+      );
+      final bytes = <int>[];
+      await for (final chunk in response.timeout(const Duration(seconds: 20))) {
+        if (bytes.length + chunk.length > _maxSubscriptionBytes) {
+          throw const ProfileImportException(
+            'Подписка больше 2 МБ и отклонена для защиты памяти.',
+          );
+        }
+        bytes.addAll(chunk);
+      }
+      final body = utf8.decode(bytes, allowMalformed: true);
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw ProfileImportException('HTTP ${response.statusCode}: $body');
+        throw ProfileImportException('HTTP ${response.statusCode}');
       }
       final expiresAt = _extractSubscriptionExpires(response.headers);
       return _SubscriptionFetchResult(body: body, expiresAt: expiresAt);
@@ -242,6 +255,11 @@ class ProfileImporter {
       if (decoded is Map<String, dynamic>) {
         if (decoded.containsKey('inbounds') &&
             decoded.containsKey('outbounds')) {
+          if (_containsUnsupportedXhttp(decoded)) {
+            throw const ProfileImportException(
+              VlessProfileTools.unsupportedXhttpMessage,
+            );
+          }
           return VpnProfile(
             id: _stableId(text),
             name: 'Sing-box config',
@@ -453,15 +471,9 @@ class ProfileImporter {
         break;
       case 'xhttp':
       case 'splithttp':
-        query['type'] = 'xhttp';
-        settings =
-            _asMap(stream['xhttpSettings']) ??
-            _asMap(stream['splithttpSettings']);
-        _putIfNotEmpty(query, 'host', settings?['host']);
-        _putIfNotEmpty(query, 'path', settings?['path']);
-        _putIfNotEmpty(query, 'mode', settings?['mode']);
-        _putIfNotEmpty(query, 'extra', settings?['extra']);
-        break;
+        throw const ProfileImportException(
+          VlessProfileTools.unsupportedXhttpMessage,
+        );
     }
   }
 
@@ -587,18 +599,6 @@ class ProfileImporter {
     if (transport != null) {
       outbound['transport'] = transport;
     }
-    final transportType = VlessProfileTools.safeTransportType(
-      VpnProfile(
-        id: '_import_probe',
-        name: name,
-        kind: security == 'reality'
-            ? VpnProfileKind.vlessReality
-            : VpnProfileKind.vlessTls,
-        originalInput: link,
-        outbound: outbound,
-      ),
-    );
-
     return VpnProfile(
       id: _stableId(link),
       name: name,
@@ -609,9 +609,7 @@ class ProfileImporter {
       server: uri.host,
       port: port,
       outbound: outbound,
-      coreBackend: transportType == 'xhttp'
-          ? VpnCoreBackend.xray
-          : VpnCoreBackend.auto,
+      coreBackend: VpnCoreBackend.auto,
       expiresAt: _resolveExpiresAt(
         defaultValue: expiresAt,
         candidates: [_extractExpiryFromQuery(query)],
@@ -1080,16 +1078,6 @@ class ProfileImporter {
       };
     }
 
-    if (type == 'xhttp') {
-      return {
-        'type': 'xhttp',
-        if ((query['host'] ?? '').isNotEmpty) 'host': query['host'],
-        if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
-        if ((query['mode'] ?? '').isNotEmpty) 'mode': query['mode'],
-        if ((query['extra'] ?? '').isNotEmpty) 'extra': query['extra'],
-      };
-    }
-
     throw ProfileImportException('Transport "$type" пока не поддержан.');
   }
 
@@ -1181,6 +1169,25 @@ class ProfileImporter {
       String() => int.tryParse(value),
       _ => null,
     };
+  }
+
+  bool _containsUnsupportedXhttp(Object? value) {
+    if (value is Map) {
+      for (final entry in value.entries) {
+        final key = '${entry.key}'.toLowerCase();
+        final text = '${entry.value}'.trim().toLowerCase();
+        if ((key == 'type' || key == 'network') &&
+            (text == 'xhttp' || text == 'splithttp')) {
+          return true;
+        }
+        if (_containsUnsupportedXhttp(entry.value)) {
+          return true;
+        }
+      }
+    } else if (value is List) {
+      return value.any(_containsUnsupportedXhttp);
+    }
+    return false;
   }
 
   String _listOrString(Object? value) {
