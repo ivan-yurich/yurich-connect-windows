@@ -8,6 +8,7 @@ on:
     paths:
       - pubspec.yaml
       - .github/workflows/windows-release.yml
+      - windows/qa/smoke_windows.ps1
 
 permissions:
   contents: write
