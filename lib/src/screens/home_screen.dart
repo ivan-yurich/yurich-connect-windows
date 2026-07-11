@@ -12,6 +12,8 @@ import 'package:window_manager/window_manager.dart';
 
 import '../models/vpn_profile.dart';
 import '../branding.dart';
+import '../services/bounded_async_mapper.dart';
+import '../services/connection_operation_coordinator.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_failover.dart';
 import '../services/profile_identity.dart';
@@ -22,6 +24,7 @@ import '../services/sing_box_config_builder.dart';
 import '../services/vless_profile_tools.dart';
 import '../services/vpn_engine.dart';
 import '../services/windows_integration_service.dart';
+import '../services/windows_routing_policy.dart';
 import '../services/windows_sing_box_engine.dart';
 import '../services/xray_config_builder.dart';
 import 'qr_scan_screen.dart';
@@ -37,7 +40,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.95';
+const _appVersion = '1.0.96';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 3;
@@ -177,7 +180,9 @@ class _HomeScreenState extends State<HomeScreen>
   final _configBuilder = SingBoxConfigBuilder();
   final _xrayConfigBuilder = const XrayConfigBuilder();
   final _windowsIntegration = WindowsIntegrationService();
+  final _connectionOperations = ConnectionOperationCoordinator();
   final _manualController = TextEditingController();
+  final _statusPanelRevision = ValueNotifier<int>(0);
 
   StreamSubscription<Map<String, dynamic>>? _statusSubscription;
   StreamSubscription<Map<String, dynamic>>? _trafficSubscription;
@@ -237,6 +242,8 @@ class _HomeScreenState extends State<HomeScreen>
   List<ConnectionSessionRecord> _connectionSessionHistory = const [];
   DateTime? _serverLatencyLastUpdated;
   bool _checkingServerLatency = false;
+  int _serverLatencyGeneration = 0;
+  bool _serverLatencyRefreshQueued = false;
   bool _refreshingSubscriptions = false;
   bool _codexDiagnosticsBusy = false;
   bool _terminalDiagnosticsBusy = false;
@@ -305,13 +312,20 @@ class _HomeScreenState extends State<HomeScreen>
         _stopSessionTimer();
         return;
       }
-      setState(() {});
+      _notifyStatusPanel();
     });
   }
 
   void _stopSessionTimer() {
     _sessionTimer?.cancel();
     _sessionTimer = null;
+  }
+
+  void _notifyStatusPanel() {
+    if (!mounted) {
+      return;
+    }
+    _statusPanelRevision.value += 1;
   }
 
   Future<void> _setupTray() async {
@@ -415,6 +429,7 @@ class _HomeScreenState extends State<HomeScreen>
       unawaited(trayManager.destroy());
     }
     _manualController.dispose();
+    _statusPanelRevision.dispose();
     unawaited(_vpnEngine.dispose());
     super.dispose();
   }
@@ -490,9 +505,9 @@ class _HomeScreenState extends State<HomeScreen>
     final developerMode = await _store.loadDeveloperMode();
     final dnsOnlyThroughVpn = await _store.loadDnsOnlyThroughVpn();
     final windowsConnectionMode = await _store.loadWindowsConnectionMode();
-    final splitTunnelExcludedProcesses = await _store
+    var splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
-    final vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
+    var vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
     var profileRuntimeStats = await _store.loadProfileRuntimeStats();
     final activeProfileIds = profiles.map((profile) => profile.id).toSet();
     final activeRuntimeStats = Map<String, ProfileRuntimeStats>.of(
@@ -527,9 +542,34 @@ class _HomeScreenState extends State<HomeScreen>
     final autoStart = Platform.isWindows
         ? await _windowsIntegration.isAutoStartEnabled()
         : false;
-    final systemProxyEnabled = Platform.isWindows
+    var systemProxyEnabled = Platform.isWindows
         ? await _windowsIntegration.isSystemProxyEnabled()
         : false;
+    final routingResolution = WindowsRoutingPolicy.resolve(
+      advancedTunMode:
+          windowsConnectionMode == WindowsConnectionMode.advancedTun,
+      systemProxyEnabled: systemProxyEnabled,
+      directProcesses: splitTunnelExcludedProcesses,
+      vpnOnlyProcesses: vpnOnlyProcesses,
+    );
+    splitTunnelExcludedProcesses = routingResolution.directProcesses;
+    vpnOnlyProcesses = routingResolution.vpnOnlyProcesses;
+    await _store.saveSplitTunnelExcludedProcesses(splitTunnelExcludedProcesses);
+    await _store.saveVpnOnlyProcesses(vpnOnlyProcesses);
+    if (Platform.isWindows &&
+        systemProxyEnabled != routingResolution.systemProxyEnabled) {
+      try {
+        await _windowsIntegration.setSystemProxyEnabled(
+          routingResolution.systemProxyEnabled,
+        );
+        systemProxyEnabled = await _windowsIntegration.isSystemProxyEnabled();
+      } on Object catch (error) {
+        _queueLog(
+          'Routing policy could not disable conflicting Windows proxy: '
+          '${_redactSensitive('$error')}',
+        );
+      }
+    }
     if (!mounted) {
       return;
     }
@@ -563,7 +603,7 @@ class _HomeScreenState extends State<HomeScreen>
           : strings.loadedProfiles(profiles.length);
     });
     if (profiles.isNotEmpty) {
-      unawaited(_refreshServerLatencies());
+      unawaited(_refreshServerLatencies(force: true));
     }
     if (Platform.isWindows) {
       unawaited(_checkForUpdates(silent: true, installIfAvailable: false));
@@ -710,18 +750,30 @@ class _HomeScreenState extends State<HomeScreen>
       if (!mounted) {
         return;
       }
-      setState(() {
-        _lastTrafficUpdateAt = DateTime.now();
-        _uplinkBytesPerSecond =
-            (event['uplinkSpeed'] as num?)?.round() ?? _uplinkBytesPerSecond;
-        _downlinkBytesPerSecond =
-            (event['downlinkSpeed'] as num?)?.round() ??
-            _downlinkBytesPerSecond;
-        _uplink = event['formattedUplinkSpeed'] as String? ?? _uplink;
-        _downlink = event['formattedDownlinkSpeed'] as String? ?? _downlink;
-        _sessionTotal =
-            event['formattedSessionTotal'] as String? ?? _sessionTotal;
-      });
+      final nextUplinkBytes =
+          (event['uplinkSpeed'] as num?)?.round() ?? _uplinkBytesPerSecond;
+      final nextDownlinkBytes =
+          (event['downlinkSpeed'] as num?)?.round() ?? _downlinkBytesPerSecond;
+      final nextUplink = event['formattedUplinkSpeed'] as String? ?? _uplink;
+      final nextDownlink =
+          event['formattedDownlinkSpeed'] as String? ?? _downlink;
+      final nextSessionTotal =
+          event['formattedSessionTotal'] as String? ?? _sessionTotal;
+      final changed =
+          nextUplinkBytes != _uplinkBytesPerSecond ||
+          nextDownlinkBytes != _downlinkBytesPerSecond ||
+          nextUplink != _uplink ||
+          nextDownlink != _downlink ||
+          nextSessionTotal != _sessionTotal;
+      _lastTrafficUpdateAt = DateTime.now();
+      _uplinkBytesPerSecond = nextUplinkBytes;
+      _downlinkBytesPerSecond = nextDownlinkBytes;
+      _uplink = nextUplink;
+      _downlink = nextDownlink;
+      _sessionTotal = nextSessionTotal;
+      if (changed) {
+        _notifyStatusPanel();
+      }
     });
 
     _logSubscription = _vpnEngine.onLogMessage.listen((event) {
@@ -931,9 +983,9 @@ class _HomeScreenState extends State<HomeScreen>
         _message = s.imported(imported.length);
       });
       unawaited(_refreshTrayMenu());
-      unawaited(_refreshServerLatencies());
+      unawaited(_refreshServerLatencies(force: true));
       _showSnack(s.importedProfiles(imported.length));
-    });
+    }, operation: ConnectionOperation.importProfiles);
   }
 
   Future<void> _refreshSubscriptions() async {
@@ -1043,7 +1095,7 @@ class _HomeScreenState extends State<HomeScreen>
         _queueLog('Subscription refresh warning: $error');
       }
       unawaited(_refreshTrayMenu());
-      unawaited(_refreshServerLatencies());
+      unawaited(_refreshServerLatencies(force: true));
       _showSnack(message);
     } on Object catch (error) {
       final message = _redactSensitive('$error');
@@ -1062,7 +1114,14 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _refreshServerLatencies({bool force = false}) async {
-    if (_checkingServerLatency || _profiles.isEmpty) {
+    if (_profiles.isEmpty) {
+      return;
+    }
+    if (_checkingServerLatency) {
+      if (force) {
+        _serverLatencyGeneration += 1;
+        _serverLatencyRefreshQueued = true;
+      }
       return;
     }
     final lastUpdated = _serverLatencyLastUpdated;
@@ -1074,10 +1133,14 @@ class _HomeScreenState extends State<HomeScreen>
     if (mounted) {
       setState(() => _checkingServerLatency = true);
     }
+    final generation = ++_serverLatencyGeneration;
     final profiles = List<VpnProfile>.of(_profiles);
     try {
-      final results = await _measureServerLatencies(profiles);
-      if (!mounted) {
+      final results = await _measureServerLatencies(
+        profiles,
+        isCancelled: () => generation != _serverLatencyGeneration,
+      );
+      if (!mounted || generation != _serverLatencyGeneration) {
         return;
       }
       setState(() {
@@ -1087,33 +1150,25 @@ class _HomeScreenState extends State<HomeScreen>
     } finally {
       if (mounted) {
         setState(() => _checkingServerLatency = false);
+        if (_serverLatencyRefreshQueued) {
+          _serverLatencyRefreshQueued = false;
+          unawaited(_refreshServerLatencies(force: true));
+        }
       }
     }
   }
 
   Future<Map<String, _ServerLatencyResult>> _measureServerLatencies(
-    List<VpnProfile> profiles,
-  ) async {
-    final results = <String, _ServerLatencyResult>{};
-    var nextIndex = 0;
-    final workerCount = profiles.length < _maxConcurrentPingChecks
-        ? profiles.length
-        : _maxConcurrentPingChecks;
-
-    Future<void> worker() async {
-      while (true) {
-        final index = nextIndex;
-        nextIndex += 1;
-        if (index >= profiles.length) {
-          return;
-        }
-        final profile = profiles[index];
-        results[profile.id] = await _measureServerLatency(profile);
-      }
-    }
-
-    await Future.wait(List.generate(workerCount, (_) => worker()));
-    return results;
+    List<VpnProfile> profiles, {
+    bool Function()? isCancelled,
+  }) async {
+    return BoundedAsyncMapper.run<VpnProfile, String, _ServerLatencyResult>(
+      items: profiles,
+      keyOf: (profile) => profile.id,
+      task: _measureServerLatency,
+      maxConcurrency: _maxConcurrentPingChecks,
+      isCancelled: isCancelled,
+    );
   }
 
   Future<_ServerLatencyResult> _measureServerLatency(VpnProfile profile) async {
@@ -1173,17 +1228,21 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    await _runBusy(() async {
-      final stopwatch = Stopwatch()..start();
-      await _prepareProfileConfigForStart(profile);
-      await _stopVpnForProfileSwitch();
-      await _startVpnCore(profile, fastReconnect: true);
-      stopwatch.stop();
-      _recordStageTiming('profile_switch.total', stopwatch.elapsed);
-      _queueLog(
-        'Profile switched to ${profile.name} in ${stopwatch.elapsedMilliseconds}ms.',
-      );
-    }, message: s.switchingProfile);
+    await _runBusy(
+      () async {
+        final stopwatch = Stopwatch()..start();
+        await _prepareProfileConfigForStart(profile);
+        await _stopVpnForProfileSwitch();
+        await _startVpnCore(profile, fastReconnect: true);
+        stopwatch.stop();
+        _recordStageTiming('profile_switch.total', stopwatch.elapsed);
+        _queueLog(
+          'Profile switched to ${profile.name} in ${stopwatch.elapsedMilliseconds}ms.',
+        );
+      },
+      operation: ConnectionOperation.switchProfile,
+      message: s.switchingProfile,
+    );
   }
 
   Future<void> _connect() async {
@@ -1211,6 +1270,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     await _runBusy(
       () => _connectWithFailover(profile),
+      operation: ConnectionOperation.connect,
       message: s.connectingTo(profile.name),
     );
   }
@@ -2829,45 +2889,57 @@ if ($null -ne $match) { 'true' } else { 'false' }
   }
 
   Future<void> _disconnect() async {
-    await _runBusy(() => _stopVpnCore(), message: s.disconnectingVpn);
-    _setConnectionLifecycle(_ConnectionLifecycle.idle, reason: 'user stop');
+    final executed = await _runBusy(
+      () => _stopVpnCore(),
+      operation: ConnectionOperation.disconnect,
+      message: s.disconnectingVpn,
+    );
+    if (executed) {
+      _setConnectionLifecycle(_ConnectionLifecycle.idle, reason: 'user stop');
+    }
   }
 
   Future<void> _repairConnection() async {
-    await _runBusy(() async {
-      _setConnectionLifecycle(
-        _ConnectionLifecycle.recovering,
-        reason: 'manual repair',
-      );
-      final ok = await _vpnEngine.repairConnection();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _status = ok ? YurichConnectStatus.stopped : YurichConnectStatus.error;
-        _connectedAt = null;
-        _uplink = '0 B/s';
-        _downlink = '0 B/s';
-        _sessionTotal = '0 B';
-        _lastError = ok ? null : s.repairFailed;
-        _message = ok ? s.repairOk : s.repairFailed;
-      });
-      _setConnectionLifecycle(
-        ok ? _ConnectionLifecycle.idle : _ConnectionLifecycle.failed,
-        reason: ok ? 'manual repair ok' : 'manual repair failed',
-      );
-      if (ok) {
-        _showSnack(s.repairOk);
-      } else {
-        _showSnack(
-          s.repairFailed,
-          action: SnackBarAction(
-            label: s.report,
-            onPressed: () => unawaited(_emailDeveloper()),
-          ),
+    await _runBusy(
+      () async {
+        _setConnectionLifecycle(
+          _ConnectionLifecycle.recovering,
+          reason: 'manual repair',
         );
-      }
-    }, message: s.repairingConnection);
+        final ok = await _vpnEngine.repairConnection();
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _status = ok
+              ? YurichConnectStatus.stopped
+              : YurichConnectStatus.error;
+          _connectedAt = null;
+          _uplink = '0 B/s';
+          _downlink = '0 B/s';
+          _sessionTotal = '0 B';
+          _lastError = ok ? null : s.repairFailed;
+          _message = ok ? s.repairOk : s.repairFailed;
+        });
+        _setConnectionLifecycle(
+          ok ? _ConnectionLifecycle.idle : _ConnectionLifecycle.failed,
+          reason: ok ? 'manual repair ok' : 'manual repair failed',
+        );
+        if (ok) {
+          _showSnack(s.repairOk);
+        } else {
+          _showSnack(
+            s.repairFailed,
+            action: SnackBarAction(
+              label: s.report,
+              onPressed: () => unawaited(_emailDeveloper()),
+            ),
+          );
+        }
+      },
+      operation: ConnectionOperation.repair,
+      message: s.repairingConnection,
+    );
   }
 
   Future<void> _stopVpnCore({bool updateMessage = true}) async {
@@ -3498,14 +3570,19 @@ if ($null -ne $match) { 'true' } else { 'false' }
     if (value == null) {
       return;
     }
-    await _store.saveSplitTunnelExcludedProcesses(value);
+    final resolution = await _saveProcessRoutingPolicy(
+      directProcesses: value,
+      vpnOnlyProcesses: _vpnOnlyProcesses,
+    );
     if (!mounted) {
       return;
     }
     setState(() {
-      _splitTunnelExcludedProcesses = value;
+      _splitTunnelExcludedProcesses = resolution.directProcesses;
+      _vpnOnlyProcesses = resolution.vpnOnlyProcesses;
       _message = _connected ? s.reconnectToApply : s.settingsSaved;
     });
+    _showRoutingConflictResolution(resolution);
   }
 
   Future<void> _showVpnOnlySheet() async {
@@ -3520,14 +3597,48 @@ if ($null -ne $match) { 'true' } else { 'false' }
     if (value == null) {
       return;
     }
-    await _store.saveVpnOnlyProcesses(value);
+    final resolution = await _saveProcessRoutingPolicy(
+      directProcesses: _splitTunnelExcludedProcesses,
+      vpnOnlyProcesses: value,
+    );
     if (!mounted) {
       return;
     }
     setState(() {
-      _vpnOnlyProcesses = value;
+      _splitTunnelExcludedProcesses = resolution.directProcesses;
+      _vpnOnlyProcesses = resolution.vpnOnlyProcesses;
       _message = _connected ? s.reconnectToApply : s.settingsSaved;
     });
+    _showRoutingConflictResolution(resolution);
+  }
+
+  Future<WindowsRoutingResolution> _saveProcessRoutingPolicy({
+    required List<String> directProcesses,
+    required List<String> vpnOnlyProcesses,
+  }) async {
+    final resolution = WindowsRoutingPolicy.resolve(
+      advancedTunMode: _advancedTunMode,
+      systemProxyEnabled: _systemProxyEnabled,
+      directProcesses: directProcesses,
+      vpnOnlyProcesses: vpnOnlyProcesses,
+    );
+    await _store.saveSplitTunnelExcludedProcesses(resolution.directProcesses);
+    await _store.saveVpnOnlyProcesses(resolution.vpnOnlyProcesses);
+    return resolution;
+  }
+
+  void _showRoutingConflictResolution(WindowsRoutingResolution resolution) {
+    final count = resolution.removedDirectConflicts.length;
+    if (count == 0) {
+      return;
+    }
+    final message = _language == _AppLanguage.ru
+        ? 'Удалено конфликтующих исключений: $count. Правило «Всегда через VPN» имеет приоритет.'
+        : 'Removed conflicting direct exclusions: $count. Always through VPN has priority.';
+    _queueLog(
+      'Routing policy resolved $count process conflict(s); VPN-only wins.',
+    );
+    _showSnack(message);
   }
 
   Future<List<String>?> _showProcessListSheet({
@@ -3728,7 +3839,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       _message = s.profileDeleted;
     });
     if (_profiles.isNotEmpty) {
-      unawaited(_refreshServerLatencies());
+      unawaited(_refreshServerLatencies(force: true));
     }
     unawaited(_refreshTrayMenu());
   }
@@ -3805,40 +3916,47 @@ if ($null -ne $match) { 'true' } else { 'false' }
     );
   }
 
-  Future<void> _runBusy(
+  Future<bool> _runBusy(
     Future<void> Function() action, {
+    required ConnectionOperation operation,
     String? message,
   }) async {
-    if (_busy) {
-      return;
+    if (_busy || _connectionOperations.isBusy) {
+      _queueLog(
+        'Connection operation skipped: requested=${operation.name} '
+        'active=${_connectionOperations.activeOperation?.name ?? 'ui_busy'}.',
+      );
+      return false;
     }
-    setState(() {
-      _busy = true;
-      _message = message ?? s.working;
+    return _connectionOperations.tryRun(operation, () async {
+      setState(() {
+        _busy = true;
+        _message = message ?? s.working;
+      });
+      try {
+        await action();
+      } on Object catch (error) {
+        final errorText = _redactSensitive('$error');
+        if (mounted) {
+          setState(() {
+            _lastError = errorText;
+            _message = errorText;
+          });
+          _showSnack(
+            errorText,
+            action: SnackBarAction(
+              label: s.report,
+              onPressed: () => unawaited(_emailDeveloper()),
+            ),
+          );
+        }
+      } finally {
+        if (mounted) {
+          setState(() => _busy = false);
+          unawaited(_refreshTrayMenu());
+        }
+      }
     });
-    try {
-      await action();
-    } on Object catch (error) {
-      final errorText = _redactSensitive('$error');
-      if (mounted) {
-        setState(() {
-          _lastError = errorText;
-          _message = errorText;
-        });
-        _showSnack(
-          errorText,
-          action: SnackBarAction(
-            label: s.report,
-            onPressed: () => unawaited(_emailDeveloper()),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-        unawaited(_refreshTrayMenu());
-      }
-    }
   }
 
   void _showSnack(String text, {SnackBarAction? action}) {
@@ -4507,14 +4625,17 @@ if ($null -ne $match) { 'true' } else { 'false' }
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
                 children: [
-                  _StatusPanel(
-                    strings: s,
-                    status: _status,
-                    message: _message,
-                    uplink: _uplink,
-                    downlink: _downlink,
-                    sessionTotal: _sessionTotal,
-                    sessionDuration: _sessionDuration,
+                  ValueListenableBuilder<int>(
+                    valueListenable: _statusPanelRevision,
+                    builder: (context, _, child) => _StatusPanel(
+                      strings: s,
+                      status: _status,
+                      message: _message,
+                      uplink: _uplink,
+                      downlink: _downlink,
+                      sessionTotal: _sessionTotal,
+                      sessionDuration: _sessionDuration,
+                    ),
                   ),
                   if (_status == YurichConnectStatus.adminRequired ||
                       _lastError != null) ...[

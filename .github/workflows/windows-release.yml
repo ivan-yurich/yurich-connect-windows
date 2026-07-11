@@ -92,15 +92,14 @@ jobs:
           $notes = @"
           ## Yurich Connect for Windows v$version
 
-          - XHTTP removed from the Windows UI, imports, and cached profiles.
-          - Subscription refresh now replaces stale profiles and prevents duplicates.
-          - Deleted profiles stay deleted across subscription refreshes and credential rotation.
-          - Advanced TUN and Windows system proxy can no longer create double routing.
-          - Explicit Always through VPN rules override Developer and Codex exclusions.
-          - Hysteria latency no longer uses an invalid TCP probe.
-          - Startup cache recovery, subscription limits, installer safety, and runtime stability improved.
+          - Connection, disconnect, profile switch, repair, and import operations are serialized to prevent races.
+          - Live traffic and session updates no longer rebuild the complete application screen.
+          - Profile latency checks use bounded concurrency and discard stale subscription results.
+          - Always through VPN rules automatically override conflicting direct exclusions.
+          - Advanced TUN startup repairs a conflicting Windows system proxy state.
+          - Added lifecycle, routing-policy, and profile-load regression tests.
 
-          Проверено: Flutter analyze, tests, Windows release build, installer smoke-test and payload safety scan.
+          Проверено: Flutter analyze, 86 tests, Windows release build, installer smoke-test and payload safety scan.
           "@
 
           if (gh release view $tag --repo '${{ github.repository }}' *> $null) {
