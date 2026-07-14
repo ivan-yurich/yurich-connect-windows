@@ -23,6 +23,17 @@ void main() {
       expect(RuntimeLogClassifier.isDiagnosticNoise(log), isTrue);
     });
 
+    test('hides refused direct endpoint noise from user-facing logs', () {
+      const log =
+          'ERROR [66976314 2.33s] connection: open connection to '
+          '195.209.219.65:42999 using outbound/direct[direct]: '
+          'dial tcp 195.209.219.65:42999: connectex: No connection could be '
+          'made because the target machine actively refused it.';
+
+      expect(RuntimeLogClassifier.isUserFacingNoise(log), isTrue);
+      expect(RuntimeLogClassifier.isDiagnosticNoise(log), isTrue);
+    });
+
     test('keeps real VLESS proxy failures visible for failover', () {
       const log =
           'ERROR outbound/vless[proxy]: open connection to example.com:443: '

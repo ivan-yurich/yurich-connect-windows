@@ -13,11 +13,13 @@ import 'package:window_manager/window_manager.dart';
 import '../models/vpn_profile.dart';
 import '../branding.dart';
 import '../services/bounded_async_mapper.dart';
+import '../services/connection_health_presentation.dart';
 import '../services/connection_operation_coordinator.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_failover.dart';
 import '../services/profile_identity.dart';
 import '../services/profile_store.dart';
+import '../services/runtime_log_buffer.dart';
 import '../services/runtime_log_classifier.dart';
 import '../services/secret_redactor.dart';
 import '../services/sing_box_config_builder.dart';
@@ -27,20 +29,22 @@ import '../services/windows_integration_service.dart';
 import '../services/windows_routing_policy.dart';
 import '../services/windows_sing_box_engine.dart';
 import '../services/xray_config_builder.dart';
+import '../widgets/home_navigation.dart';
 import 'qr_scan_screen.dart';
 
-const _gold = Color(0xFF15B8FF);
-const _goldSoft = Color(0xFFEAF7FF);
-const _ink = Color(0xFF07101C);
-const _surface = Color(0xFF0D1A2B);
-const _surfaceMetric = Color(0xFF112B45);
-const _mutedGold = Color(0xFF8BAEC7);
+const _gold = Color(0xFF20C4F4);
+const _goldSoft = Color(0xFFE8F7FF);
+const _ink = Color(0xFF0B0F14);
+const _surface = Color(0xFF111923);
+const _surfaceMetric = Color(0xFF162633);
+const _mutedGold = Color(0xFF91A4B7);
+const _success = Color(0xFF4ADE80);
 const _appName = YurichBranding.appName;
 const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.96';
+const _appVersion = '1.0.98';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 3;
@@ -183,11 +187,11 @@ class _HomeScreenState extends State<HomeScreen>
   final _connectionOperations = ConnectionOperationCoordinator();
   final _manualController = TextEditingController();
   final _statusPanelRevision = ValueNotifier<int>(0);
+  final _runtimeLogs = RuntimeLogBuffer();
 
   StreamSubscription<Map<String, dynamic>>? _statusSubscription;
   StreamSubscription<Map<String, dynamic>>? _trafficSubscription;
   StreamSubscription<Map<String, dynamic>>? _logSubscription;
-  Timer? _logFlushTimer;
   Timer? _healthWatchdogTimer;
   Timer? _sessionTimer;
   DateTime? _ignoreStoppedUntil;
@@ -224,6 +228,8 @@ class _HomeScreenState extends State<HomeScreen>
   bool _isWindowsAdmin = !Platform.isWindows;
   bool _showAllProfiles = false;
   _ProfileFilter _profileFilter = _ProfileFilter.all;
+  YurichHomeSection _homeSection = YurichHomeSection.home;
+  bool _healthWatchdogTickRunning = false;
   int _healthWatchdogFailures = 0;
   DateTime? _healthWatchdogCooldownUntil;
   DateTime? _softRecoveryCooldownUntil;
@@ -257,10 +263,9 @@ class _HomeScreenState extends State<HomeScreen>
   final List<_HealthProbeAttempt> _healthProbeHistory = [];
   final List<DateTime> _vlessEofEvents = [];
   final Map<String, List<int>> _stageTimings = {};
-  final _logs = <String>[];
-  final _pendingLogs = <String>[];
   DateTime? _vlessEofFailoverCooldownUntil;
   bool _vlessEofFailoverRunning = false;
+  bool _transientHealthWarningVisible = false;
 
   _Strings get s => _Strings.forLanguage(_language);
 
@@ -420,7 +425,6 @@ class _HomeScreenState extends State<HomeScreen>
     _statusSubscription?.cancel();
     _trafficSubscription?.cancel();
     _logSubscription?.cancel();
-    _logFlushTimer?.cancel();
     _sessionTimer?.cancel();
     _stopHealthWatchdog();
     if (Platform.isWindows) {
@@ -430,6 +434,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
     _manualController.dispose();
     _statusPanelRevision.dispose();
+    _runtimeLogs.dispose();
     unawaited(_vpnEngine.dispose());
     super.dispose();
   }
@@ -708,6 +713,7 @@ class _HomeScreenState extends State<HomeScreen>
             _connectionLifecycle = _ConnectionLifecycle.stable;
             _connectionLifecycleChangedAt = DateTime.now();
             _lastError = null;
+            _transientHealthWarningVisible = false;
             _vlessEofEvents.clear();
             _connectedAt ??= DateTime.now();
             _ignoreStoppedUntil = DateTime.now().add(
@@ -721,6 +727,7 @@ class _HomeScreenState extends State<HomeScreen>
               _connectionLifecycle = _ConnectionLifecycle.idle;
               _connectionLifecycleChangedAt = DateTime.now();
               _connectedAt = null;
+              _transientHealthWarningVisible = false;
               _stopSessionTimer();
             }
             _stopHealthWatchdog();
@@ -798,24 +805,22 @@ class _HomeScreenState extends State<HomeScreen>
       final status = await _vpnEngine.getVPNStatus();
       final bufferedLogs = await _vpnEngine.getLogs();
       if (mounted) {
+        _runtimeLogs.replaceAll(
+          bufferedLogs
+              .map(_cleanLog)
+              .where((log) => log.isNotEmpty)
+              .toList()
+              .reversed
+              .take(80)
+              .toList()
+              .reversed,
+        );
         setState(() {
           _status = status;
           if (status == YurichConnectStatus.started) {
             _connectedAt ??= DateTime.now();
             _startSessionTimer();
           }
-          _logs
-            ..clear()
-            ..addAll(
-              bufferedLogs
-                  .map(_cleanLog)
-                  .where((log) => log.isNotEmpty)
-                  .toList()
-                  .reversed
-                  .take(60)
-                  .toList()
-                  .reversed,
-            );
         });
       }
     } on Object {
@@ -1622,8 +1627,7 @@ class _HomeScreenState extends State<HomeScreen>
       Duration(milliseconds: fastReconnect ? 150 : 1400),
     );
 
-    _pendingLogs.clear();
-    _logs.clear();
+    _runtimeLogs.clear();
     _lastError = null;
     await _vpnEngine.clearLogs();
 
@@ -2365,7 +2369,21 @@ class _HomeScreenState extends State<HomeScreen>
     if (!mounted ||
         !Platform.isWindows ||
         _busy ||
+        _healthWatchdogTickRunning ||
         _status != YurichConnectStatus.started) {
+      return;
+    }
+
+    _healthWatchdogTickRunning = true;
+    try {
+      await _runHealthWatchdogTickExclusive();
+    } finally {
+      _healthWatchdogTickRunning = false;
+    }
+  }
+
+  Future<void> _runHealthWatchdogTickExclusive() async {
+    if (!mounted || _status != YurichConnectStatus.started) {
       return;
     }
 
@@ -2395,6 +2413,7 @@ class _HomeScreenState extends State<HomeScreen>
         );
       }
       _healthWatchdogFailures = 0;
+      _clearTransientHealthWarning();
       return;
     }
 
@@ -2485,12 +2504,7 @@ class _HomeScreenState extends State<HomeScreen>
       'p95=${_formatLatency(probeP95)}, p99=${_formatLatency(probeP99)}. '
       'User action is required for restart.',
     );
-    if (mounted) {
-      setState(() {
-        _message = s.healthWatchdogWarning;
-        _lastError = s.healthWatchdogWarning;
-      });
-    }
+    _showTransientHealthWarning(s.healthWatchdogWarning);
   }
 
   void _observeRuntimeLogForFailover(String message) {
@@ -2566,23 +2580,43 @@ class _HomeScreenState extends State<HomeScreen>
         return;
       }
 
-      setState(() {
-        _message = s.runtimeReconnectDisabledWarning;
-        _lastError = s.runtimeReconnectDisabledWarning;
-      });
+      _showTransientHealthWarning(s.runtimeReconnectDisabledWarning);
     } on Object catch (error) {
       _queueLog(
         'VLESS upstream failure handling failed: ${_redactSensitive('$error')}',
       );
-      if (mounted) {
-        setState(() {
-          _message = s.healthWatchdogWarning;
-          _lastError = s.healthWatchdogWarning;
-        });
-      }
+      _showTransientHealthWarning(s.healthWatchdogWarning);
     } finally {
       _vlessEofFailoverRunning = false;
     }
+  }
+
+  void _showTransientHealthWarning(String message) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _transientHealthWarningVisible = true;
+      _message = message;
+      if (_status == YurichConnectStatus.started) {
+        _lastError = null;
+      }
+    });
+  }
+
+  void _clearTransientHealthWarning() {
+    if (!_transientHealthWarningVisible || !mounted) {
+      return;
+    }
+    final profile = _selectedProfile;
+    setState(() {
+      _transientHealthWarningVisible = false;
+      _lastError = null;
+      if (_status == YurichConnectStatus.started && profile != null) {
+        _message = s.connectionProfile(profile.name);
+      }
+    });
+    _queueLog('Transient VPN health warning cleared after successful probe.');
   }
 
   Future<bool> _attemptSoftRecovery(String reason) async {
@@ -4089,8 +4123,9 @@ if ($null -ne $match) { 'true' } else { 'false' }
       'logs:',
     ];
 
-    final safeLogs = _logs
-        .take(_logs.length)
+    final logs = _runtimeLogs.entries;
+    final safeLogs = logs
+        .take(logs.length)
         .toList()
         .reversed
         .take(35)
@@ -4523,25 +4558,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     }
 
     final timestamped = '${_formatLogTimestamp(DateTime.now())} $cleaned';
-    _pendingLogs.add(timestamped);
-    if (_pendingLogs.length > 120) {
-      _pendingLogs.removeRange(0, _pendingLogs.length - 120);
-    }
-
-    _logFlushTimer ??= Timer(const Duration(milliseconds: 250), () {
-      _logFlushTimer = null;
-      if (!mounted || _pendingLogs.isEmpty) {
-        return;
-      }
-
-      setState(() {
-        _logs.addAll(_pendingLogs);
-        _pendingLogs.clear();
-        if (_logs.length > 60) {
-          _logs.removeRange(0, _logs.length - 60);
-        }
-      });
-    });
+    _runtimeLogs.add(timestamped);
   }
 
   String _cleanLog(String message) {
@@ -4603,7 +4620,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
               child: Column(
                 children: [
                   _buildConnectButton(context, selected),
-                  if (_shouldShowUpdateBanner()) ...[
+                  if (_homeSection == YurichHomeSection.home &&
+                      _shouldShowUpdateBanner()) ...[
                     const SizedBox(height: 10),
                     _UpdateBanner(
                       strings: s,
@@ -4622,141 +4640,212 @@ if ($null -ne $match) { 'true' } else { 'false' }
               ),
             ),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
-                children: [
-                  ValueListenableBuilder<int>(
-                    valueListenable: _statusPanelRevision,
-                    builder: (context, _, child) => _StatusPanel(
-                      strings: s,
-                      status: _status,
-                      message: _message,
-                      uplink: _uplink,
-                      downlink: _downlink,
-                      sessionTotal: _sessionTotal,
-                      sessionDuration: _sessionDuration,
-                    ),
-                  ),
-                  if (_status == YurichConnectStatus.adminRequired ||
-                      _lastError != null) ...[
-                    const SizedBox(height: 10),
-                    _IssueActionPanel(
-                      strings: s,
-                      status: _status,
-                      error: _lastError,
-                      busy: _busy,
-                      canRetry: selected != null,
-                      onRetry: () => unawaited(_connect()),
-                      onRestartAsAdmin: Platform.isWindows
-                          ? () => unawaited(_restartAsAdministrator())
-                          : null,
-                      onRepair: () => unawaited(_repairConnection()),
-                      onReport: () => unawaited(_emailDeveloper()),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                  _ProfilePanel(
-                    strings: s,
-                    profiles: _profiles,
-                    selectedId: selected?.id,
-                    serverLatencies: _serverLatencies,
-                    profileRuntimeStats: _profileRuntimeStats,
-                    checkingServerLatency: _checkingServerLatency,
-                    refreshingSubscriptions: _refreshingSubscriptions,
-                    showAllProfiles: _showAllProfiles,
-                    selectedFilter: _profileFilter,
-                    onSelect: _selectProfile,
-                    onAdd: _showImportSheet,
-                    onRefreshSubscriptions: () =>
-                        unawaited(_refreshSubscriptions()),
-                    onCopy: selected == null ? null : _copySelected,
-                    onQr: selected == null ? null : _showQr,
-                    onDeleteProfile: (profile) =>
-                        unawaited(_deleteProfile(profile)),
-                    onToggleShowAllProfiles: () =>
-                        setState(() => _showAllProfiles = !_showAllProfiles),
-                    onFilterChanged: (filter) => setState(() {
-                      _profileFilter = filter;
-                      _showAllProfiles = false;
-                    }),
-                    onRefreshLatency: () =>
-                        unawaited(_refreshServerLatencies(force: true)),
-                    kindLabel: _profileKindLabel,
-                  ),
-                  if (Platform.isWindows) ...[
-                    const SizedBox(height: 14),
-                    _WindowsToolsPanel(
-                      strings: s,
-                      connectionModeName: _windowsConnectionModeName,
-                      advancedTunMode: _advancedTunMode,
-                      systemProxyEnabled: _systemProxyEnabled,
-                      autoStart: _autoStart,
-                      autoConnect: _autoConnect,
-                      developerMode: _developerMode,
-                      dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
-                      codexDirect: _codexDirect,
-                      codexDirectSupported: _codexDirectSupported,
-                      chatGptThroughVpn: _chatGptThroughVpn,
-                      busy: _windowsSettingsBusy,
-                      checkingUpdate: _checkingUpdate,
-                      installingUpdate: _installingUpdate,
-                      codexDiagnosticsBusy: _codexDiagnosticsBusy,
-                      terminalDiagnosticsBusy: _terminalDiagnosticsBusy,
-                      dnsDiagnosticsBusy: _dnsDiagnosticsBusy,
-                      vpnDiagnosticsBusy: _vpnDiagnosticsBusy,
-                      excludedProcessCount:
-                          _splitTunnelExcludedProcesses.length,
-                      vpnOnlyProcessCount: _vpnOnlyProcesses.length,
-                      updateInfo: _updateInfo,
-                      onAdvancedTunModeChanged: (value) =>
-                          unawaited(_setAdvancedTunMode(value)),
-                      onSystemProxyChanged: (value) =>
-                          unawaited(_setSystemProxy(value)),
-                      onAutoStartChanged: (value) =>
-                          unawaited(_setAutoStart(value)),
-                      onAutoConnectChanged: (value) =>
-                          unawaited(_setAutoConnect(value)),
-                      onDeveloperModeChanged: (value) =>
-                          unawaited(_setDeveloperMode(value)),
-                      onDnsOnlyThroughVpnChanged: (value) =>
-                          unawaited(_setDnsOnlyThroughVpn(value)),
-                      onCodexDirectChanged: (value) =>
-                          unawaited(_setCodexDirect(value)),
-                      onChatGptThroughVpnChanged: (value) =>
-                          unawaited(_setChatGptThroughVpn(value)),
-                      onEditSplitTunnel: _showSplitTunnelSheet,
-                      onEditVpnOnly: _showVpnOnlySheet,
-                      onCodexDiagnostics: () =>
-                          unawaited(_runCodexDiagnostics()),
-                      onTerminalDiagnostics: () =>
-                          unawaited(_runTerminalDiagnostics()),
-                      onDnsDiagnostics: () => unawaited(_runDnsDiagnostics()),
-                      onVpnDiagnostics: () => unawaited(_runVpnDiagnostics()),
-                      onCheckUpdate: _checkForUpdates,
-                      onOpenReleases: () =>
-                          _openUrl(WindowsIntegrationService.releasesUrl),
-                      onRepairConnection: () => unawaited(_repairConnection()),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                  _SupportPanel(
-                    strings: s,
-                    onSupport: () => _openUrl(_telegramUrl),
-                    onTelegram: () => _openUrl(_telegramUrl),
-                    onVk: () => _openUrl(_vkUrl),
-                    onDonate: () => _openUrl(_donateUrl),
-                    onDeveloper: _emailDeveloper,
-                  ),
-                  const SizedBox(height: 16),
-                  _FaqPanel(strings: s),
-                  const SizedBox(height: 16),
-                  _LogsPanel(strings: s, logs: _logs),
-                ],
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                switchInCurve: Curves.easeOut,
+                switchOutCurve: Curves.easeIn,
+                child: KeyedSubtree(
+                  key: ValueKey<YurichHomeSection>(_homeSection),
+                  child: _buildHomeSection(selected),
+                ),
               ),
             ),
           ],
         ),
       ),
+      bottomNavigationBar: HomeNavigation(
+        selected: _homeSection,
+        labels: HomeNavigationLabels(
+          home: _isRu(s) ? 'Главная' : 'Home',
+          profiles: s.profiles,
+          routing: _isRu(s) ? 'Маршруты' : 'Routing',
+          settings: _isRu(s) ? 'Ещё' : 'More',
+        ),
+        onSelected: (section) => setState(() => _homeSection = section),
+      ),
+    );
+  }
+
+  Widget _buildHomeSection(VpnProfile? selected) {
+    return switch (_homeSection) {
+      YurichHomeSection.home => _buildConnectionSection(selected),
+      YurichHomeSection.profiles => _buildProfilesSection(selected),
+      YurichHomeSection.routing => _buildRoutingSection(),
+      YurichHomeSection.settings => _buildSettingsSection(),
+    };
+  }
+
+  Widget _buildConnectionSection(VpnProfile? selected) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+      children: [
+        ValueListenableBuilder<int>(
+          valueListenable: _statusPanelRevision,
+          builder: (context, _, child) => _StatusPanel(
+            strings: s,
+            status: _status,
+            message: _message,
+            uplink: _uplink,
+            downlink: _downlink,
+            sessionTotal: _sessionTotal,
+            sessionDuration: _sessionDuration,
+          ),
+        ),
+        if (ConnectionHealthPresentation.shouldShowIssuePanel(
+          status: _status,
+          error: _lastError,
+          transientWarning: _transientHealthWarningVisible,
+        )) ...[
+          const SizedBox(height: 10),
+          _IssueActionPanel(
+            strings: s,
+            status: _status,
+            error: _lastError,
+            busy: _busy,
+            canRetry: selected != null,
+            onRetry: () => unawaited(_connect()),
+            onRestartAsAdmin: Platform.isWindows
+                ? () => unawaited(_restartAsAdministrator())
+                : null,
+            onRepair: () => unawaited(_repairConnection()),
+            onReport: () => unawaited(_emailDeveloper()),
+          ),
+        ],
+        const SizedBox(height: 14),
+        _ActiveProfilePanel(
+          strings: s,
+          profile: selected,
+          latency: selected == null ? null : _serverLatencies[selected.id],
+          runtimeStats: selected == null
+              ? null
+              : _profileRuntimeStats[selected.id],
+          checkingLatency: _checkingServerLatency,
+          kindLabel: _profileKindLabel,
+          onOpenProfiles: () {
+            setState(() => _homeSection = YurichHomeSection.profiles);
+          },
+          onRefreshLatency: () =>
+              unawaited(_refreshServerLatencies(force: true)),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProfilesSection(VpnProfile? selected) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+      children: [
+        _ProfilePanel(
+          strings: s,
+          profiles: _profiles,
+          selectedId: selected?.id,
+          serverLatencies: _serverLatencies,
+          profileRuntimeStats: _profileRuntimeStats,
+          checkingServerLatency: _checkingServerLatency,
+          refreshingSubscriptions: _refreshingSubscriptions,
+          showAllProfiles: _showAllProfiles,
+          selectedFilter: _profileFilter,
+          onSelect: _selectProfile,
+          onAdd: _showImportSheet,
+          onRefreshSubscriptions: () => unawaited(_refreshSubscriptions()),
+          onCopy: selected == null ? null : _copySelected,
+          onQr: selected == null ? null : _showQr,
+          onDeleteProfile: (profile) => unawaited(_deleteProfile(profile)),
+          onToggleShowAllProfiles: () =>
+              setState(() => _showAllProfiles = !_showAllProfiles),
+          onFilterChanged: (filter) => setState(() {
+            _profileFilter = filter;
+            _showAllProfiles = false;
+          }),
+          onRefreshLatency: () =>
+              unawaited(_refreshServerLatencies(force: true)),
+          kindLabel: _profileKindLabel,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRoutingSection() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+      children: [
+        if (Platform.isWindows)
+          _buildWindowsToolsPanel(_WindowsToolsSection.routing),
+      ],
+    );
+  }
+
+  Widget _buildSettingsSection() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+      children: [
+        if (Platform.isWindows)
+          _buildWindowsToolsPanel(_WindowsToolsSection.settings),
+        const SizedBox(height: 14),
+        _SupportPanel(
+          strings: s,
+          onSupport: () => _openUrl(_telegramUrl),
+          onTelegram: () => _openUrl(_telegramUrl),
+          onVk: () => _openUrl(_vkUrl),
+          onDonate: () => _openUrl(_donateUrl),
+          onDeveloper: _emailDeveloper,
+        ),
+        const SizedBox(height: 14),
+        _FaqPanel(strings: s),
+        const SizedBox(height: 14),
+        ValueListenableBuilder<int>(
+          valueListenable: _runtimeLogs.revision,
+          builder: (context, _, child) =>
+              _LogsPanel(strings: s, logs: _runtimeLogs.entries),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWindowsToolsPanel(_WindowsToolsSection section) {
+    return _WindowsToolsPanel(
+      section: section,
+      strings: s,
+      connectionModeName: _windowsConnectionModeName,
+      advancedTunMode: _advancedTunMode,
+      systemProxyEnabled: _systemProxyEnabled,
+      autoStart: _autoStart,
+      autoConnect: _autoConnect,
+      developerMode: _developerMode,
+      dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
+      codexDirect: _codexDirect,
+      codexDirectSupported: _codexDirectSupported,
+      chatGptThroughVpn: _chatGptThroughVpn,
+      busy: _windowsSettingsBusy,
+      checkingUpdate: _checkingUpdate,
+      installingUpdate: _installingUpdate,
+      codexDiagnosticsBusy: _codexDiagnosticsBusy,
+      terminalDiagnosticsBusy: _terminalDiagnosticsBusy,
+      dnsDiagnosticsBusy: _dnsDiagnosticsBusy,
+      vpnDiagnosticsBusy: _vpnDiagnosticsBusy,
+      excludedProcessCount: _splitTunnelExcludedProcesses.length,
+      vpnOnlyProcessCount: _vpnOnlyProcesses.length,
+      updateInfo: _updateInfo,
+      onAdvancedTunModeChanged: (value) =>
+          unawaited(_setAdvancedTunMode(value)),
+      onSystemProxyChanged: (value) => unawaited(_setSystemProxy(value)),
+      onAutoStartChanged: (value) => unawaited(_setAutoStart(value)),
+      onAutoConnectChanged: (value) => unawaited(_setAutoConnect(value)),
+      onDeveloperModeChanged: (value) => unawaited(_setDeveloperMode(value)),
+      onDnsOnlyThroughVpnChanged: (value) =>
+          unawaited(_setDnsOnlyThroughVpn(value)),
+      onCodexDirectChanged: (value) => unawaited(_setCodexDirect(value)),
+      onChatGptThroughVpnChanged: (value) =>
+          unawaited(_setChatGptThroughVpn(value)),
+      onEditSplitTunnel: _showSplitTunnelSheet,
+      onEditVpnOnly: _showVpnOnlySheet,
+      onCodexDiagnostics: () => unawaited(_runCodexDiagnostics()),
+      onTerminalDiagnostics: () => unawaited(_runTerminalDiagnostics()),
+      onDnsDiagnostics: () => unawaited(_runDnsDiagnostics()),
+      onVpnDiagnostics: () => unawaited(_runVpnDiagnostics()),
+      onCheckUpdate: _checkForUpdates,
+      onOpenReleases: () => _openUrl(WindowsIntegrationService.releasesUrl),
+      onRepairConnection: () => unawaited(_repairConnection()),
     );
   }
 
@@ -4924,10 +5013,12 @@ class _StatusPanel extends StatelessWidget {
         decoration: BoxDecoration(
           color: _surface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: connected ? _gold : Colors.white12),
+          border: Border.all(color: connected ? _success : Colors.white12),
           boxShadow: [
             BoxShadow(
-              color: connected ? _gold.withValues(alpha: 0.18) : Colors.black26,
+              color: connected
+                  ? _success.withValues(alpha: 0.16)
+                  : Colors.black26,
               blurRadius: 18,
               offset: const Offset(0, 8),
             ),
@@ -4953,7 +5044,7 @@ class _StatusPanel extends StatelessWidget {
                         : status == YurichConnectStatus.adminRequired
                         ? Colors.orangeAccent
                         : connected
-                        ? _goldSoft
+                        ? _success
                         : _mutedGold,
                   ),
                   const SizedBox(width: 10),
@@ -5226,6 +5317,161 @@ class _SessionDial extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ActiveProfilePanel extends StatelessWidget {
+  const _ActiveProfilePanel({
+    required this.strings,
+    required this.profile,
+    required this.latency,
+    required this.runtimeStats,
+    required this.checkingLatency,
+    required this.kindLabel,
+    required this.onOpenProfiles,
+    required this.onRefreshLatency,
+  });
+
+  final _Strings strings;
+  final VpnProfile? profile;
+  final _ServerLatencyResult? latency;
+  final ProfileRuntimeStats? runtimeStats;
+  final bool checkingLatency;
+  final String Function(VpnProfileKind kind) kindLabel;
+  final VoidCallback onOpenProfiles;
+  final VoidCallback onRefreshLatency;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = profile;
+    final pingLabel = latency == null
+        ? (checkingLatency ? strings.pingChecking : strings.pingNotChecked)
+        : latency!.label(strings);
+    final expiry = selected == null
+        ? null
+        : _formatProfileExpiry(selected.expiresAt, strings);
+    final stability = _formatProfileStability(runtimeStats, strings);
+
+    return SizedBox(
+      height: 126,
+      child: Material(
+        color: _surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: _gold.withValues(alpha: 0.28)),
+        ),
+        child: InkWell(
+          onTap: onOpenProfiles,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: _gold.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(Icons.public, color: _goldSoft),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        selected?.name ?? strings.emptyProfiles,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        selected == null
+                            ? strings.addProfileHint
+                            : '${kindLabel(selected.kind)} · ${selected.endpoint}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: _mutedGold, fontSize: 12),
+                      ),
+                      if (expiry != null) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          expiry,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFFB8C7D6),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ] else if (stability != null) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          stability,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFFB8C7D6),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 66),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: _surfaceMetric,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                          child: Text(
+                            pingLabel,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: _goldSoft,
+                              fontSize: 11,
+                              fontFeatures: [FontFeature.tabularFigures()],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    IconButton(
+                      tooltip: strings.pingRefresh,
+                      onPressed: selected == null || checkingLatency
+                          ? null
+                          : onRefreshLatency,
+                      icon: const Icon(Icons.refresh, size: 18),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -5793,8 +6039,11 @@ class _ServerLatencyResult {
 
 enum _ServerLatencyState { ok, failed, unavailable, udp }
 
+enum _WindowsToolsSection { routing, settings }
+
 class _WindowsToolsPanel extends StatelessWidget {
   const _WindowsToolsPanel({
+    required this.section,
     required this.strings,
     required this.connectionModeName,
     required this.advancedTunMode,
@@ -5835,6 +6084,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onRepairConnection,
   });
 
+  final _WindowsToolsSection section;
   final _Strings strings;
   final String connectionModeName;
   final bool advancedTunMode;
@@ -5897,185 +6147,200 @@ class _WindowsToolsPanel extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    strings.windowsTools,
+                    section == _WindowsToolsSection.routing
+                        ? (_isRu(strings) ? 'Маршруты' : 'Routing')
+                        : (_isRu(strings)
+                              ? 'Настройки и диагностика'
+                              : 'Settings and diagnostics'),
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            _SettingsSwitchRow(
-              icon: advancedTunMode
-                  ? Icons.admin_panel_settings_outlined
-                  : Icons.speed_outlined,
-              value: advancedTunMode,
-              onChanged: busy ? null : onAdvancedTunModeChanged,
-              title: Text(connectionModeName),
-              subtitle: Text(
-                advancedTunMode
-                    ? strings.advancedTunModeHint
-                    : strings.stableProxyModeHint,
+            if (section == _WindowsToolsSection.routing) ...[
+              _SettingsSwitchRow(
+                icon: advancedTunMode
+                    ? Icons.admin_panel_settings_outlined
+                    : Icons.speed_outlined,
+                value: advancedTunMode,
+                onChanged: busy ? null : onAdvancedTunModeChanged,
+                title: Text(connectionModeName),
+                subtitle: Text(
+                  advancedTunMode
+                      ? strings.advancedTunModeHint
+                      : strings.stableProxyModeHint,
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.public_outlined,
-              value: systemProxyEnabled,
-              onChanged: busy || advancedTunMode ? null : onSystemProxyChanged,
-              title: Text(strings.systemProxy),
-              subtitle: Text(
-                advancedTunMode
-                    ? strings.systemProxyTunConflict
-                    : strings.systemProxyHint,
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.public_outlined,
+                value: systemProxyEnabled,
+                onChanged: busy || advancedTunMode
+                    ? null
+                    : onSystemProxyChanged,
+                title: Text(strings.systemProxy),
+                subtitle: Text(
+                  advancedTunMode
+                      ? strings.systemProxyTunConflict
+                      : strings.systemProxyHint,
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.rocket_launch_outlined,
-              value: autoStart,
-              onChanged: busy ? null : onAutoStartChanged,
-              title: Text(strings.autoStart),
-              subtitle: Text(strings.autoStartHint),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.shield_outlined,
-              value: autoConnect,
-              onChanged: onAutoConnectChanged,
-              title: Text(strings.autoConnect),
-              subtitle: Text(strings.autoConnectHint),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.terminal_outlined,
-              value: developerMode,
-              onChanged: busy ? null : onDeveloperModeChanged,
-              title: Text(strings.developerMode),
-              subtitle: Text(strings.developerModeHint),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.dns_outlined,
-              value: dnsOnlyThroughVpn,
-              onChanged: busy ? null : onDnsOnlyThroughVpnChanged,
-              title: Text(strings.dnsOnlyThroughVpn),
-              subtitle: Text(strings.dnsOnlyThroughVpnHint),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.code_outlined,
-              value: codexDirect,
-              onChanged: codexDirectSupported ? onCodexDirectChanged : null,
-              title: Text(strings.codexDirect),
-              subtitle: Text(
-                codexDirectSupported
-                    ? strings.codexDirectHint
-                    : strings.codexDirectTunOnly,
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.terminal_outlined,
+                value: developerMode,
+                onChanged: busy ? null : onDeveloperModeChanged,
+                title: Text(strings.developerMode),
+                subtitle: Text(strings.developerModeHint),
               ),
-            ),
-            const SizedBox(height: 8),
-            _SettingsSwitchRow(
-              icon: Icons.smart_toy_outlined,
-              value: chatGptThroughVpn,
-              onChanged: busy ? null : onChatGptThroughVpnChanged,
-              title: Text(strings.chatGptThroughVpn),
-              subtitle: Text(strings.chatGptThroughVpnHint),
-            ),
-            const SizedBox(height: 12),
-            _ActionGrid(
-              children: [
-                _ActionTile(
-                  onPressed: onEditSplitTunnel,
-                  icon: const Icon(Icons.call_split_outlined),
-                  label: Text(strings.splitTunnelButton(excludedProcessCount)),
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.dns_outlined,
+                value: dnsOnlyThroughVpn,
+                onChanged: busy ? null : onDnsOnlyThroughVpnChanged,
+                title: Text(strings.dnsOnlyThroughVpn),
+                subtitle: Text(strings.dnsOnlyThroughVpnHint),
+              ),
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.code_outlined,
+                value: codexDirect,
+                onChanged: codexDirectSupported ? onCodexDirectChanged : null,
+                title: Text(strings.codexDirect),
+                subtitle: Text(
+                  codexDirectSupported
+                      ? strings.codexDirectHint
+                      : strings.codexDirectTunOnly,
                 ),
-                _ActionTile(
-                  onPressed: onEditVpnOnly,
-                  icon: const Icon(Icons.vpn_lock_outlined),
-                  label: Text(strings.vpnOnlyButton(vpnOnlyProcessCount)),
-                ),
-                _ActionTile(
-                  onPressed: busy ? null : onRepairConnection,
-                  icon: const Icon(Icons.healing_outlined),
-                  label: Text(strings.repairConnection),
-                ),
-                _ActionTile(
-                  onPressed: codexDiagnosticsBusy ? null : onCodexDiagnostics,
-                  icon: codexDiagnosticsBusy
-                      ? const SizedBox.square(
-                          dimension: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.bug_report_outlined),
-                  label: Text(strings.codexDiagnostics),
-                ),
-                _ActionTile(
-                  onPressed: terminalDiagnosticsBusy
-                      ? null
-                      : onTerminalDiagnostics,
-                  icon: terminalDiagnosticsBusy
-                      ? const SizedBox.square(
-                          dimension: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.terminal_outlined),
-                  label: Text(strings.terminalDiagnostics),
-                ),
-                _ActionTile(
-                  onPressed: dnsDiagnosticsBusy ? null : onDnsDiagnostics,
-                  icon: dnsDiagnosticsBusy
-                      ? const SizedBox.square(
-                          dimension: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.dns_outlined),
-                  label: Text(strings.dnsDiagnostics),
-                ),
-                _ActionTile(
-                  onPressed: vpnDiagnosticsBusy ? null : onVpnDiagnostics,
-                  icon: vpnDiagnosticsBusy
-                      ? const SizedBox.square(
-                          dimension: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.network_check_outlined),
-                  label: Text(strings.vpnDiagnostics),
-                ),
-                _ActionTile(
-                  onPressed: checkingUpdate || installingUpdate
-                      ? null
-                      : onCheckUpdate,
-                  icon: checkingUpdate || installingUpdate
-                      ? const SizedBox.square(
-                          dimension: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.system_update_alt),
-                  label: Text(
-                    installingUpdate
-                        ? strings.installingUpdate
-                        : checkingUpdate
-                        ? strings.checkingUpdates
-                        : strings.updates,
+              ),
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.smart_toy_outlined,
+                value: chatGptThroughVpn,
+                onChanged: busy ? null : onChatGptThroughVpnChanged,
+                title: Text(strings.chatGptThroughVpn),
+                subtitle: Text(strings.chatGptThroughVpnHint),
+              ),
+              const SizedBox(height: 12),
+              _ActionGrid(
+                children: [
+                  _ActionTile(
+                    onPressed: onEditSplitTunnel,
+                    icon: const Icon(Icons.call_split_outlined),
+                    label: Text(
+                      strings.splitTunnelButton(excludedProcessCount),
+                    ),
+                  ),
+                  _ActionTile(
+                    onPressed: onEditVpnOnly,
+                    icon: const Icon(Icons.vpn_lock_outlined),
+                    label: Text(strings.vpnOnlyButton(vpnOnlyProcessCount)),
+                  ),
+                ],
+              ),
+            ] else ...[
+              _SettingsSwitchRow(
+                icon: Icons.rocket_launch_outlined,
+                value: autoStart,
+                onChanged: busy ? null : onAutoStartChanged,
+                title: Text(strings.autoStart),
+                subtitle: Text(strings.autoStartHint),
+              ),
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.shield_outlined,
+                value: autoConnect,
+                onChanged: busy ? null : onAutoConnectChanged,
+                title: Text(strings.autoConnect),
+                subtitle: Text(strings.autoConnectHint),
+              ),
+              const SizedBox(height: 12),
+              _ActionGrid(
+                children: [
+                  _ActionTile(
+                    onPressed: busy ? null : onRepairConnection,
+                    icon: const Icon(Icons.healing_outlined),
+                    label: Text(strings.repairConnection),
+                  ),
+                  _ActionTile(
+                    onPressed: codexDiagnosticsBusy ? null : onCodexDiagnostics,
+                    icon: codexDiagnosticsBusy
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.bug_report_outlined),
+                    label: Text(strings.codexDiagnostics),
+                  ),
+                  _ActionTile(
+                    onPressed: terminalDiagnosticsBusy
+                        ? null
+                        : onTerminalDiagnostics,
+                    icon: terminalDiagnosticsBusy
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.terminal_outlined),
+                    label: Text(strings.terminalDiagnostics),
+                  ),
+                  _ActionTile(
+                    onPressed: dnsDiagnosticsBusy ? null : onDnsDiagnostics,
+                    icon: dnsDiagnosticsBusy
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.dns_outlined),
+                    label: Text(strings.dnsDiagnostics),
+                  ),
+                  _ActionTile(
+                    onPressed: vpnDiagnosticsBusy ? null : onVpnDiagnostics,
+                    icon: vpnDiagnosticsBusy
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.network_check_outlined),
+                    label: Text(strings.vpnDiagnostics),
+                  ),
+                  _ActionTile(
+                    onPressed: checkingUpdate || installingUpdate
+                        ? null
+                        : onCheckUpdate,
+                    icon: checkingUpdate || installingUpdate
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.system_update_alt),
+                    label: Text(
+                      installingUpdate
+                          ? strings.installingUpdate
+                          : checkingUpdate
+                          ? strings.checkingUpdates
+                          : strings.updates,
+                    ),
+                  ),
+                  _ActionTile(
+                    onPressed: onOpenReleases,
+                    icon: const Icon(Icons.open_in_new),
+                    label: const Text('GitHub'),
+                  ),
+                ],
+              ),
+              if (updateInfo != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  strings.updateMessage(updateInfo!),
+                  style: TextStyle(
+                    color: updateInfo!.available
+                        ? const Color(0xFF7DEBFF)
+                        : _mutedGold,
                   ),
                 ),
-                _ActionTile(
-                  onPressed: onOpenReleases,
-                  icon: const Icon(Icons.open_in_new),
-                  label: const Text('GitHub'),
-                ),
               ],
-            ),
-            if (updateInfo != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                strings.updateMessage(updateInfo!),
-                style: TextStyle(
-                  color: updateInfo!.available
-                      ? const Color(0xFF7DEBFF)
-                      : _mutedGold,
-                ),
-              ),
             ],
           ],
         ),

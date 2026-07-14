@@ -5,7 +5,7 @@ class RuntimeLogClassifier {
 
   static bool isUserFacingNoise(String message) {
     final log = _normalize(message);
-    return _isTunConnectionCloseNoise(log) || _isDirectRouteTimeoutNoise(log);
+    return _isTunConnectionCloseNoise(log) || _isDirectRouteEndpointNoise(log);
   }
 
   static bool isDiagnosticNoise(String message) {
@@ -27,9 +27,13 @@ class RuntimeLogClassifier {
         log.contains('forcibly closed by the remote host');
   }
 
-  static bool _isDirectRouteTimeoutNoise(String log) {
-    return log.contains('using outbound/direct[direct]') &&
-        log.contains('i/o timeout');
+  static bool _isDirectRouteEndpointNoise(String log) {
+    if (!log.contains('using outbound/direct[direct]')) {
+      return false;
+    }
+    return log.contains('i/o timeout') ||
+        log.contains('actively refused it') ||
+        log.contains('connection refused');
   }
 
   static bool _isHealthProbeDnsNoise(String log) {

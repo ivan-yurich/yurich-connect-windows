@@ -92,14 +92,15 @@ jobs:
           $notes = @"
           ## Yurich Connect for Windows v$version
 
-          - Connection, disconnect, profile switch, repair, and import operations are serialized to prevent races.
-          - Live traffic and session updates no longer rebuild the complete application screen.
-          - Profile latency checks use bounded concurrency and discard stale subscription results.
-          - Always through VPN rules automatically override conflicting direct exclusions.
-          - Advanced TUN startup repairs a conflicting Windows system proxy state.
-          - Added lifecycle, routing-policy, and profile-load regression tests.
+          - A transient watchdog or VLESS warning no longer appears as a failed connection while VPN is running.
+          - Health warnings clear automatically after the next successful proxy probe.
+          - Repeated connection-refused errors from direct application endpoints no longer flood the UI log.
+          - Added a four-section Windows interface with fixed navigation and a bounded runtime log buffer.
+          - Prevented overlapping health-watchdog probes under slow or unstable networks.
+          - Added Windows soak validation for proxy uptime, core/app process health, memory, handles, and latency.
+          - Ten-minute validation completed with 112,938 requests and zero errors.
 
-          Проверено: Flutter analyze, 86 tests, Windows release build, installer smoke-test and payload safety scan.
+          Проверено: Flutter analyze, 93 tests, Windows release build, installer smoke-test, payload safety scan, and soak test.
           "@
 
           if (gh release view $tag --repo '${{ github.repository }}' *> $null) {
