@@ -14,6 +14,12 @@ Stable Proxy Mode не требует TUN, Wintun и прав администр
 
 Advanced TUN Mode включайте только если нужен полный системный туннель, split routing или Wintun. Этот режим может требовать права администратора.
 
+Чтобы `ssh.exe`, Git, PowerShell, Windows Terminal, PuTTY и WinSCP шли через VPN, включите Advanced TUN Mode, затем переключатель **SSH и терминал через VPN** и переподключитесь. В Stable Proxy Mode OpenSSH идёт напрямую, если отдельно не настроен SOCKS `127.0.0.1:20809`.
+
+Автостарт создаётся через Планировщик заданий при входе пользователя без задержки и запускает Yurich Connect скрытым в трее. UAC нужен только при включении или отключении раннего автостарта. Если UAC отменён, приложение сохраняет резервный автостарт через `HKCU\\Run`.
+
+Постоянный firewall kill switch в этой версии не включён. Advanced TUN использует строгую маршрутизацию во время работы ядра; полноценная защита после аварийного завершения будет добавляться через отдельную Windows-службу с аварийным восстановлением сети.
+
 ## Portable
 
 1. Скачайте `YurichConnect_Windows_Portable.zip`.
@@ -28,7 +34,9 @@ Advanced TUN Mode включайте только если нужен полны
 
 В приложение можно добавить одиночный профиль или Yurich ID подписку с несколькими серверами. После импорта Yurich Connect покажет профили списком и сможет проверить ping серверов.
 
-Поддерживаются VLESS Reality, VLESS TLS, VLESS XHTTP через Xray-core в Stable Proxy Mode, NaiveProxy, Hysteria 1/2, raw sing-box JSON и HTML-страницы панели с raw-ссылками внутри.
+Поддерживаются VLESS Reality, VLESS TLS, VLESS XHTTP через встроенный Xray-core в Stable Proxy Mode, NaiveProxy, Hysteria 1/2, raw sing-box JSON и HTML-страницы панели с raw-ссылками внутри.
+
+XHTTP-профили запускаются только в Stable Proxy Mode. Перед переключением Yurich Connect проверяет Xray-конфиг; `host`, `path`, `mode`, `extra` и SNI берутся из подписки без подмены. Если включён Advanced TUN Mode, приложение попросит его отключить и не остановит текущее рабочее соединение.
 
 ## Логи и диагностика
 

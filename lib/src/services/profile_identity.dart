@@ -6,8 +6,24 @@ class ProfileIdentity {
   const ProfileIdentity._();
 
   static bool isUnsupportedXhttp(VpnProfile profile) {
-    if (profile.coreBackend == VpnCoreBackend.xray) {
-      return true;
+    if (profile.kind != VpnProfileKind.singBoxConfig) {
+      return false;
+    }
+    final rawConfig = profile.rawConfig?.trim();
+    if (rawConfig == null || rawConfig.isEmpty) {
+      return false;
+    }
+    try {
+      return _containsXhttp(jsonDecode(rawConfig));
+    } on FormatException {
+      return false;
+    }
+  }
+
+  static bool isXhttpProfile(VpnProfile profile) {
+    if (profile.kind != VpnProfileKind.vlessReality &&
+        profile.kind != VpnProfileKind.vlessTls) {
+      return false;
     }
     final transport = profile.outbound?['transport'];
     if (transport is Map) {
@@ -21,15 +37,7 @@ class ProfileIdentity {
     if (type == 'xhttp' || type == 'splithttp') {
       return true;
     }
-    final rawConfig = profile.rawConfig?.trim();
-    if (rawConfig == null || rawConfig.isEmpty) {
-      return false;
-    }
-    try {
-      return _containsUnsupportedXhttp(jsonDecode(rawConfig));
-    } on FormatException {
-      return false;
-    }
+    return false;
   }
 
   static String connectionKey(VpnProfile profile) {
@@ -147,7 +155,7 @@ class ProfileIdentity {
     return value;
   }
 
-  static bool _containsUnsupportedXhttp(Object? value) {
+  static bool _containsXhttp(Object? value) {
     if (value is Map) {
       for (final entry in value.entries) {
         final key = '${entry.key}'.toLowerCase();
@@ -156,12 +164,12 @@ class ProfileIdentity {
             (text == 'xhttp' || text == 'splithttp')) {
           return true;
         }
-        if (_containsUnsupportedXhttp(entry.value)) {
+        if (_containsXhttp(entry.value)) {
           return true;
         }
       }
     } else if (value is List) {
-      return value.any(_containsUnsupportedXhttp);
+      return value.any(_containsXhttp);
     }
     return false;
   }

@@ -97,6 +97,7 @@ class SingBoxConfigBuilder {
     bool codexDirect = false,
     bool chatGptThroughVpn = true,
     bool developerMode = false,
+    bool terminalThroughVpn = false,
     bool dnsOnlyThroughVpn = false,
     bool windowsTunMode = false,
   }) {
@@ -146,7 +147,11 @@ class SingBoxConfigBuilder {
         target == SingBoxConfigTarget.windows && developerMode
         ? _normalizeProcessNames(developerDirectProcesses)
         : const <String>[];
-    final forcedProxyProcesses = _normalizeProcessNames(vpnOnlyProcesses);
+    final forcedProxyProcesses = _normalizeProcessNames([
+      ...vpnOnlyProcesses,
+      if (target == SingBoxConfigTarget.windows && terminalThroughVpn)
+        ...developerDirectProcesses,
+    ]);
     final forcedProxyLookup = forcedProxyProcesses
         .map((process) => process.toLowerCase())
         .toSet();
@@ -198,6 +203,8 @@ class SingBoxConfigBuilder {
             {'ip_is_private': true, 'outbound': 'direct'},
             if (excludedProcesses.isNotEmpty)
               {'process_name': excludedProcesses, 'outbound': 'direct'},
+            if (forcedProxyProcesses.isNotEmpty)
+              {'process_name': forcedProxyProcesses, 'outbound': 'proxy'},
           ],
           if (codexWebDomainsDirect)
             {
@@ -219,8 +226,6 @@ class SingBoxConfigBuilder {
             {'ip_is_private': true, 'outbound': 'direct'},
           if (target == SingBoxConfigTarget.windows) ...[
             {'ip_version': 6, 'action': 'reject'},
-            if (forcedProxyProcesses.isNotEmpty)
-              {'process_name': forcedProxyProcesses, 'outbound': 'proxy'},
             {'domain_suffix': russianDirectDomains, 'outbound': 'direct'},
             if (useWindowsTun)
               {'rule_set': russianGeoIpRuleSet, 'outbound': 'direct'},

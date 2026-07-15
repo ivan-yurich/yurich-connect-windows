@@ -127,7 +127,7 @@ class XrayConfigBuilder {
 
     switch (type) {
       case 'xhttp':
-        settings['xhttpSettings'] = _xhttpSettings(transport, tls);
+        settings['xhttpSettings'] = _xhttpSettings(transport);
         break;
       case 'grpc':
         settings['grpcSettings'] = {
@@ -195,21 +195,19 @@ class XrayConfigBuilder {
     };
   }
 
-  Map<String, dynamic> _xhttpSettings(
-    Map<String, dynamic>? transport,
-    Map<String, dynamic>? tls,
-  ) {
-    final fallbackHost = '${tls?['server_name'] ?? ''}'.trim();
-    return {
-      if ('${transport?['host'] ?? fallbackHost}'.trim().isNotEmpty)
-        'host': '${transport?['host'] ?? fallbackHost}'.trim(),
-      if ('${transport?['path'] ?? ''}'.trim().isNotEmpty)
-        'path': transport?['path'],
-      if ('${transport?['mode'] ?? ''}'.trim().isNotEmpty)
-        'mode': transport?['mode'],
-      if ('${transport?['extra'] ?? ''}'.trim().isNotEmpty)
-        'extra': transport?['extra'],
-    };
+  Map<String, dynamic> _xhttpSettings(Map<String, dynamic>? transport) {
+    final host = VlessProfileTools.normalizeXhttpHost(transport?['host']);
+    final path = VlessProfileTools.normalizeXhttpPath(transport?['path']);
+    final mode = VlessProfileTools.normalizeXhttpMode(transport?['mode']);
+    final extra = VlessProfileTools.normalizeXhttpExtra(transport?['extra']);
+    final settings = <String, dynamic>{'path': path, 'mode': mode};
+    if (host != null) {
+      settings['host'] = host;
+    }
+    if (extra != null) {
+      settings['extra'] = extra;
+    }
+    return settings;
   }
 
   static const _privateCidrs = [

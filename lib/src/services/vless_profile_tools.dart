@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../models/vpn_profile.dart';
 
 class VlessProfileTools {
@@ -10,10 +12,17 @@ class VlessProfileTools {
     'grpc',
     'http',
     'httpupgrade',
+    'xhttp',
+  };
+  static const supportedXhttpModes = {
+    'auto',
+    'packet-up',
+    'stream-up',
+    'stream-one',
   };
   static const supportedPacketEncodings = {'packetaddr', 'xudp'};
-  static const unsupportedXhttpMessage =
-      'VLESS XHTTP отключён в Yurich Connect Windows из-за нестабильности. Используй VLESS TCP/WS/gRPC/HTTP/HTTPUpgrade.';
+  static const xhttpStableProxyOnlyMessage =
+      'VLESS XHTTP работает через Xray-core только в Stable Proxy Mode. Отключи Advanced TUN Mode и повтори подключение.';
 
   static bool isVlessKind(VpnProfileKind kind) =>
       kind == VpnProfileKind.vlessReality || kind == VpnProfileKind.vlessTls;
@@ -47,8 +56,8 @@ class VlessProfileTools {
     if (type == 'websocket') {
       return 'ws';
     }
-    if (type == 'splithttp' || type == 'xhttp') {
-      throw StateError(unsupportedXhttpMessage);
+    if (type == 'splithttp') {
+      return 'xhttp';
     }
     if (!supportedTransports.contains(type)) {
       throw StateError('VLESS transport "$type" не поддерживается.');
@@ -86,12 +95,16 @@ class VlessProfileTools {
       'grpc' => 'gRPC',
       'http' => 'HTTP/H2',
       'httpupgrade' => 'HTTPUpgrade',
+      'xhttp' => 'XHTTP',
       _ => 'TCP',
     };
   }
 
   static bool requiresXrayBackend(VpnProfile profile) {
-    return false;
+    if (!isVlessProfile(profile)) {
+      return false;
+    }
+    return safeTransportType(profile) == 'xhttp';
   }
 
   static bool supportsSingBoxBackend(VpnProfile profile) {
@@ -125,6 +138,70 @@ class VlessProfileTools {
       );
     }
     return encoding;
+  }
+
+  static String normalizeXhttpMode(Object? value) {
+    final mode = '${value ?? ''}'.trim().toLowerCase();
+    final normalized = mode.isEmpty ? 'auto' : mode;
+    if (!supportedXhttpModes.contains(normalized)) {
+      throw StateError(
+        'XHTTP mode "$normalized" не поддерживается. Доступны auto, packet-up, stream-up и stream-one.',
+      );
+    }
+    return normalized;
+  }
+
+  static String normalizeXhttpPath(Object? value) {
+    var path = '${value ?? ''}'.trim();
+    if (path.isEmpty) {
+      return '/';
+    }
+    if (path.length > 2048 || path.contains(RegExp(r'[\x00\r\n]'))) {
+      throw StateError('XHTTP path содержит недопустимые символы.');
+    }
+    if (!path.startsWith('/')) {
+      path = '/$path';
+    }
+    return path;
+  }
+
+  static String? normalizeXhttpHost(Object? value) {
+    final host = '${value ?? ''}'.trim();
+    if (host.isEmpty) {
+      return null;
+    }
+    if (host.length > 253 || host.contains(RegExp(r'[\x00\r\n\s/]'))) {
+      throw StateError('XHTTP host содержит недопустимые символы.');
+    }
+    return host;
+  }
+
+  static Map<String, dynamic>? normalizeXhttpExtra(Object? value) {
+    if (value == null || (value is String && value.trim().isEmpty)) {
+      return null;
+    }
+    Object? decoded = value;
+    if (value is String) {
+      try {
+        decoded = jsonDecode(value);
+      } on FormatException {
+        throw StateError('XHTTP extra должен быть корректным JSON-объектом.');
+      }
+    }
+    if (decoded is! Map) {
+      throw StateError('XHTTP extra должен быть JSON-объектом.');
+    }
+    try {
+      final encoded = jsonEncode(decoded);
+      if (utf8.encode(encoded).length > 64 * 1024) {
+        throw StateError('XHTTP extra превышает безопасный лимит 64 КБ.');
+      }
+      return (jsonDecode(encoded) as Map).cast<String, dynamic>();
+    } on StateError {
+      rethrow;
+    } on Object {
+      throw StateError('XHTTP extra содержит неподдерживаемые значения.');
+    }
   }
 
   static String configSummary(VpnProfile profile) {

@@ -65,6 +65,9 @@ class WindowsIntegrationService {
     if (!Platform.isWindows) {
       return false;
     }
+    if (await isEarlyAutoStartEnabled()) {
+      return true;
+    }
     final command = await _readAutoStartRunValue();
     if (command == null || command.isEmpty) {
       return false;
@@ -74,12 +77,23 @@ class WindowsIntegrationService {
     ).contains(_normalizedAutoStartCommand(Platform.resolvedExecutable));
   }
 
+  Future<bool> isEarlyAutoStartEnabled() async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+    final taskXml = await _queryTaskXml(_taskName);
+    return taskXml != null && isAutoStartTaskHealthyXml(taskXml);
+  }
+
   Future<void> repairAutoStartIfNeeded() async {
     if (!Platform.isWindows) {
       return;
     }
 
     final currentXml = await _queryTaskXml(_taskName);
+    if (currentXml != null && isAutoStartTaskHealthyXml(currentXml)) {
+      return;
+    }
     final legacyXml = await _queryTaskXml(_legacyTaskName);
     final hasLegacyTask =
         (currentXml != null && isAutoStartTaskInstalledXml(currentXml)) ||
@@ -130,23 +144,31 @@ try {
     return result.exitCode == 0;
   }
 
-  Future<void> setAutoStart(
+  Future<bool> setAutoStart(
     bool enabled, {
     bool requestElevation = true,
   }) async {
     if (!Platform.isWindows) {
-      return;
+      return false;
     }
 
     if (!enabled) {
       await _deleteAutoStartRunValue();
-      await _deleteLegacyStartupTasks();
-      return;
+      await _deleteStartupTasks(requestElevation: requestElevation);
+      return false;
     }
 
     final executable = Platform.resolvedExecutable;
     await _writeAutoStartRunValue(executable);
-    await _deleteLegacyStartupTasks();
+    final taskInstalled = await _registerEarlyAutoStartTask(
+      executable,
+      requestElevation: requestElevation,
+    );
+    if (taskInstalled) {
+      await _deleteAutoStartRunValue();
+      await _deleteLegacyStartupTaskOnly();
+    }
+    return taskInstalled;
   }
 
   Future<bool> isSystemProxyEnabled() async {
@@ -919,7 +941,7 @@ if (\$null -ne \$value) { Write-Output \$value }
   Future<void> _writeAutoStartRunValue(String executable) async {
     final key = _quotePowerShell(_runKeyPath);
     final name = _quotePowerShell(_taskName);
-    final value = _quotePowerShell('"$executable"');
+    final value = _quotePowerShell('"$executable" --autostart');
     final script =
         '''
 New-Item -Path $key -Force | Out-Null
@@ -954,19 +976,116 @@ Remove-ItemProperty -Path ${_quotePowerShell(_runKeyPath)} -Name ${_quotePowerSh
     }
   }
 
-  Future<void> _deleteLegacyStartupTasks() async {
-    for (final taskName in const [_taskName, _legacyTaskName]) {
-      try {
-        await Process.run('schtasks', [
-          '/Delete',
-          '/TN',
-          taskName,
-          '/F',
-        ]).timeout(const Duration(seconds: 8));
-      } on Object {
-        // Old elevated task removal is best-effort from a regular process.
-      }
+  Future<bool> _registerEarlyAutoStartTask(
+    String executable, {
+    required bool requestElevation,
+  }) async {
+    final taskName = _quotePowerShell(_taskName);
+    final command = _quotePowerShell(executable);
+    final workingDirectory = _quotePowerShell(File(executable).parent.path);
+    final script =
+        '''
+\$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+\$action = New-ScheduledTaskAction -Execute $command -Argument '--autostart' -WorkingDirectory $workingDirectory
+\$trigger = New-ScheduledTaskTrigger -AtLogOn -User \$currentUser
+\$principal = New-ScheduledTaskPrincipal -UserId \$currentUser -LogonType Interactive -RunLevel Highest
+\$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName $taskName -Action \$action -Trigger \$trigger -Principal \$principal -Settings \$settings -Description 'Early startup for Yurich Connect' -Force | Out-Null
+''';
+    final elevated = await _isCurrentProcessElevated();
+    final result = requestElevation && !elevated
+        ? await _runPowerShellElevated(
+            script,
+            timeout: const Duration(seconds: 35),
+          )
+        : await _runPowerShell(script, timeout: const Duration(seconds: 20));
+    if (result.exitCode != 0) {
+      return false;
     }
+    final xml = await _queryTaskXml(_taskName);
+    return xml != null &&
+        isAutoStartTaskHealthyXml(xml) &&
+        _normalizedAutoStartCommand(
+          xml,
+        ).contains(_normalizedAutoStartCommand(executable));
+  }
+
+  Future<void> _deleteStartupTasks({required bool requestElevation}) async {
+    final names = const [
+      _taskName,
+      _legacyTaskName,
+    ].map(_quotePowerShell).join(', ');
+    final script =
+        '''
+foreach (\$taskName in @($names)) {
+  Unregister-ScheduledTask -TaskName \$taskName -Confirm:\$false -ErrorAction SilentlyContinue
+}
+''';
+    final elevated = await _isCurrentProcessElevated();
+    final result = requestElevation && !elevated
+        ? await _runPowerShellElevated(
+            script,
+            timeout: const Duration(seconds: 30),
+          )
+        : await _runPowerShell(script, timeout: const Duration(seconds: 15));
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty ? 'Could not remove Windows startup task.' : error,
+      );
+    }
+  }
+
+  Future<void> _deleteLegacyStartupTaskOnly() async {
+    try {
+      await Process.run('schtasks', [
+        '/Delete',
+        '/TN',
+        _legacyTaskName,
+        '/F',
+      ]).timeout(const Duration(seconds: 8));
+    } on Object {
+      // An obsolete elevated task can be removed on the next elevated change.
+    }
+  }
+
+  Future<ProcessResult> _runPowerShellElevated(
+    String script, {
+    Duration timeout = const Duration(seconds: 35),
+  }) {
+    final wrapped =
+        '''
+\$ErrorActionPreference = 'Stop'
+try {
+$script
+  exit 0
+} catch {
+  \$message = \$_.Exception.Message
+  if ([string]::IsNullOrWhiteSpace(\$message)) {
+    \$message = \$_.Exception.ToString()
+  }
+  Write-Output \$message
+  exit 1
+}
+''';
+    final utf16Le = <int>[];
+    for (final codeUnit in wrapped.codeUnits) {
+      utf16Le
+        ..add(codeUnit & 0xff)
+        ..add((codeUnit >> 8) & 0xff);
+    }
+    final encoded = base64Encode(utf16Le);
+    final encodedLiteral = _quotePowerShell(encoded);
+    return Process.run('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '''
+\$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedLiteral) -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+exit \$process.ExitCode
+''',
+    ]).timeout(timeout);
   }
 
   static String _normalizedAutoStartCommand(String value) {
@@ -1016,7 +1135,29 @@ public static class YurichWinInet {
   }
 
   static bool isAutoStartTaskHealthyXml(String xml) {
-    return false;
+    final normalized = xml.toLowerCase();
+    final delayMatch = RegExp(
+      r'<delay>\s*([^<]+)\s*</delay>',
+    ).firstMatch(normalized);
+    final hasImmediateTrigger =
+        normalized.contains('<logontrigger>') &&
+        (delayMatch == null || delayMatch.group(1)?.trim() == 'pt0s');
+    return hasImmediateTrigger &&
+        normalized.contains('<logontype>interactivetoken</logontype>') &&
+        normalized.contains('<runlevel>highestavailable</runlevel>') &&
+        normalized.contains('<command>') &&
+        normalized.contains('<workingdirectory>') &&
+        normalized.contains('<arguments>--autostart</arguments>') &&
+        normalized.contains(
+          '<disallowstartifonbatteries>false</disallowstartifonbatteries>',
+        ) &&
+        normalized.contains(
+          '<stopifgoingonbatteries>false</stopifgoingonbatteries>',
+        ) &&
+        normalized.contains('<startwhenavailable>true</startwhenavailable>') &&
+        normalized.contains(
+          '<multipleinstancespolicy>ignorenew</multipleinstancespolicy>',
+        );
   }
 
   static int compareReleaseVersions(String left, String right) {

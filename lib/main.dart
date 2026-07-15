@@ -7,8 +7,11 @@ import 'package:window_manager/window_manager.dart';
 import 'src/app.dart';
 import 'src/branding.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
+  final startHidden =
+      Platform.isWindows &&
+      arguments.any((argument) => argument.toLowerCase() == '--autostart');
   if (Platform.isWindows) {
     await windowManager.ensureInitialized();
   }
@@ -17,12 +20,12 @@ Future<void> main() async {
 
   if (Platform.isWindows) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_showWindowsWindow());
+      unawaited(_prepareWindowsWindow(startHidden: startHidden));
     });
   }
 }
 
-Future<void> _showWindowsWindow() async {
+Future<void> _prepareWindowsWindow({required bool startHidden}) async {
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
       size: Size(430, 760),
@@ -31,8 +34,12 @@ Future<void> _showWindowsWindow() async {
       title: YurichBranding.appName,
     ),
     () async {
-      await windowManager.show();
-      await windowManager.focus();
+      if (startHidden) {
+        await windowManager.hide();
+      } else {
+        await windowManager.show();
+        await windowManager.focus();
+      }
     },
   );
   await windowManager.setPreventClose(true);

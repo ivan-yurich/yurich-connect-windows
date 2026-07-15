@@ -3,6 +3,43 @@ import 'package:yurich_connect_windows/src/services/windows_integration_service.
 
 void main() {
   group('WindowsIntegrationService legacy auto-start task XML', () {
+    test('accepts immediate elevated interactive tray startup task', () {
+      const xml = r'''
+<Task>
+  <Principals>
+    <Principal>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <LogonTrigger>
+      <Delay>PT0S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Actions>
+    <Exec>
+      <Command>C:\Program Files\Yurich Connect\YurichConnect.exe</Command>
+      <Arguments>--autostart</Arguments>
+      <WorkingDirectory>C:\Program Files\Yurich Connect</WorkingDirectory>
+    </Exec>
+  </Actions>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+  </Settings>
+</Task>
+''';
+
+      expect(
+        WindowsIntegrationService.isAutoStartTaskInstalledXml(xml),
+        isTrue,
+      );
+      expect(WindowsIntegrationService.isAutoStartTaskHealthyXml(xml), isTrue);
+    });
+
     test('detects elevated immediate task as installed legacy startup', () {
       const xml = r'''
 <Task>

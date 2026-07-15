@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.0.100 - 2026-07-15
+
+### Added
+
+- Added an explicit **SSH and terminal through VPN** switch for Advanced TUN Mode.
+- Added forced VPN process routing for OpenSSH, SCP/SFTP, Git, GitHub CLI, PowerShell, CMD, Windows Terminal, PuTTY, and WinSCP.
+- Added immediate elevated Windows logon startup with hidden tray launch and a safe `HKCU\\Run` fallback.
+
+### Fixed
+
+- Made terminal-through-VPN and Developer Mode mutually exclusive to prevent conflicting process rules.
+- Disabled terminal-through-VPN automatically when leaving Advanced TUN Mode.
+- Added persistent diagnostics for terminal routing and early startup state.
+
+### Security
+
+- Kept Advanced TUN strict routing and documented the signed Windows Service/WFP requirement before adding a persistent kill switch, avoiding unsafe global firewall lockouts.
+
+### Tests
+
+- Added forced SSH routing, terminal preference, and healthy scheduled-task XML coverage.
+
+## 1.0.99 - 2026-07-14
+
+### Added
+
+- Restored VLESS XHTTP as a dedicated Windows profile transport through the bundled Xray-core in Stable Proxy Mode.
+- Added an XHTTP profile filter and explicit XHTTP labels in the profile list, active profile card, and diagnostics.
+
+### Fixed
+
+- Preserved XHTTP `host`, `path`, `mode`, and structured `extra` from VLESS links and Xray JSON subscriptions.
+- Preserved the subscription SNI/Reality server name instead of deriving it from the XHTTP host.
+- Added strict XHTTP mode, path, host, JSON size, and core-backend validation before replacing an active connection.
+- Stopped misclassifying full Xray JSON configurations as raw sing-box configurations.
+
+### Tests
+
+- Added importer, profile migration, config generation, invalid-mode, and bundled Xray config-check coverage for XHTTP.
+
 ## 1.0.98 - 2026-07-13
 
 ### Fixed

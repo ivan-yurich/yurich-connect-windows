@@ -44,7 +44,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.98';
+const _appVersion = '1.0.100';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 3;
@@ -167,7 +167,7 @@ enum _AppLanguage {
   }
 }
 
-enum _ProfileFilter { all, vless, naive, hysteria }
+enum _ProfileFilter { all, vless, xhttp, naive, hysteria }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -216,10 +216,12 @@ class _HomeScreenState extends State<HomeScreen>
   bool _checkingUpdate = false;
   bool _installingUpdate = false;
   bool _autoStart = false;
+  bool _earlyAutoStart = false;
   bool _autoConnect = false;
   bool _codexDirect = ProfileStore.defaultCodexDirect;
   bool _chatGptThroughVpn = ProfileStore.defaultChatGptThroughVpn;
   bool _developerMode = ProfileStore.defaultDeveloperMode;
+  bool _terminalThroughVpn = ProfileStore.defaultTerminalThroughVpn;
   bool _dnsOnlyThroughVpn = ProfileStore.defaultDnsOnlyThroughVpn;
   WindowsConnectionMode _windowsConnectionMode =
       ProfileStore.defaultWindowsConnectionMode;
@@ -507,9 +509,19 @@ class _HomeScreenState extends State<HomeScreen>
     final autoConnect = await _store.loadAutoConnect();
     final codexDirect = await _store.loadCodexDirect();
     final chatGptThroughVpn = await _store.loadChatGptThroughVpn();
-    final developerMode = await _store.loadDeveloperMode();
+    var developerMode = await _store.loadDeveloperMode();
+    var terminalThroughVpn = await _store.loadTerminalThroughVpn();
     final dnsOnlyThroughVpn = await _store.loadDnsOnlyThroughVpn();
     final windowsConnectionMode = await _store.loadWindowsConnectionMode();
+    if (windowsConnectionMode != WindowsConnectionMode.advancedTun &&
+        terminalThroughVpn) {
+      terminalThroughVpn = false;
+      await _store.saveTerminalThroughVpn(false);
+    }
+    if (terminalThroughVpn && developerMode) {
+      developerMode = false;
+      await _store.saveDeveloperMode(false);
+    }
     var splitTunnelExcludedProcesses = await _store
         .loadSplitTunnelExcludedProcesses();
     var vpnOnlyProcesses = await _store.loadVpnOnlyProcesses();
@@ -546,6 +558,9 @@ class _HomeScreenState extends State<HomeScreen>
         : true;
     final autoStart = Platform.isWindows
         ? await _windowsIntegration.isAutoStartEnabled()
+        : false;
+    final earlyAutoStart = Platform.isWindows
+        ? await _windowsIntegration.isEarlyAutoStartEnabled()
         : false;
     var systemProxyEnabled = Platform.isWindows
         ? await _windowsIntegration.isSystemProxyEnabled()
@@ -591,10 +606,12 @@ class _HomeScreenState extends State<HomeScreen>
       _codexDirect = codexDirect;
       _chatGptThroughVpn = chatGptThroughVpn;
       _developerMode = developerMode;
+      _terminalThroughVpn = terminalThroughVpn;
       _dnsOnlyThroughVpn = dnsOnlyThroughVpn;
       _windowsConnectionMode = windowsConnectionMode;
       _systemProxyEnabled = systemProxyEnabled;
       _autoStart = autoStart;
+      _earlyAutoStart = earlyAutoStart;
       _isWindowsAdmin = isWindowsAdmin;
       _splitTunnelExcludedProcesses = splitTunnelExcludedProcesses;
       _vpnOnlyProcesses = vpnOnlyProcesses;
@@ -1857,7 +1874,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _validateProfileForStart(VpnProfile profile) {
     if (ProfileIdentity.isUnsupportedXhttp(profile)) {
-      throw StateError(VlessProfileTools.unsupportedXhttpMessage);
+      throw StateError(
+        'Raw sing-box JSON с XHTTP не поддерживается. Импортируй VLESS XHTTP ссылку или Xray JSON.',
+      );
     }
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig?.trim();
@@ -1901,7 +1920,19 @@ class _HomeScreenState extends State<HomeScreen>
         VlessProfileTools.normalizePacketEncoding(
           '${outbound['packet_encoding'] ?? ''}',
         );
-        VlessProfileTools.transportTypeFromOutbound(outbound);
+        final transport = VlessProfileTools.transportTypeFromOutbound(outbound);
+        if (transport == 'xhttp') {
+          final transportOptions = (outbound['transport'] as Map?)
+              ?.cast<String, dynamic>();
+          VlessProfileTools.normalizeXhttpHost(transportOptions?['host']);
+          VlessProfileTools.normalizeXhttpPath(transportOptions?['path']);
+          VlessProfileTools.normalizeXhttpMode(transportOptions?['mode']);
+          VlessProfileTools.normalizeXhttpExtra(transportOptions?['extra']);
+          if (_vpnEngine.configTarget == SingBoxConfigTarget.windows &&
+              _advancedTunMode) {
+            throw StateError(VlessProfileTools.xhttpStableProxyOnlyMessage);
+          }
+        }
         final tls = (outbound['tls'] as Map?)?.cast<String, dynamic>();
         if (profile.kind == VpnProfileKind.vlessReality) {
           final reality = (tls?['reality'] as Map?)?.cast<String, dynamic>();
@@ -1967,6 +1998,7 @@ class _HomeScreenState extends State<HomeScreen>
       codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
       chatGptThroughVpn: _chatGptThroughVpn,
       developerMode: _developerMode,
+      terminalThroughVpn: _terminalThroughVpn && _advancedTunMode,
       dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
       windowsTunMode: _advancedTunMode,
     );
@@ -3178,18 +3210,53 @@ if ($null -ne $match) { 'true' } else { 'false' }
     if (!Platform.isWindows) {
       return;
     }
+    if (value && _terminalThroughVpn) {
+      await _store.saveTerminalThroughVpn(false);
+    }
     await _store.saveDeveloperMode(value);
     if (!mounted) {
       return;
     }
     setState(() {
       _developerMode = value;
+      if (value) {
+        _terminalThroughVpn = false;
+      }
       _message = _connected ? s.reconnectToApply : s.settingsSaved;
     });
     _queueLog(
       value
           ? 'Developer mode enabled: SSH, Git, GitHub CLI, PowerShell, CMD, Windows Terminal and common SSH clients bypass regular VPN routing where Windows process rules are available.'
           : 'Developer mode disabled: terminal, SSH and Git follow regular VPN routing rules.',
+    );
+  }
+
+  Future<void> _setTerminalThroughVpn(bool value) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    if (value && !_advancedTunMode) {
+      _showSnack(s.terminalThroughVpnTunOnly);
+      return;
+    }
+    if (value && _developerMode) {
+      await _store.saveDeveloperMode(false);
+    }
+    await _store.saveTerminalThroughVpn(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _terminalThroughVpn = value;
+      if (value) {
+        _developerMode = false;
+      }
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      value
+          ? 'Terminal through VPN enabled: SSH, SCP, SFTP, Git, GitHub CLI, PowerShell, CMD and Windows Terminal are forced through the proxy in Advanced TUN Mode.'
+          : 'Terminal through VPN disabled: terminal tools follow the remaining routing rules.',
     );
   }
 
@@ -3227,11 +3294,17 @@ if ($null -ne $match) { 'true' } else { 'false' }
         ? WindowsConnectionMode.advancedTun
         : WindowsConnectionMode.stableProxy;
     await _store.saveWindowsConnectionMode(mode);
+    if (!value && _terminalThroughVpn) {
+      await _store.saveTerminalThroughVpn(false);
+    }
     if (!mounted) {
       return;
     }
     setState(() {
       _windowsConnectionMode = mode;
+      if (!value) {
+        _terminalThroughVpn = false;
+      }
       _message = _connected ? s.reconnectToApply : s.settingsSaved;
       if (!value && _status == YurichConnectStatus.adminRequired) {
         _status = YurichConnectStatus.stopped;
@@ -3286,19 +3359,29 @@ if ($null -ne $match) { 'true' } else { 'false' }
     }
     setState(() => _windowsSettingsBusy = true);
     try {
-      await _windowsIntegration.setAutoStart(value);
+      final earlyStart = await _windowsIntegration.setAutoStart(value);
       final enabled = await _windowsIntegration.isAutoStartEnabled();
       if (!mounted) {
         return;
       }
       setState(() {
         _autoStart = enabled;
-        _message = enabled ? s.autoStartEnabled : s.autoStartDisabled;
+        _earlyAutoStart = enabled && earlyStart;
+        _message = enabled
+            ? (earlyStart ? s.autoStartEnabled : s.autoStartFallbackEnabled)
+            : s.autoStartDisabled;
       });
+      if (enabled && !earlyStart) {
+        _showSnack(s.autoStartFallbackEnabled);
+      }
     } on Object catch (e) {
       final enabled = await _windowsIntegration.isAutoStartEnabled();
+      final earlyStart = await _windowsIntegration.isEarlyAutoStartEnabled();
       if (mounted) {
-        setState(() => _autoStart = enabled);
+        setState(() {
+          _autoStart = enabled;
+          _earlyAutoStart = earlyStart;
+        });
         _showSnack('${s.autoStartFailed}: ${_redactSensitive('$e')}');
       }
     } finally {
@@ -3359,14 +3442,18 @@ if ($null -ne $match) { 'true' } else { 'false' }
     setState(() => _terminalDiagnosticsBusy = true);
     final lines = <String>[
       'Terminal diagnostics started. developer_mode=$_developerMode, '
+          'terminal_through_vpn=$_terminalThroughVpn, '
           'dns_only_through_vpn=$_dnsOnlyThroughVpn, advanced_tun=$_advancedTunMode, '
           'system_proxy=$_systemProxyEnabled, status=$_status.',
-      _developerMode
-          ? 'Routing expectation: SSH/Git/terminal processes are configured DIRECT in Yurich Connect process rules.'
-          : 'Routing expectation: SSH/Git/terminal processes follow regular VPN routing rules.',
+      if (_terminalThroughVpn && _advancedTunMode)
+        'Routing expectation: SSH/Git/terminal processes are forced through VPN by Advanced TUN process rules.'
+      else if (_developerMode)
+        'Routing expectation: SSH/Git/terminal processes are configured DIRECT in Yurich Connect process rules.'
+      else
+        'Routing expectation: SSH/Git/terminal processes follow regular routing rules.',
       _advancedTunMode
-          ? 'Advanced TUN Mode: process rules can steer terminal tools directly.'
-          : 'Stable Proxy Mode: terminal tools go direct unless they explicitly use system proxy/proxy env.',
+          ? 'Advanced TUN Mode: Windows process rules can force terminal tools through VPN or direct.'
+          : 'Stable Proxy Mode: OpenSSH goes direct unless it is configured to use SOCKS 127.0.0.1:${SingBoxConfigBuilder.localSocksProxyPort}.',
     ];
     try {
       for (final executable in const [
@@ -3388,9 +3475,11 @@ if ($null -ne $match) { 'true' } else { 'false' }
         await _diagnoseTcpHost('github.com', 443, label: 'Terminal TCP'),
       );
       lines.add(
-        _developerMode
+        _terminalThroughVpn && _advancedTunMode
+            ? 'Terminal route verdict: VPN for ssh.exe/git.exe/gh.exe/powershell.exe/cmd.exe/wt.exe after reconnect.'
+            : _developerMode
             ? 'Terminal route verdict: DIRECT for ssh.exe/git.exe/gh.exe/powershell.exe/cmd.exe/wt.exe after reconnect.'
-            : 'Terminal route verdict: regular VPN rules; enable Developer mode for direct SSH/Git.',
+            : 'Terminal route verdict: regular routing rules.',
       );
     } on Object catch (error) {
       lines.add('Terminal diagnostics failed: ${_redactSensitive('$error')}');
@@ -3416,6 +3505,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     final lines = <String>[
       'VPN diagnostics started. connected=$_connected, status=$_status, '
           'advanced_tun=$_advancedTunMode, developer_mode=$_developerMode, '
+          'terminal_through_vpn=$_terminalThroughVpn, '
           'system_proxy=$_systemProxyEnabled.',
       'VPN trace uses Yurich Connect internal HTTP client through 127.0.0.1:${SingBoxConfigBuilder.localMixedProxyPort}; terminal process exclusions do not affect this check.',
     ];
@@ -4075,6 +4165,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       'config_target: ${_vpnEngine.configTarget.name}',
       'windows_connection_mode: ${_windowsConnectionMode.code}',
       'system_proxy_enabled: $_systemProxyEnabled',
+      'auto_start_enabled: $_autoStart',
+      'early_auto_start_enabled: $_earlyAutoStart',
       if (_lastConfigSummary != null) 'config: $_lastConfigSummary',
       'status: $_status',
       'connection_lifecycle: ${_connectionLifecycle.code}',
@@ -4085,6 +4177,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       'codex_direct_supported: $_codexDirectSupported',
       'chatgpt_through_vpn: $_chatGptThroughVpn',
       'developer_mode: $_developerMode',
+      'terminal_through_vpn: $_terminalThroughVpn',
       'dns_only_through_vpn: $_dnsOnlyThroughVpn',
       if (_dnsFallbackAppliedAt != null)
         'dns_fallback_applied: ${_dnsFallbackAppliedAt!.toIso8601String()}',
@@ -4098,7 +4191,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       if (_lastError != null) 'last_error: $_lastError',
       if (profile != null) ...[
         'profile: ${_redactSensitive(profile.name)}',
-        'protocol: ${_profileKindLabel(profile.kind)}',
+        'protocol: ${_profileProtocolLabel(profile, _profileKindLabel)}',
         if (VlessProfileTools.isVlessProfile(profile))
           'vless: ${_redactSensitive(VlessProfileTools.configSummary(profile))}',
         'endpoint: ${_redactSensitive(profile.endpoint)}',
@@ -4395,7 +4488,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       timestamp: DateTime.now(),
       profileId: profile.id,
       profileName: _redactSensitive(profile.name),
-      protocol: _profileKindLabel(profile.kind),
+      protocol: _profileProtocolLabel(profile, _profileKindLabel),
       lifecycle: lifecycle,
       success: success,
       startMs: startDuration.inMilliseconds,
@@ -4810,8 +4903,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
       advancedTunMode: _advancedTunMode,
       systemProxyEnabled: _systemProxyEnabled,
       autoStart: _autoStart,
+      earlyAutoStart: _earlyAutoStart,
       autoConnect: _autoConnect,
       developerMode: _developerMode,
+      terminalThroughVpn: _terminalThroughVpn,
       dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
       codexDirect: _codexDirect,
       codexDirectSupported: _codexDirectSupported,
@@ -4832,6 +4927,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       onAutoStartChanged: (value) => unawaited(_setAutoStart(value)),
       onAutoConnectChanged: (value) => unawaited(_setAutoConnect(value)),
       onDeveloperModeChanged: (value) => unawaited(_setDeveloperMode(value)),
+      onTerminalThroughVpnChanged: (value) =>
+          unawaited(_setTerminalThroughVpn(value)),
       onDnsOnlyThroughVpnChanged: (value) =>
           unawaited(_setDnsOnlyThroughVpn(value)),
       onCodexDirectChanged: (value) => unawaited(_setCodexDirect(value)),
@@ -5397,7 +5494,7 @@ class _ActiveProfilePanel extends StatelessWidget {
                       Text(
                         selected == null
                             ? strings.addProfileHint
-                            : '${kindLabel(selected.kind)} · ${selected.endpoint}',
+                            : '${_profileProtocolLabel(selected, kindLabel)} · ${selected.endpoint}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(color: _mutedGold, fontSize: 12),
@@ -5794,7 +5891,7 @@ class _ProfileTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '${kindLabel(profile.kind)} · ${profile.endpoint}',
+                    '${_profileProtocolLabel(profile, kindLabel)} · ${profile.endpoint}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: _mutedGold),
@@ -5894,6 +5991,7 @@ bool _profileMatchesFilter(VpnProfile profile, _ProfileFilter filter) {
   return switch (filter) {
     _ProfileFilter.all => true,
     _ProfileFilter.vless => _profileIsVless(profile),
+    _ProfileFilter.xhttp => ProfileIdentity.isXhttpProfile(profile),
     _ProfileFilter.naive => profile.kind == VpnProfileKind.naive,
     _ProfileFilter.hysteria =>
       profile.kind == VpnProfileKind.hysteria ||
@@ -5910,6 +6008,7 @@ String _profileFilterLabel(_ProfileFilter filter, _Strings strings, int count) {
   final label = switch (filter) {
     _ProfileFilter.all => _isRu(strings) ? 'Все' : 'All',
     _ProfileFilter.vless => 'VLESS',
+    _ProfileFilter.xhttp => 'XHTTP',
     _ProfileFilter.naive => 'Naive',
     _ProfileFilter.hysteria => 'Hysteria',
   };
@@ -5919,6 +6018,17 @@ String _profileFilterLabel(_ProfileFilter filter, _Strings strings, int count) {
 String _profileFilterEmptyLabel(_ProfileFilter filter, _Strings strings) {
   final label = _profileFilterLabel(filter, strings, 0).replaceFirst(' 0', '');
   return _isRu(strings) ? 'Нет профилей $label.' : 'No $label profiles.';
+}
+
+String _profileProtocolLabel(
+  VpnProfile profile,
+  String Function(VpnProfileKind kind) kindLabel,
+) {
+  final label = kindLabel(profile.kind);
+  if (ProfileIdentity.isXhttpProfile(profile)) {
+    return '$label · XHTTP';
+  }
+  return label;
 }
 
 String _formatSessionDuration(Duration duration) {
@@ -6049,8 +6159,10 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.advancedTunMode,
     required this.systemProxyEnabled,
     required this.autoStart,
+    required this.earlyAutoStart,
     required this.autoConnect,
     required this.developerMode,
+    required this.terminalThroughVpn,
     required this.dnsOnlyThroughVpn,
     required this.codexDirect,
     required this.codexDirectSupported,
@@ -6070,6 +6182,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onAutoStartChanged,
     required this.onAutoConnectChanged,
     required this.onDeveloperModeChanged,
+    required this.onTerminalThroughVpnChanged,
     required this.onDnsOnlyThroughVpnChanged,
     required this.onCodexDirectChanged,
     required this.onChatGptThroughVpnChanged,
@@ -6090,8 +6203,10 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool advancedTunMode;
   final bool systemProxyEnabled;
   final bool autoStart;
+  final bool earlyAutoStart;
   final bool autoConnect;
   final bool developerMode;
+  final bool terminalThroughVpn;
   final bool dnsOnlyThroughVpn;
   final bool codexDirect;
   final bool codexDirectSupported;
@@ -6111,6 +6226,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final ValueChanged<bool> onAutoStartChanged;
   final ValueChanged<bool> onAutoConnectChanged;
   final ValueChanged<bool> onDeveloperModeChanged;
+  final ValueChanged<bool> onTerminalThroughVpnChanged;
   final ValueChanged<bool> onDnsOnlyThroughVpnChanged;
   final ValueChanged<bool> onCodexDirectChanged;
   final ValueChanged<bool> onChatGptThroughVpnChanged;
@@ -6196,6 +6312,20 @@ class _WindowsToolsPanel extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               _SettingsSwitchRow(
+                icon: Icons.security_outlined,
+                value: terminalThroughVpn,
+                onChanged: busy || !advancedTunMode
+                    ? null
+                    : onTerminalThroughVpnChanged,
+                title: Text(strings.terminalThroughVpn),
+                subtitle: Text(
+                  advancedTunMode
+                      ? strings.terminalThroughVpnHint
+                      : strings.terminalThroughVpnTunOnly,
+                ),
+              ),
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
                 icon: Icons.dns_outlined,
                 value: dnsOnlyThroughVpn,
                 onChanged: busy ? null : onDnsOnlyThroughVpnChanged,
@@ -6245,7 +6375,11 @@ class _WindowsToolsPanel extends StatelessWidget {
                 value: autoStart,
                 onChanged: busy ? null : onAutoStartChanged,
                 title: Text(strings.autoStart),
-                subtitle: Text(strings.autoStartHint),
+                subtitle: Text(
+                  autoStart && !earlyAutoStart
+                      ? strings.autoStartFallbackEnabled
+                      : strings.autoStartHint,
+                ),
               ),
               const SizedBox(height: 8),
               _SettingsSwitchRow(
@@ -6766,6 +6900,7 @@ class _Strings {
     required this.autoStart,
     required this.autoStartHint,
     required this.autoStartEnabled,
+    required this.autoStartFallbackEnabled,
     required this.autoStartDisabled,
     required this.autoStartFailed,
     required this.autoConnect,
@@ -6774,6 +6909,9 @@ class _Strings {
     required this.autoConnectDisabled,
     required this.developerMode,
     required this.developerModeHint,
+    required this.terminalThroughVpn,
+    required this.terminalThroughVpnHint,
+    required this.terminalThroughVpnTunOnly,
     required this.dnsOnlyThroughVpn,
     required this.dnsOnlyThroughVpnHint,
     required this.codexDirect,
@@ -6894,6 +7032,7 @@ class _Strings {
   final String autoStart;
   final String autoStartHint;
   final String autoStartEnabled;
+  final String autoStartFallbackEnabled;
   final String autoStartDisabled;
   final String autoStartFailed;
   final String autoConnect;
@@ -6902,6 +7041,9 @@ class _Strings {
   final String autoConnectDisabled;
   final String developerMode;
   final String developerModeHint;
+  final String terminalThroughVpn;
+  final String terminalThroughVpnHint;
+  final String terminalThroughVpnTunOnly;
   final String dnsOnlyThroughVpn;
   final String dnsOnlyThroughVpnHint;
   final String codexDirect;
@@ -7278,7 +7420,7 @@ class _Strings {
       _FaqItem(
         question: 'Какие протоколы поддерживаются?',
         answer:
-            'Поддерживаются VLESS Reality, VLESS TLS, Hysteria 1/2, Yurich ID, naive+https и sing-box JSON.',
+            'Поддерживаются VLESS Reality, VLESS TLS, VLESS XHTTP через Xray-core, Hysteria 1/2, Yurich ID, naive+https и sing-box JSON.',
       ),
       _FaqItem(
         question: 'Что делать, если после смены профиля пропал интернет?',
@@ -7286,9 +7428,9 @@ class _Strings {
             'Нажми Отключить, подожди статус Остановлено и подключи профиль снова. Если проблема повторяется, отправь отчёт разработчику.',
       ),
       _FaqItem(
-        question: 'Почему нужна шторка уведомления?',
+        question: 'Почему XHTTP работает только в Stable Proxy Mode?',
         answer:
-            'Android требует постоянное уведомление для VPN. Разреши уведомления, чтобы видеть статус и скорость в шторке.',
+            'XHTTP запускается через встроенный Xray-core и локальный proxy Windows. Advanced TUN Mode для XHTTP пока отключён, чтобы не смешивать два сетевых движка и не рвать соединения.',
       ),
       _FaqItem(
         question: 'Почему NaiveProxy может быть быстрее?',
@@ -7326,8 +7468,10 @@ class _Strings {
         'Соединение нестабильно, но автопереподключение отключено, чтобы не рвать консоль, SSH, Git и Codex. Переподключи VPN вручную при необходимости.',
     autoStart: 'Автостарт с Windows',
     autoStartHint:
-        'Запускает Yurich Connect при входе в Windows обычным пользователем без UAC.',
-    autoStartEnabled: 'Автостарт включён',
+        'Ранний запуск через Планировщик без задержки, с повышенными правами и сворачиванием в трей. UAC нужен только при настройке.',
+    autoStartEnabled: 'Ранний автостарт включён',
+    autoStartFallbackEnabled:
+        'Включён резервный автостарт. Для раннего запуска разреши UAC при повторном включении.',
     autoStartDisabled: 'Автостарт выключен',
     autoStartFailed: 'Не удалось изменить автостарт',
     autoConnect: 'Автоподключение',
@@ -7337,6 +7481,11 @@ class _Strings {
     developerMode: 'Режим разработчика',
     developerModeHint:
         'SSH, Git, GitHub CLI, PowerShell, CMD и Windows Terminal идут напрямую, чтобы VPN не ломал доступ к серверам.',
+    terminalThroughVpn: 'SSH и терминал через VPN',
+    terminalThroughVpnHint:
+        'Принудительно направляет SSH, SCP, SFTP, Git и терминалы через VPN. Применяется после переподключения.',
+    terminalThroughVpnTunOnly:
+        'Доступно только в Продвинутом TUN-режиме: обычный OpenSSH не использует системный HTTP-proxy.',
     dnsOnlyThroughVpn: 'DNS только через VPN',
     dnsOnlyThroughVpnHint:
         'Обычные DNS-запросы идут через Yurich Core и DoH поверх VPN/proxy. Bootstrap использует Cloudflare DoH без DNS провайдера.',
@@ -7457,7 +7606,7 @@ class _Strings {
       _FaqItem(
         question: 'Which protocols are supported?',
         answer:
-            'VLESS Reality, VLESS TLS, Hysteria 1/2, Yurich ID, naive+https, and sing-box JSON are supported.',
+            'VLESS Reality, VLESS TLS, VLESS XHTTP through Xray-core, Hysteria 1/2, Yurich ID, naive+https, and sing-box JSON are supported.',
       ),
       _FaqItem(
         question: 'What if internet stops after switching profiles?',
@@ -7465,9 +7614,9 @@ class _Strings {
             'Tap Disconnect, wait for Stopped, then connect again. If it repeats, send a developer report.',
       ),
       _FaqItem(
-        question: 'Why does Android need a notification?',
+        question: 'Why does XHTTP require Stable Proxy Mode?',
         answer:
-            'Android requires a persistent notification for VPN. Allow notifications to see status and speed in the shade.',
+            'XHTTP uses the bundled Xray-core and the local Windows proxy. Advanced TUN Mode is disabled for XHTTP to avoid mixing two network engines and interrupting active connections.',
       ),
       _FaqItem(
         question: 'Why can NaiveProxy be faster now?',
@@ -7505,8 +7654,10 @@ class _Strings {
         'Connection is unstable, but automatic reconnect is disabled to preserve console, SSH, Git, and Codex sessions. Reconnect manually if needed.',
     autoStart: 'Start with Windows',
     autoStartHint:
-        'Starts Yurich Connect at Windows sign-in as the current user without UAC.',
-    autoStartEnabled: 'Startup enabled',
+        'Starts early at sign-in without delay, elevated, and hidden in the tray. UAC is required only while configuring it.',
+    autoStartEnabled: 'Early startup enabled',
+    autoStartFallbackEnabled:
+        'Fallback startup is enabled. Allow UAC when enabling again for early startup.',
     autoStartDisabled: 'Startup disabled',
     autoStartFailed: 'Could not change startup',
     autoConnect: 'Auto-connect',
@@ -7516,6 +7667,11 @@ class _Strings {
     developerMode: 'Developer mode',
     developerModeHint:
         'SSH, Git, GitHub CLI, PowerShell, CMD, and Windows Terminal go direct so VPN does not break server access.',
+    terminalThroughVpn: 'SSH and terminal through VPN',
+    terminalThroughVpnHint:
+        'Forces SSH, SCP, SFTP, Git, and terminal processes through VPN. Reconnect to apply.',
+    terminalThroughVpnTunOnly:
+        'Available only in Advanced TUN Mode: regular OpenSSH does not use the Windows HTTP proxy.',
     dnsOnlyThroughVpn: 'DNS only through VPN',
     dnsOnlyThroughVpnHint:
         'Regular DNS queries use Yurich Core and DoH over VPN/proxy. Bootstrap uses Cloudflare DoH without ISP DNS.',

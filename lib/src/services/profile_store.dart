@@ -243,6 +243,7 @@ class ProfileStore {
   static const _codexDirectKey = 'codexDirect';
   static const _chatGptThroughVpnKey = 'chatGptThroughVpn';
   static const _developerModeKey = 'developerMode';
+  static const _terminalThroughVpnKey = 'terminalThroughVpn';
   static const _dnsOnlyThroughVpnKey = 'dnsOnlyThroughVpn';
   static const _windowsConnectionModeKey = 'windowsConnectionMode';
   static const _profileRuntimeStatsKey = 'profileRuntimeStats';
@@ -252,6 +253,7 @@ class ProfileStore {
   static const defaultCodexDirect = true;
   static const defaultChatGptThroughVpn = true;
   static const defaultDeveloperMode = true;
+  static const defaultTerminalThroughVpn = false;
   static const defaultDnsOnlyThroughVpn = true;
   static const defaultWindowsConnectionMode = WindowsConnectionMode.stableProxy;
 
@@ -443,6 +445,16 @@ class ProfileStore {
   Future<void> saveDeveloperMode(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_developerModeKey, enabled);
+  }
+
+  Future<bool> loadTerminalThroughVpn() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_terminalThroughVpnKey) ?? defaultTerminalThroughVpn;
+  }
+
+  Future<void> saveTerminalThroughVpn(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_terminalThroughVpnKey, enabled);
   }
 
   Future<bool> loadDnsOnlyThroughVpn() async {

@@ -11,6 +11,7 @@ void main() {
       expect(await store.loadCodexDirect(), isTrue);
       expect(await store.loadChatGptThroughVpn(), isTrue);
       expect(await store.loadDeveloperMode(), isTrue);
+      expect(await store.loadTerminalThroughVpn(), isFalse);
       expect(await store.loadDnsOnlyThroughVpn(), isTrue);
       expect(await store.loadVpnOnlyProcesses(), isEmpty);
     });
@@ -40,6 +41,15 @@ void main() {
       await store.saveDeveloperMode(false);
 
       expect(await store.loadDeveloperMode(), isFalse);
+    });
+
+    test('saves terminal through VPN preference', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveTerminalThroughVpn(true);
+
+      expect(await store.loadTerminalThroughVpn(), isTrue);
     });
 
     test('saves DNS leak protection preference', () async {

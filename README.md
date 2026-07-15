@@ -2,7 +2,7 @@
 
 Yurich Connect is the Windows client in the Yurich ecosystem for stable access to foreign services, Yurich ID subscriptions, and manual VPN/proxy profiles.
 
-It runs on Windows 10/11 and uses Yurich Core powered by sing-box, NaiveProxy, Hysteria, and optional Wintun.
+It runs on Windows 10/11 and uses Yurich Core powered by sing-box, Xray-core, NaiveProxy, Hysteria, and optional Wintun.
 
 ## English
 
@@ -21,10 +21,13 @@ Supported inputs:
 
 - Yurich ID subscription URL;
 - VLESS Reality and VLESS TLS over TCP, WebSocket, gRPC, HTTP/H2, and HTTPUpgrade;
+- VLESS XHTTP through the bundled Xray-core in Stable Proxy Mode;
 - NaiveProxy;
 - Hysteria 1 and Hysteria 2;
 - raw sing-box JSON;
 - panel HTML pages when raw profile links are embedded inside.
+
+XHTTP profiles preserve the subscription `host`, `path`, `mode`, `extra`, and SNI settings. They are validated by the bundled Xray-core before the current connection is stopped. XHTTP is intentionally unavailable in Advanced TUN Mode until Xray TUN routing can be isolated from the sing-box/Wintun lifecycle.
 
 ### ChatGPT, OpenAI, And Codex Stability
 
@@ -34,6 +37,14 @@ Yurich Connect separates ChatGPT website routing from Codex CLI routing:
 - **Codex CLI direct** can be enabled separately for Codex processes when long-running Codex sessions should bypass reconnect-sensitive routing.
 
 For long WebSocket sessions, the app avoids aggressive tunnel restarts. A single health-check timeout does not kill the VPN, multiple endpoints are checked, reconnect watchdog is softened during active traffic, and DNS/TCP/WebSocket/reconnect history diagnostics are written to logs.
+
+### SSH, Early Startup, And Leak Protection
+
+- **Developer mode** routes SSH, Git, and terminal processes directly.
+- **SSH and terminal through VPN** forces `ssh.exe`, SCP/SFTP, Git, PowerShell, CMD, Windows Terminal, PuTTY, and WinSCP through the VPN. Transparent process routing is available only in Advanced TUN Mode.
+- **Start with Windows** creates an immediate elevated logon task and starts the UI hidden in the tray. UAC is requested only while configuring the task. If Task Scheduler registration is denied, the app keeps a per-user `HKCU\\Run` fallback.
+
+Advanced TUN uses strict routing while Yurich Core is running. A persistent firewall kill switch is intentionally not enabled yet: safe crash protection requires a signed Windows Service/WFP helper, explicit VPN-server/bootstrap exceptions, and an emergency restore path. A naive global firewall block can leave Windows completely offline.
 
 ### Install
 
@@ -106,10 +117,13 @@ Yurich Connect импортирует одиночные ссылки профи
 
 - Yurich ID subscription URL;
 - VLESS Reality и VLESS TLS через TCP, WebSocket, gRPC, HTTP/H2 и HTTPUpgrade;
+- VLESS XHTTP через встроенный Xray-core в Stable Proxy Mode;
 - NaiveProxy;
 - Hysteria 1 и Hysteria 2;
 - raw sing-box JSON;
 - HTML-страницы панели, если внутри есть raw-ссылки на профили.
+
+Для XHTTP сохраняются переданные подпиской `host`, `path`, `mode`, `extra` и SNI. До остановки текущего соединения конфиг проверяется встроенным Xray-core. В Advanced TUN Mode XHTTP намеренно недоступен, пока TUN-маршрутизация Xray не будет изолирована от жизненного цикла sing-box/Wintun.
 
 ### Стабильность ChatGPT, OpenAI и Codex
 
@@ -119,6 +133,14 @@ Yurich Connect разделяет маршрутизацию сайта ChatGPT 
 - **Codex CLI напрямую** можно включить отдельно для процессов Codex, когда длинные Codex-сессии должны обходить reconnect-чувствительные маршруты.
 
 Для долгих WebSocket-сессий приложение не делает агрессивный перезапуск туннеля. Один health-check timeout не убивает VPN, проверяется несколько endpoint, reconnect watchdog смягчён во время активного трафика, а диагностика DNS/TCP/WebSocket/reconnect history пишется в логи.
+
+### SSH, ранний автостарт и защита от утечек
+
+- **Режим разработчика** направляет SSH, Git и терминалы напрямую.
+- **SSH и терминал через VPN** принудительно направляет `ssh.exe`, SCP/SFTP, Git, PowerShell, CMD, Windows Terminal, PuTTY и WinSCP через VPN. Прозрачная маршрутизация процессов доступна только в Advanced TUN Mode.
+- **Автостарт с Windows** создаёт задачу входа без задержки, с повышенными правами, и запускает интерфейс скрытым в трее. UAC запрашивается только при настройке. Если Планировщик заданий недоступен, остаётся резервный запуск текущего пользователя через `HKCU\\Run`.
+
+Advanced TUN использует строгую маршрутизацию, пока Yurich Core работает. Постоянный firewall kill switch пока намеренно не включён: для безопасной защиты после сбоя нужен подписанный Windows Service/WFP helper, исключения для VPN-сервера и bootstrap, а также аварийное восстановление сети. Простое глобальное правило блокировки может полностью оставить Windows без интернета.
 
 ### Установка
 

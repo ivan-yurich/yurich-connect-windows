@@ -49,10 +49,10 @@ class ProfileImporter {
 
   Future<_SubscriptionFetchResult> _fetchSubscription(Uri uri) async {
     final clients = [
-      'YurichConnect-Windows/1.0.98 YurichCore/sing-box/1.13.12',
+      'YurichConnect-Windows/1.0.100 YurichCore/sing-box/1.13.12',
+      'v2rayN/7.15.4',
       'HiddifyNext/2.5.7',
-      'NekoBoxForAndroid/1.3.8',
-      'v2rayNG/1.10.5',
+      'sing-box/1.13.12',
     ];
 
     Object? lastError;
@@ -255,9 +255,12 @@ class ProfileImporter {
       if (decoded is Map<String, dynamic>) {
         if (decoded.containsKey('inbounds') &&
             decoded.containsKey('outbounds')) {
+          if (_looksLikeXrayConfig(decoded)) {
+            return null;
+          }
           if (_containsUnsupportedXhttp(decoded)) {
             throw const ProfileImportException(
-              VlessProfileTools.unsupportedXhttpMessage,
+              'Raw sing-box JSON с XHTTP не поддерживается. Импортируй VLESS XHTTP ссылку или Xray JSON.',
             );
           }
           return VpnProfile(
@@ -471,9 +474,24 @@ class ProfileImporter {
         break;
       case 'xhttp':
       case 'splithttp':
-        throw const ProfileImportException(
-          VlessProfileTools.unsupportedXhttpMessage,
-        );
+        settings =
+            _asMap(stream['xhttpSettings']) ??
+            _asMap(stream['splithttpSettings']);
+        _putIfNotEmpty(query, 'host', settings?['host']);
+        _putIfNotEmpty(query, 'path', settings?['path']);
+        _putIfNotEmpty(query, 'mode', settings?['mode']);
+        final extra = settings?['extra'];
+        if (extra != null) {
+          try {
+            final normalized = VlessProfileTools.normalizeXhttpExtra(extra);
+            if (normalized != null) {
+              query['extra'] = jsonEncode(normalized);
+            }
+          } on Object catch (error) {
+            throw ProfileImportException(_vlessToolError(error));
+          }
+        }
+        break;
     }
   }
 
@@ -994,9 +1012,7 @@ class ProfileImporter {
   }
 
   Map<String, String> _query(Uri uri) {
-    return uri.queryParameters.map(
-      (key, value) => MapEntry(key, Uri.decodeComponent(value)),
-    );
+    return Map<String, String>.of(uri.queryParameters);
   }
 
   int? _asIntString(String? value) {
@@ -1076,6 +1092,29 @@ class ProfileImporter {
         if ((query['host'] ?? '').isNotEmpty) 'host': query['host'],
         if ((query['path'] ?? '').isNotEmpty) 'path': query['path'],
       };
+    }
+
+    if (type == 'xhttp') {
+      try {
+        final host = VlessProfileTools.normalizeXhttpHost(query['host']);
+        final path = VlessProfileTools.normalizeXhttpPath(query['path']);
+        final mode = VlessProfileTools.normalizeXhttpMode(query['mode']);
+        final extra = VlessProfileTools.normalizeXhttpExtra(query['extra']);
+        final transport = <String, dynamic>{
+          'type': 'xhttp',
+          'path': path,
+          'mode': mode,
+        };
+        if (host != null) {
+          transport['host'] = host;
+        }
+        if (extra != null) {
+          transport['extra'] = extra;
+        }
+        return transport;
+      } on Object catch (error) {
+        throw ProfileImportException(_vlessToolError(error));
+      }
     }
 
     throw ProfileImportException('Transport "$type" пока не поддержан.');
@@ -1161,6 +1200,16 @@ class ProfileImporter {
 
   Map<String, dynamic>? _asMap(Object? value) {
     return value is Map ? value.cast<String, dynamic>() : null;
+  }
+
+  bool _looksLikeXrayConfig(Map<String, dynamic> config) {
+    final outbounds = config['outbounds'];
+    if (outbounds is! List) {
+      return false;
+    }
+    return outbounds.whereType<Map>().any(
+      (outbound) => '${outbound['protocol'] ?? ''}'.trim().isNotEmpty,
+    );
   }
 
   int? _asInt(Object? value) {

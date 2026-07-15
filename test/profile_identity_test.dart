@@ -33,7 +33,7 @@ void main() {
       expect(merged.single.expiresAt?.year, 2027);
     });
 
-    test('removes duplicate and XHTTP profiles during migration', () {
+    test('removes duplicates and keeps XHTTP profiles during migration', () {
       final supported = _vless(id: 'first', name: 'Primary');
       final duplicate = _vless(id: 'second', name: 'Renamed');
       final xhttp = _vless(
@@ -49,9 +49,11 @@ void main() {
         identitySource: [supported, duplicate, xhttp],
       );
 
-      expect(migrated, hasLength(1));
-      expect(migrated.single.id, 'first');
-      expect(migrated.single.name, 'Renamed');
+      expect(migrated, hasLength(2));
+      expect(migrated.first.id, 'first');
+      expect(migrated.first.name, 'Renamed');
+      expect(migrated.last.id, 'xhttp');
+      expect(ProfileIdentity.isXhttpProfile(migrated.last), isTrue);
     });
 
     test('does not merge profiles with different credentials', () {

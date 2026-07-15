@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/models/vpn_profile.dart';
 import 'package:yurich_connect_windows/src/services/profile_importer.dart';
 import 'package:yurich_connect_windows/src/services/sing_box_config_builder.dart';
+import 'package:yurich_connect_windows/src/services/vless_profile_tools.dart';
 
 void main() {
   test('imports VLESS Reality link', () async {
@@ -57,9 +58,60 @@ void main() {
     });
   });
 
-  test('rejects VLESS XHTTP profiles', () async {
+  test('imports VLESS XHTTP with mode and extra for Xray backend', () async {
+    final link = Uri(
+      scheme: 'vless',
+      userInfo: '11111111-1111-4111-8111-111111111111',
+      host: 'example.com',
+      port: 443,
+      queryParameters: {
+        'security': 'reality',
+        'type': 'xhttp',
+        'sni': 'www.example.com',
+        'fp': 'chrome',
+        'pbk': 'abc123',
+        'path': '/xhttp',
+        'host': 'edge.example.com',
+        'mode': 'stream-up',
+        'extra': jsonEncode({
+          'xmux': {'maxConcurrency': '2-4'},
+        }),
+      },
+      fragment: 'XHTTP',
+    ).toString();
+
+    final profile = (await ProfileImporter().importFromText(link)).single;
+    final transport = profile.outbound?['transport'] as Map<String, dynamic>;
+
+    expect(profile.name, 'XHTTP');
+    expect(transport['type'], 'xhttp');
+    expect(transport['path'], '/xhttp');
+    expect(transport['host'], 'edge.example.com');
+    expect(transport['mode'], 'stream-up');
+    expect(transport['extra'], {
+      'xmux': {'maxConcurrency': '2-4'},
+    });
+    expect(VlessProfileTools.requiresXrayBackend(profile), isTrue);
+  });
+
+  test('keeps XHTTP and TCP profiles from the same subscription', () async {
+    const payload =
+        'vless://11111111-1111-4111-8111-111111111111@xhttp.example.com:443?security=tls&type=xhttp&sni=cdn.example.com#XHTTP\n'
+        'vless://22222222-2222-4222-8222-222222222222@tcp.example.com:443?security=tls&type=tcp&sni=cdn.example.com#TCP';
+
+    final profiles = await ProfileImporter().importFromText(payload);
+
+    expect(profiles, hasLength(2));
+    expect(
+      profiles.map((profile) => profile.name),
+      containsAll(['XHTTP', 'TCP']),
+    );
+    expect(profiles.where(VlessProfileTools.requiresXrayBackend), hasLength(1));
+  });
+
+  test('rejects unsupported XHTTP mode during import', () async {
     const link =
-        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=xhttp&sni=www.example.com&fp=chrome&pbk=abc123&path=%2Fxhttp&mode=auto#XHTTP';
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=xhttp&sni=www.example.com&path=%2Fxhttp&mode=turbo#XHTTP';
 
     await expectLater(
       ProfileImporter().importFromText(link),
@@ -67,22 +119,50 @@ void main() {
         isA<ProfileImportException>().having(
           (error) => error.message,
           'message',
-          contains('XHTTP отключён'),
+          contains('XHTTP mode'),
         ),
       ),
     );
   });
 
-  test('skips XHTTP when a subscription also has supported VLESS', () async {
-    const payload =
-        'vless://11111111-1111-4111-8111-111111111111@xhttp.example.com:443?security=tls&type=xhttp&sni=cdn.example.com#XHTTP\n'
-        'vless://22222222-2222-4222-8222-222222222222@tcp.example.com:443?security=tls&type=tcp&sni=cdn.example.com#TCP';
+  test('normalizes legacy SplitHTTP transport to XHTTP', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=splithttp&sni=www.example.com&path=legacy&mode=packet-up#SplitHTTP';
 
-    final profiles = await ProfileImporter().importFromText(payload);
+    final profile = (await ProfileImporter().importFromText(link)).single;
+    final transport = profile.outbound?['transport'] as Map<String, dynamic>;
 
-    expect(profiles, hasLength(1));
-    expect(profiles.single.name, 'TCP');
-    expect(profiles.single.server, 'tcp.example.com');
+    expect(transport['type'], 'xhttp');
+    expect(transport['path'], '/legacy');
+    expect(VlessProfileTools.requiresXrayBackend(profile), isTrue);
+  });
+
+  test('rejects malformed XHTTP extra during import', () async {
+    final link = Uri(
+      scheme: 'vless',
+      userInfo: '11111111-1111-4111-8111-111111111111',
+      host: 'example.com',
+      port: 443,
+      queryParameters: {
+        'security': 'tls',
+        'type': 'xhttp',
+        'sni': 'www.example.com',
+        'path': '/xhttp',
+        'extra': '["not-an-object"]',
+      },
+      fragment: 'Bad extra',
+    ).toString();
+
+    await expectLater(
+      ProfileImporter().importFromText(link),
+      throwsA(
+        isA<ProfileImportException>().having(
+          (error) => error.message,
+          'message',
+          contains('JSON-объектом'),
+        ),
+      ),
+    );
   });
 
   test('rejects invalid VLESS flow before config start', () async {
@@ -953,6 +1033,59 @@ void main() {
   });
 
   test(
+    'terminal VPN mode forces SSH and terminal processes through proxy',
+    () async {
+      const link =
+          'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+
+      final profile = (await ProfileImporter().importFromText(link)).first;
+      final config =
+          jsonDecode(
+                SingBoxConfigBuilder().build(
+                  profile,
+                  target: SingBoxConfigTarget.windows,
+                  windowsTunMode: true,
+                  terminalThroughVpn: true,
+                ),
+              )
+              as Map<String, dynamic>;
+      final route = config['route'] as Map<String, dynamic>;
+      final routeRules = (route['rules'] as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final proxyProcessRule = routeRules.firstWhere(
+        (rule) => rule['outbound'] == 'proxy' && rule['process_name'] is List,
+      );
+      final proxyProcesses = proxyProcessRule['process_name'] as List;
+      final proxyProcessIndex = routeRules.indexOf(proxyProcessRule);
+      final updaterDirectIndex = routeRules.indexWhere(
+        (rule) =>
+            rule['outbound'] == 'direct' &&
+            rule['domain_suffix'] is List &&
+            (rule['domain_suffix'] as List).contains('github.com'),
+      );
+
+      expect(route['find_process'], isTrue);
+      expect(
+        proxyProcesses,
+        containsAll(<String>[
+          'ssh.exe',
+          'scp.exe',
+          'sftp.exe',
+          'git.exe',
+          'gh.exe',
+          'powershell.exe',
+          'pwsh.exe',
+          'cmd.exe',
+          'wt.exe',
+          'WindowsTerminal.exe',
+        ]),
+      );
+      expect(proxyProcessIndex, lessThan(updaterDirectIndex));
+    },
+  );
+
+  test(
     'routes Codex executables directly without bypassing ChatGPT web',
     () async {
       const link =
@@ -1242,10 +1375,11 @@ void main() {
     });
   });
 
-  test('rejects VLESS XHTTP from Xray JSON subscription', () async {
+  test('imports VLESS XHTTP from Xray JSON subscription', () async {
     final payload = jsonEncode([
       {
         'remarks': 'XHTTP',
+        'inbounds': [],
         'outbounds': [
           {
             'protocol': 'vless',
@@ -1282,15 +1416,19 @@ void main() {
       },
     ]);
 
-    await expectLater(
-      ProfileImporter().importFromText(payload),
-      throwsA(
-        isA<ProfileImportException>().having(
-          (error) => error.message,
-          'message',
-          contains('XHTTP отключён'),
-        ),
-      ),
-    );
+    final profile = (await ProfileImporter().importFromText(payload)).single;
+    final transport = profile.outbound?['transport'] as Map<String, dynamic>;
+
+    expect(profile.name, 'XHTTP');
+    expect(profile.coreBackend, VpnCoreBackend.auto);
+    expect(profile.outbound?['tls']['server_name'], 'cdn.example.com');
+    expect(transport['type'], 'xhttp');
+    expect(transport['path'], '/xhttp');
+    expect(transport['mode'], 'stream-one');
+    expect(transport['extra'], {
+      'headers': {'X-Trace': 'yes'},
+      'xmux': {'maxConcurrency': '2-4'},
+    });
+    expect(VlessProfileTools.requiresXrayBackend(profile), isTrue);
   });
 }
