@@ -44,7 +44,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.100';
+const _appVersion = '1.0.101';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 3;
@@ -218,7 +218,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _autoStart = false;
   bool _earlyAutoStart = false;
   bool _autoConnect = false;
-  bool _codexDirect = ProfileStore.defaultCodexDirect;
+  bool _codexThroughVpn = ProfileStore.defaultCodexThroughVpn;
   bool _chatGptThroughVpn = ProfileStore.defaultChatGptThroughVpn;
   bool _developerMode = ProfileStore.defaultDeveloperMode;
   bool _terminalThroughVpn = ProfileStore.defaultTerminalThroughVpn;
@@ -280,12 +280,13 @@ class _HomeScreenState extends State<HomeScreen>
     return _profiles.isEmpty ? null : _profiles.first;
   }
 
-  bool get _codexDirectSupported {
+  bool get _codexThroughVpnSupported {
     final profile = _selectedProfile;
-    return profile == null || _codexDirectSupportedForProfile(profile);
+    return _advancedTunMode &&
+        (profile == null || _codexThroughVpnSupportedForProfile(profile));
   }
 
-  bool _codexDirectSupportedForProfile(VpnProfile profile) {
+  bool _codexThroughVpnSupportedForProfile(VpnProfile profile) {
     return Platform.isWindows &&
         _vpnEngine.configTarget == SingBoxConfigTarget.windows &&
         profile.kind != VpnProfileKind.singBoxConfig;
@@ -507,7 +508,8 @@ class _HomeScreenState extends State<HomeScreen>
     final selectedId = await _store.loadSelectedProfileId();
     final language = _AppLanguage.fromCode(await _store.loadLanguageCode());
     final autoConnect = await _store.loadAutoConnect();
-    final codexDirect = await _store.loadCodexDirect();
+    await _store.disableLegacyCodexDirect();
+    final codexThroughVpn = await _store.loadCodexThroughVpn();
     final chatGptThroughVpn = await _store.loadChatGptThroughVpn();
     var developerMode = await _store.loadDeveloperMode();
     var terminalThroughVpn = await _store.loadTerminalThroughVpn();
@@ -603,7 +605,7 @@ class _HomeScreenState extends State<HomeScreen>
       _profiles = profiles;
       _selectedProfileId = resolvedSelectedId;
       _autoConnect = autoConnect;
-      _codexDirect = codexDirect;
+      _codexThroughVpn = codexThroughVpn;
       _chatGptThroughVpn = chatGptThroughVpn;
       _developerMode = developerMode;
       _terminalThroughVpn = terminalThroughVpn;
@@ -1995,7 +1997,10 @@ class _HomeScreenState extends State<HomeScreen>
       naiveMode: plan.naiveMode,
       splitTunnelExcludedProcesses: _splitTunnelExcludedProcesses,
       vpnOnlyProcesses: _vpnOnlyProcesses,
-      codexDirect: _codexDirect && _codexDirectSupportedForProfile(profile),
+      codexThroughVpn:
+          _codexThroughVpn &&
+          _advancedTunMode &&
+          _codexThroughVpnSupportedForProfile(profile),
       chatGptThroughVpn: _chatGptThroughVpn,
       developerMode: _developerMode,
       terminalThroughVpn: _terminalThroughVpn && _advancedTunMode,
@@ -2727,7 +2732,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (_hasActiveTraffic()) {
       return 'active traffic';
     }
-    if (_codexDirect && await _hasActiveCodexProcess()) {
+    if (await _hasActiveCodexProcess()) {
       return 'active Codex session';
     }
     return null;
@@ -2745,7 +2750,9 @@ $match = Get-CimInstance Win32_Process | Where-Object {
   $path = [string]$_.ExecutablePath
   $command = [string]$_.CommandLine
   ($codexNames -contains $name) -or
-    ($name -ieq 'node.exe' -and (($path -match '(?i)(codex|openai)') -or ($command -match '(?i)(codex|openai)')))
+    ($name -like 'codex*.exe') -or
+    ($path -match '(?i)(\\WindowsApps\\OpenAI\.Codex_|\\\.codex\\|\\node_modules\\@openai\\codex\\)') -or
+    ($name -ieq 'node.exe' -and ($command -match '(?i)([\\/]\.codex[\\/]|[\\/]@openai[\\/]codex[\\/])'))
 } | Select-Object -First 1
 if ($null -ne $match) { 'true' } else { 'false' }
 ''';
@@ -3164,26 +3171,27 @@ if ($null -ne $match) { 'true' } else { 'false' }
     });
   }
 
-  Future<void> _setCodexDirect(bool value) async {
+  Future<void> _setCodexThroughVpn(bool value) async {
     if (!Platform.isWindows) {
       return;
     }
-    if (!_codexDirectSupported) {
-      _showSnack(s.codexDirectTunOnly);
+    if (value && !_codexThroughVpnSupported) {
+      _showSnack(s.codexThroughVpnTunOnly);
       return;
     }
-    await _store.saveCodexDirect(value);
+    await _store.disableLegacyCodexDirect();
+    await _store.saveCodexThroughVpn(value);
     if (!mounted) {
       return;
     }
     setState(() {
-      _codexDirect = value;
+      _codexThroughVpn = value;
       _message = _connected ? s.reconnectToApply : s.settingsSaved;
     });
     _queueLog(
       value
-          ? 'Codex CLI direct mode enabled: Codex executables bypass regular VPN routing where Windows process rules are available. ChatGPT web routing is controlled separately.'
-          : 'Codex direct mode disabled: Codex will follow the regular VPN routing rules.',
+          ? 'Codex through VPN enabled: Codex executables are forced through the proxy in Advanced TUN Mode.'
+          : 'Codex through VPN disabled: Codex executables follow the remaining Windows routing rules.',
     );
   }
 
@@ -3201,7 +3209,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     });
     _queueLog(
       value
-          ? 'ChatGPT web routing set to VPN/proxy. chatgpt.com and OpenAI web assets will not be bypassed by Codex direct mode.'
+          ? 'ChatGPT web routing set to VPN/proxy. chatgpt.com and OpenAI web assets use the current VPN/proxy route.'
           : 'ChatGPT web routing set to direct. OpenAI web domains may bypass the VPN.',
     );
   }
@@ -3397,7 +3405,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
     }
     setState(() => _codexDiagnosticsBusy = true);
     final lines = <String>[
-      'Codex diagnostics started. cli_direct=$_codexDirect, chatgpt_through_vpn=$_chatGptThroughVpn, supported=$_codexDirectSupported, status=$_status.',
+      'Codex diagnostics started. through_vpn=$_codexThroughVpn, effective=${_codexThroughVpn && _codexThroughVpnSupported}, chatgpt_through_vpn=$_chatGptThroughVpn, advanced_tun=$_advancedTunMode, status=$_status.',
     ];
     try {
       final codexProcessActive = await _hasActiveCodexProcess();
@@ -4173,8 +4181,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       if (_connectionLifecycleChangedAt != null)
         'connection_lifecycle_changed: ${_connectionLifecycleChangedAt!.toIso8601String()}',
       'message: ${_redactSensitive(_message)}',
-      'codex_direct: $_codexDirect',
-      'codex_direct_supported: $_codexDirectSupported',
+      'codex_through_vpn: $_codexThroughVpn',
+      'codex_through_vpn_effective: ${_codexThroughVpn && _codexThroughVpnSupported}',
       'chatgpt_through_vpn: $_chatGptThroughVpn',
       'developer_mode: $_developerMode',
       'terminal_through_vpn: $_terminalThroughVpn',
@@ -4495,12 +4503,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
       reason: reason == null ? null : _redactSensitive(reason),
       failover: failover,
       activeTraffic: _hasActiveTraffic(),
-      codexActive:
-          _codexDirect &&
-          await _hasActiveCodexProcess().timeout(
-            const Duration(milliseconds: 800),
-            onTimeout: () => false,
-          ),
+      codexActive: await _hasActiveCodexProcess().timeout(
+        const Duration(milliseconds: 800),
+        onTimeout: () => false,
+      ),
       probeP95Ms: _healthProbeP95LatencyMs(),
       probeP99Ms: _healthProbeP99LatencyMs(),
     );
@@ -4908,8 +4914,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       developerMode: _developerMode,
       terminalThroughVpn: _terminalThroughVpn,
       dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
-      codexDirect: _codexDirect,
-      codexDirectSupported: _codexDirectSupported,
+      codexThroughVpn: _codexThroughVpn,
+      codexThroughVpnSupported: _codexThroughVpnSupported,
       chatGptThroughVpn: _chatGptThroughVpn,
       busy: _windowsSettingsBusy,
       checkingUpdate: _checkingUpdate,
@@ -4931,7 +4937,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
           unawaited(_setTerminalThroughVpn(value)),
       onDnsOnlyThroughVpnChanged: (value) =>
           unawaited(_setDnsOnlyThroughVpn(value)),
-      onCodexDirectChanged: (value) => unawaited(_setCodexDirect(value)),
+      onCodexThroughVpnChanged: (value) =>
+          unawaited(_setCodexThroughVpn(value)),
       onChatGptThroughVpnChanged: (value) =>
           unawaited(_setChatGptThroughVpn(value)),
       onEditSplitTunnel: _showSplitTunnelSheet,
@@ -6164,8 +6171,8 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.developerMode,
     required this.terminalThroughVpn,
     required this.dnsOnlyThroughVpn,
-    required this.codexDirect,
-    required this.codexDirectSupported,
+    required this.codexThroughVpn,
+    required this.codexThroughVpnSupported,
     required this.chatGptThroughVpn,
     required this.busy,
     required this.checkingUpdate,
@@ -6184,7 +6191,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onDeveloperModeChanged,
     required this.onTerminalThroughVpnChanged,
     required this.onDnsOnlyThroughVpnChanged,
-    required this.onCodexDirectChanged,
+    required this.onCodexThroughVpnChanged,
     required this.onChatGptThroughVpnChanged,
     required this.onEditSplitTunnel,
     required this.onEditVpnOnly,
@@ -6208,8 +6215,8 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool developerMode;
   final bool terminalThroughVpn;
   final bool dnsOnlyThroughVpn;
-  final bool codexDirect;
-  final bool codexDirectSupported;
+  final bool codexThroughVpn;
+  final bool codexThroughVpnSupported;
   final bool chatGptThroughVpn;
   final bool busy;
   final bool checkingUpdate;
@@ -6228,7 +6235,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final ValueChanged<bool> onDeveloperModeChanged;
   final ValueChanged<bool> onTerminalThroughVpnChanged;
   final ValueChanged<bool> onDnsOnlyThroughVpnChanged;
-  final ValueChanged<bool> onCodexDirectChanged;
+  final ValueChanged<bool> onCodexThroughVpnChanged;
   final ValueChanged<bool> onChatGptThroughVpnChanged;
   final VoidCallback onEditSplitTunnel;
   final VoidCallback onEditVpnOnly;
@@ -6335,13 +6342,13 @@ class _WindowsToolsPanel extends StatelessWidget {
               const SizedBox(height: 8),
               _SettingsSwitchRow(
                 icon: Icons.code_outlined,
-                value: codexDirect,
-                onChanged: codexDirectSupported ? onCodexDirectChanged : null,
-                title: Text(strings.codexDirect),
+                value: codexThroughVpn && codexThroughVpnSupported,
+                onChanged: busy ? null : onCodexThroughVpnChanged,
+                title: Text(strings.codexThroughVpn),
                 subtitle: Text(
-                  codexDirectSupported
-                      ? strings.codexDirectHint
-                      : strings.codexDirectTunOnly,
+                  codexThroughVpnSupported
+                      ? strings.codexThroughVpnHint
+                      : strings.codexThroughVpnTunOnly,
                 ),
               ),
               const SizedBox(height: 8),
@@ -6914,9 +6921,9 @@ class _Strings {
     required this.terminalThroughVpnTunOnly,
     required this.dnsOnlyThroughVpn,
     required this.dnsOnlyThroughVpnHint,
-    required this.codexDirect,
-    required this.codexDirectHint,
-    required this.codexDirectTunOnly,
+    required this.codexThroughVpn,
+    required this.codexThroughVpnHint,
+    required this.codexThroughVpnTunOnly,
     required this.chatGptThroughVpn,
     required this.chatGptThroughVpnHint,
     required this.codexDiagnostics,
@@ -7046,9 +7053,9 @@ class _Strings {
   final String terminalThroughVpnTunOnly;
   final String dnsOnlyThroughVpn;
   final String dnsOnlyThroughVpnHint;
-  final String codexDirect;
-  final String codexDirectHint;
-  final String codexDirectTunOnly;
+  final String codexThroughVpn;
+  final String codexThroughVpnHint;
+  final String codexThroughVpnTunOnly;
   final String chatGptThroughVpn;
   final String chatGptThroughVpnHint;
   final String codexDiagnostics;
@@ -7489,11 +7496,11 @@ class _Strings {
     dnsOnlyThroughVpn: 'DNS только через VPN',
     dnsOnlyThroughVpnHint:
         'Обычные DNS-запросы идут через Yurich Core и DoH поверх VPN/proxy. Bootstrap использует Cloudflare DoH без DNS провайдера.',
-    codexDirect: 'Codex CLI напрямую',
-    codexDirectHint:
-        'Только процессы Codex идут напрямую. Сайт ChatGPT управляется отдельным переключателем ниже.',
-    codexDirectTunOnly:
-        'Исключения Codex доступны для обычных профилей Yurich Connect.',
+    codexThroughVpn: 'Codex CLI только через VPN',
+    codexThroughVpnHint:
+        'Процессы Codex принудительно идут через текущий VPN. Применяется после переподключения.',
+    codexThroughVpnTunOnly:
+        'Принудительный маршрут Codex работает только в Продвинутом TUN-режиме. Без VPN Windows не блокирует запуск Codex.',
     chatGptThroughVpn: 'ChatGPT сайт через VPN',
     chatGptThroughVpnHint:
         'Рекомендовано: chatgpt.com, OpenAI web assets и авторизация идут через текущий VPN/proxy, а не напрямую.',
@@ -7675,11 +7682,11 @@ class _Strings {
     dnsOnlyThroughVpn: 'DNS only through VPN',
     dnsOnlyThroughVpnHint:
         'Regular DNS queries use Yurich Core and DoH over VPN/proxy. Bootstrap uses Cloudflare DoH without ISP DNS.',
-    codexDirect: 'Codex CLI direct',
-    codexDirectHint:
-        'Only Codex executables go direct. ChatGPT website routing is controlled by the switch below.',
-    codexDirectTunOnly:
-        'Codex exclusions are available for regular Yurich Connect profiles.',
+    codexThroughVpn: 'Codex CLI through VPN only',
+    codexThroughVpnHint:
+        'Codex processes are forced through the current VPN. Reconnect to apply.',
+    codexThroughVpnTunOnly:
+        'Forced Codex routing is available only in Advanced TUN Mode. Windows does not block Codex while VPN is disconnected.',
     chatGptThroughVpn: 'ChatGPT website through VPN',
     chatGptThroughVpnHint:
         'Recommended: chatgpt.com, OpenAI web assets, and auth use the current VPN/proxy instead of direct routing.',

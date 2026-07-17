@@ -8,10 +8,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app_icon.ico</ApplicationIcon>
     <AssemblyName>YurichConnect_Setup</AssemblyName>
-    <Version>1.0.100</Version>
-    <AssemblyVersion>1.0.100.0</AssemblyVersion>
-    <FileVersion>1.0.100.0</FileVersion>
-    <InformationalVersion>1.0.100</InformationalVersion>
+    <Version>1.0.101</Version>
+    <AssemblyVersion>1.0.101.0</AssemblyVersion>
+    <FileVersion>1.0.101.0</FileVersion>
+    <InformationalVersion>1.0.101</InformationalVersion>
     <Product>Yurich Connect Installer</Product>
     <Company>Ivan Yurievich / Yurich Connect</Company>
     <PublishSingleFile>true</PublishSingleFile>

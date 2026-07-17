@@ -241,6 +241,7 @@ class ProfileStore {
       'splitTunnelExcludedProcesses';
   static const _vpnOnlyProcessesKey = 'vpnOnlyProcesses';
   static const _codexDirectKey = 'codexDirect';
+  static const _codexThroughVpnKey = 'codexThroughVpn';
   static const _chatGptThroughVpnKey = 'chatGptThroughVpn';
   static const _developerModeKey = 'developerMode';
   static const _terminalThroughVpnKey = 'terminalThroughVpn';
@@ -250,7 +251,7 @@ class ProfileStore {
   static const _connectionSessionHistoryKey = 'connectionSessionHistory';
   static const _connectionSessionHistoryLimit = 20;
   static const defaultVpnOnlyProcesses = <String>[];
-  static const defaultCodexDirect = true;
+  static const defaultCodexThroughVpn = true;
   static const defaultChatGptThroughVpn = true;
   static const defaultDeveloperMode = true;
   static const defaultTerminalThroughVpn = false;
@@ -417,14 +418,21 @@ class ProfileStore {
     await prefs.setStringList(_vpnOnlyProcessesKey, processes);
   }
 
-  Future<bool> loadCodexDirect() async {
+  Future<bool> loadCodexThroughVpn() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_codexDirectKey) ?? defaultCodexDirect;
+    return prefs.getBool(_codexThroughVpnKey) ?? defaultCodexThroughVpn;
   }
 
-  Future<void> saveCodexDirect(bool enabled) async {
+  Future<void> saveCodexThroughVpn(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_codexDirectKey, enabled);
+    await prefs.setBool(_codexThroughVpnKey, enabled);
+  }
+
+  Future<void> disableLegacyCodexDirect() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_codexDirectKey) != false) {
+      await prefs.setBool(_codexDirectKey, false);
+    }
   }
 
   Future<bool> loadChatGptThroughVpn() async {

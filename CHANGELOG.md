@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.101 - 2026-07-17
+
+### Changed
+
+- Replaced Codex direct routing with **Codex CLI through VPN only** in Advanced TUN Mode.
+- Migrated the old Codex direct preference to a disabled state and enabled the new VPN-only preference by default.
+
+### Fixed
+
+- Codex process and process-path rules now take priority over split-tunnel and direct-domain exceptions.
+- Codex DNS queries use the VPN DNS route while Codex VPN-only mode is active.
+- Active Codex sessions continue to suppress aggressive health-check reconnects regardless of routing mode.
+
+### Tests
+
+- Added Codex process, path-regex, DNS-route, direct-rule conflict, and preference-migration coverage.
+
 ## 1.0.100 - 2026-07-15
 
 ### Added

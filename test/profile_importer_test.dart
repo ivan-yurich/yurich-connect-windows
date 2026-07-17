@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yurich_connect_windows/src/models/vpn_profile.dart';
@@ -1085,76 +1086,114 @@ void main() {
     },
   );
 
-  test(
-    'routes Codex executables directly without bypassing ChatGPT web',
-    () async {
-      const link =
-          'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+  test('forces Codex processes and DNS through VPN in TUN mode', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
 
-      final profile = (await ProfileImporter().importFromText(link)).first;
-      final config =
-          jsonDecode(
-                SingBoxConfigBuilder().build(
-                  profile,
-                  target: SingBoxConfigTarget.windows,
-                  codexDirect: true,
-                  vpnOnlyProcesses: const ['OtherForeignApp.exe'],
-                ),
-              )
-              as Map<String, dynamic>;
-      final dnsRules =
-          ((config['dns'] as Map<String, dynamic>)['rules'] as List)
-              .whereType<Map<String, dynamic>>()
-              .toList();
-      final route = config['route'] as Map<String, dynamic>;
-      final routeRules = (route['rules'] as List)
-          .whereType<Map<String, dynamic>>()
-          .toList();
+    final profile = (await ProfileImporter().importFromText(link)).first;
+    final config =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                windowsTunMode: true,
+                codexThroughVpn: true,
+                chatGptThroughVpn: false,
+                splitTunnelExcludedProcesses: const ['Codex.exe'],
+              ),
+            )
+            as Map<String, dynamic>;
+    final dnsRules = ((config['dns'] as Map<String, dynamic>)['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final route = config['route'] as Map<String, dynamic>;
+    final routeRules = (route['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final codexProxyIndex = routeRules.indexWhere(
+      (rule) => rule['outbound'] == 'proxy' && rule['type'] == 'logical',
+    );
+    final chatGptDirectIndex = routeRules.indexWhere(
+      (rule) =>
+          rule['outbound'] == 'direct' &&
+          rule['domain_suffix'] is List &&
+          (rule['domain_suffix'] as List).contains('chatgpt.com'),
+    );
+    final codexProxyRule = routeRules[codexProxyIndex];
+    final nestedRules = (codexProxyRule['rules'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList();
 
-      expect(route['find_process'], isTrue);
-      expect(
-        dnsRules.any(
-          (rule) =>
-              rule['server'] == 'local-dns' &&
-              rule['domain_suffix'] is List &&
-              (rule['domain_suffix'] as List).contains('chatgpt.com'),
-        ),
-        isFalse,
-      );
-      expect(
-        routeRules.any(
-          (rule) =>
-              rule['outbound'] == 'direct' &&
-              rule['domain_suffix'] is List &&
-              (rule['domain_suffix'] as List).contains('chatgpt.com'),
-        ),
-        isFalse,
-      );
-      expect(
-        routeRules.any((rule) {
-          final processName = rule['process_name'];
-          return rule['outbound'] == 'direct' &&
-              processName is List &&
-              processName.contains('Codex.exe') &&
-              processName.contains('codex.exe') &&
-              processName.contains('openai-codex.exe') &&
-              !processName.contains('node.exe');
-        }),
-        isTrue,
-      );
-      expect(
-        routeRules.any((rule) {
-          final processName = rule['process_name'];
-          return rule['outbound'] == 'proxy' &&
-              processName is List &&
-              processName.contains('OtherForeignApp.exe') &&
-              !processName.contains('Codex.exe') &&
-              !processName.contains('codex.exe');
-        }),
-        isTrue,
-      );
-    },
-  );
+    expect(route['find_process'], isTrue);
+    expect(codexProxyIndex, greaterThanOrEqualTo(0));
+    expect(chatGptDirectIndex, greaterThan(codexProxyIndex));
+    expect(
+      nestedRules.any((rule) {
+        final names = rule['process_name'];
+        return names is List &&
+            names.contains('Codex.exe') &&
+            names.contains('codex.exe') &&
+            names.contains('openai-codex.exe') &&
+            names.contains('codex-code-mode-host.exe') &&
+            !names.contains('node.exe');
+      }),
+      isTrue,
+    );
+    expect(
+      nestedRules.any((rule) {
+        final patterns = rule['process_path_regex'];
+        return patterns is List &&
+            patterns.any((pattern) => pattern.contains('WindowsApps')) &&
+            patterns.any((pattern) => pattern.contains('node_modules'));
+      }),
+      isTrue,
+    );
+    expect(
+      routeRules.any((rule) {
+        final names = rule['process_name'];
+        return rule['outbound'] == 'direct' &&
+            names is List &&
+            names.contains('Codex.exe');
+      }),
+      isFalse,
+    );
+    expect(dnsRules.first['server'], 'global-dns');
+    expect(dnsRules.first['type'], 'logical');
+  });
+
+  test('bundled sing-box accepts Codex VPN-only TUN config', () async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    final executable = File('assets/windows/sing-box/sing-box.exe');
+    expect(executable.existsSync(), isTrue);
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=tcp&sni=www.example.com&fp=chrome#TLS';
+    final profile = (await ProfileImporter().importFromText(link)).single;
+    final config = SingBoxConfigBuilder().build(
+      profile,
+      target: SingBoxConfigTarget.windows,
+      windowsTunMode: true,
+      codexThroughVpn: true,
+    );
+    final tempDirectory = await Directory.systemTemp.createTemp(
+      'yurich-codex-vpn-test-',
+    );
+    try {
+      final configFile = File('${tempDirectory.path}\\sing-box.json');
+      await configFile.writeAsString(config, flush: true);
+      final result = await Process.run(
+        executable.absolute.path,
+        ['check', '-c', configFile.path],
+        workingDirectory: executable.parent.absolute.path,
+        runInShell: false,
+      ).timeout(const Duration(seconds: 15));
+
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    } finally {
+      await tempDirectory.delete(recursive: true);
+    }
+  });
 
   test(
     'can route ChatGPT web domains directly when explicitly requested',
@@ -1168,7 +1207,6 @@ void main() {
                 SingBoxConfigBuilder().build(
                   profile,
                   target: SingBoxConfigTarget.windows,
-                  codexDirect: true,
                   chatGptThroughVpn: false,
                 ),
               )

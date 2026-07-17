@@ -34,7 +34,7 @@ XHTTP profiles preserve the subscription `host`, `path`, `mode`, `extra`, and SN
 Yurich Connect separates ChatGPT website routing from Codex CLI routing:
 
 - **ChatGPT website through VPN** is enabled by default, so `chatgpt.com` and OpenAI web assets use the current VPN/proxy route.
-- **Codex CLI direct** can be enabled separately for Codex processes when long-running Codex sessions should bypass reconnect-sensitive routing.
+- **Codex CLI through VPN only** forces supported Codex executables through the current VPN in Advanced TUN Mode. The process rule has priority over split-tunnel and direct-domain exceptions.
 
 For long WebSocket sessions, the app avoids aggressive tunnel restarts. A single health-check timeout does not kill the VPN, multiple endpoints are checked, reconnect watchdog is softened during active traffic, and DNS/TCP/WebSocket/reconnect history diagnostics are written to logs.
 
@@ -130,7 +130,7 @@ Yurich Connect импортирует одиночные ссылки профи
 Yurich Connect разделяет маршрутизацию сайта ChatGPT и Codex CLI:
 
 - **ChatGPT сайт через VPN** включён по умолчанию, поэтому `chatgpt.com` и web-ресурсы OpenAI идут через текущий VPN/proxy маршрут.
-- **Codex CLI напрямую** можно включить отдельно для процессов Codex, когда длинные Codex-сессии должны обходить reconnect-чувствительные маршруты.
+- **Codex CLI только через VPN** принудительно направляет поддерживаемые процессы Codex через текущий VPN в Advanced TUN Mode. Правило процесса имеет приоритет над split tunneling и прямыми доменными исключениями.
 
 Для долгих WebSocket-сессий приложение не делает агрессивный перезапуск туннеля. Один health-check timeout не убивает VPN, проверяется несколько endpoint, reconnect watchdog смягчён во время активного трафика, а диагностика DNS/TCP/WebSocket/reconnect history пишется в логи.
 

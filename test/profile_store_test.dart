@@ -4,11 +4,11 @@ import 'package:yurich_connect_windows/src/services/profile_store.dart';
 
 void main() {
   group('ProfileStore Codex settings', () {
-    test('keeps Codex direct enabled by default', () async {
+    test('keeps Codex through VPN enabled by default', () async {
       SharedPreferences.setMockInitialValues({});
       final store = ProfileStore();
 
-      expect(await store.loadCodexDirect(), isTrue);
+      expect(await store.loadCodexThroughVpn(), isTrue);
       expect(await store.loadChatGptThroughVpn(), isTrue);
       expect(await store.loadDeveloperMode(), isTrue);
       expect(await store.loadTerminalThroughVpn(), isFalse);
@@ -16,13 +16,24 @@ void main() {
       expect(await store.loadVpnOnlyProcesses(), isEmpty);
     });
 
-    test('saves Codex direct preference', () async {
+    test('saves Codex through VPN preference', () async {
       SharedPreferences.setMockInitialValues({});
       final store = ProfileStore();
 
-      await store.saveCodexDirect(false);
+      await store.saveCodexThroughVpn(false);
 
-      expect(await store.loadCodexDirect(), isFalse);
+      expect(await store.loadCodexThroughVpn(), isFalse);
+    });
+
+    test('disables legacy Codex direct preference', () async {
+      SharedPreferences.setMockInitialValues({'codexDirect': true});
+      final store = ProfileStore();
+
+      await store.disableLegacyCodexDirect();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('codexDirect'), isFalse);
+      expect(await store.loadCodexThroughVpn(), isTrue);
     });
 
     test('saves ChatGPT website routing preference', () async {

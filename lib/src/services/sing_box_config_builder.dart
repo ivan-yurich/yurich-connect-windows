@@ -15,7 +15,7 @@ class SingBoxConfigBuilder {
   static const russianGeoIpRuleSet = 'geoip-ru';
   static const russianGeoIpRuleSetUrl =
       'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs';
-  static const codexDirectDomains = [
+  static const openAiWebDomains = [
     'chatgpt.com',
     'ws.chatgpt.com',
     'openai.com',
@@ -23,18 +23,27 @@ class SingBoxConfigBuilder {
     'oaistatic.com',
     'oaiusercontent.com',
   ];
-  static const codexDirectDomainSuffixes = [
+  static const openAiWebDomainSuffixes = [
     'chatgpt.com',
     'openai.com',
     'auth.openai.com',
     'oaistatic.com',
     'oaiusercontent.com',
   ];
-  static const codexDirectProcesses = [
+  static const codexProcesses = [
     'codex.exe',
     'Codex.exe',
     'openai-codex.exe',
     'OpenAI Codex.exe',
+    'codex-code-mode-host.exe',
+    'codex-command-runner.exe',
+    'codex-computer-use.exe',
+  ];
+  static const codexProcessPathRegexes = [
+    r'(?i).*[\\/](?:openai[-_ ]?)?codex[^\\/]*\.exe$',
+    r'(?i).*[\\/]WindowsApps[\\/]OpenAI\.Codex_[^\\/]+[\\/].*\.exe$',
+    r'(?i).*[\\/]node_modules[\\/]@openai[\\/]codex[\\/].*\.exe$',
+    r'(?i).*[\\/]\.codex[\\/].*\.exe$',
   ];
   static const developerDirectProcesses = [
     'ssh.exe',
@@ -94,7 +103,7 @@ class SingBoxConfigBuilder {
     NaiveOutboundMode naiveMode = NaiveOutboundMode.auto,
     List<String> splitTunnelExcludedProcesses = const [],
     List<String> vpnOnlyProcesses = const [],
-    bool codexDirect = false,
+    bool codexThroughVpn = false,
     bool chatGptThroughVpn = true,
     bool developerMode = false,
     bool terminalThroughVpn = false,
@@ -129,10 +138,8 @@ class SingBoxConfigBuilder {
     );
     final useWindowsTun =
         target == SingBoxConfigTarget.windows && windowsTunMode;
-    final codexWebDomainsDirect =
-        target == SingBoxConfigTarget.windows &&
-        codexDirect &&
-        !chatGptThroughVpn;
+    final openAiWebDomainsDirect =
+        target == SingBoxConfigTarget.windows && !chatGptThroughVpn;
     final rejectQuicUdp =
         profile.kind == VpnProfileKind.naive ||
         (target == SingBoxConfigTarget.windows &&
@@ -140,25 +147,25 @@ class SingBoxConfigBuilder {
                 profile.kind == VpnProfileKind.vlessTls));
     final rejectAllUdp =
         profile.kind == VpnProfileKind.naive && proxyOutbound['type'] == 'http';
-    final codexProcesses = target == SingBoxConfigTarget.windows && codexDirect
-        ? _normalizeProcessNames(codexDirectProcesses)
-        : const <String>[];
     final developerProcesses =
         target == SingBoxConfigTarget.windows && developerMode
         ? _normalizeProcessNames(developerDirectProcesses)
+        : const <String>[];
+    final codexVpnProcesses = useWindowsTun && codexThroughVpn
+        ? _normalizeProcessNames(codexProcesses)
         : const <String>[];
     final forcedProxyProcesses = _normalizeProcessNames([
       ...vpnOnlyProcesses,
       if (target == SingBoxConfigTarget.windows && terminalThroughVpn)
         ...developerDirectProcesses,
     ]);
-    final forcedProxyLookup = forcedProxyProcesses
-        .map((process) => process.toLowerCase())
-        .toSet();
+    final forcedProxyLookup = [
+      ...forcedProxyProcesses,
+      ...codexVpnProcesses,
+    ].map((process) => process.toLowerCase()).toSet();
     final excludedProcesses =
         _normalizeProcessNames([
               ...splitTunnelExcludedProcesses,
-              ...codexProcesses,
               ...developerProcesses,
             ])
             .where(
@@ -170,7 +177,8 @@ class SingBoxConfigBuilder {
       'log': {'level': 'warn', 'timestamp': true},
       'dns': _dnsConfig(
         target,
-        codexWebDomainsDirect: codexWebDomainsDirect,
+        openAiWebDomainsDirect: openAiWebDomainsDirect,
+        codexThroughVpn: useWindowsTun && codexThroughVpn,
         windowsTunMode: useWindowsTun,
         dnsOnlyThroughVpn: dnsOnlyThroughVpn,
         usesNaiveProxyCore: usesNaiveProxyCore,
@@ -201,15 +209,25 @@ class SingBoxConfigBuilder {
           if (target == SingBoxConfigTarget.windows) ...[
             {'ip_is_private': true, 'protocol': 'icmp', 'action': 'reject'},
             {'ip_is_private': true, 'outbound': 'direct'},
+            if (codexVpnProcesses.isNotEmpty)
+              {
+                'type': 'logical',
+                'mode': 'or',
+                'rules': [
+                  {'process_name': codexVpnProcesses},
+                  {'process_path_regex': codexProcessPathRegexes},
+                ],
+                'outbound': 'proxy',
+              },
             if (excludedProcesses.isNotEmpty)
               {'process_name': excludedProcesses, 'outbound': 'direct'},
             if (forcedProxyProcesses.isNotEmpty)
               {'process_name': forcedProxyProcesses, 'outbound': 'proxy'},
           ],
-          if (codexWebDomainsDirect)
+          if (openAiWebDomainsDirect)
             {
-              'domain': codexDirectDomains,
-              'domain_suffix': codexDirectDomainSuffixes,
+              'domain': openAiWebDomains,
+              'domain_suffix': openAiWebDomainSuffixes,
               'outbound': 'direct',
             },
           if (target == SingBoxConfigTarget.windows)
@@ -249,6 +267,7 @@ class SingBoxConfigBuilder {
         'find_process':
             target == SingBoxConfigTarget.windows &&
             (excludedProcesses.isNotEmpty ||
+                codexVpnProcesses.isNotEmpty ||
                 forcedProxyProcesses.isNotEmpty ||
                 usesNaiveProxyCore),
         'final': 'proxy',
@@ -333,7 +352,8 @@ class SingBoxConfigBuilder {
 
   Map<String, dynamic> _dnsConfig(
     SingBoxConfigTarget target, {
-    required bool codexWebDomainsDirect,
+    required bool openAiWebDomainsDirect,
+    required bool codexThroughVpn,
     required bool windowsTunMode,
     required bool dnsOnlyThroughVpn,
     required bool usesNaiveProxyCore,
@@ -381,6 +401,17 @@ class SingBoxConfigBuilder {
         ],
       if (target == SingBoxConfigTarget.windows)
         'rules': [
+          if (windowsTunMode && codexThroughVpn)
+            {
+              'type': 'logical',
+              'mode': 'or',
+              'rules': [
+                {'process_name': _normalizeProcessNames(codexProcesses)},
+                {'process_path_regex': codexProcessPathRegexes},
+              ],
+              'action': 'route',
+              'server': 'global-dns',
+            },
           {
             'query_type': windowsLocalDnsQueryTypes,
             'action': 'route',
@@ -392,10 +423,10 @@ class SingBoxConfigBuilder {
             'action': 'route',
             'server': 'local-dns',
           },
-          if (codexWebDomainsDirect && !dnsOnlyThroughVpn)
+          if (openAiWebDomainsDirect && !dnsOnlyThroughVpn)
             {
-              'domain': codexDirectDomains,
-              'domain_suffix': codexDirectDomainSuffixes,
+              'domain': openAiWebDomains,
+              'domain_suffix': openAiWebDomainSuffixes,
               'action': 'route',
               'server': 'local-dns',
             },
