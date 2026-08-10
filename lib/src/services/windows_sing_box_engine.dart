@@ -7,6 +7,7 @@ import '../models/vpn_profile.dart';
 import 'runtime_log_classifier.dart';
 import 'secret_redactor.dart';
 import 'sing_box_config_builder.dart';
+import 'windows_sing_box_config_preparer.dart';
 import 'vpn_engine.dart';
 
 class WindowsSingBoxEngine implements VpnEngine {
@@ -178,11 +179,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       );
       final effectiveConfig = _usesXrayCore
           ? _config
-          : await _prepareConfigWithGeoIpFallback(
-              runtimeDir,
-              configDir,
-              _config,
-            );
+          : await _prepareSingBoxRuntimeConfig(runtimeDir, configDir, _config);
       final needsTun = !_usesXrayCore && _configNeedsTun(effectiveConfig);
       _lastConfigNeedsTun = needsTun;
       await configFile.writeAsString(effectiveConfig, encoding: utf8);
@@ -350,11 +347,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       );
       final effectiveConfig = _usesXrayCore
           ? _config
-          : await _prepareConfigWithGeoIpFallback(
-              runtimeDir,
-              configDir,
-              _config,
-            );
+          : await _prepareSingBoxRuntimeConfig(runtimeDir, configDir, _config);
       _lastConfigNeedsTun = !_usesXrayCore && _configNeedsTun(effectiveConfig);
       await configFile.writeAsString(effectiveConfig, encoding: utf8);
 
@@ -1198,6 +1191,29 @@ class WindowsSingBoxEngine implements VpnEngine {
           .toList();
     }
     return const JsonEncoder.withIndent('  ').convert(map);
+  }
+
+  Future<String> _prepareSingBoxRuntimeConfig(
+    Directory runtimeDir,
+    Directory configDir,
+    String config,
+  ) async {
+    final geoIpReadyConfig = await _prepareConfigWithGeoIpFallback(
+      runtimeDir,
+      configDir,
+      config,
+    );
+    final cacheDir = Directory('${configDir.path}\\cache');
+    await cacheDir.create(recursive: true);
+    final cacheFile = File('${cacheDir.path}\\sing-box.db');
+    final prepared = WindowsSingBoxConfigPreparer.withWritableCachePath(
+      geoIpReadyConfig,
+      cacheFilePath: cacheFile.path,
+    );
+    if (prepared != geoIpReadyConfig) {
+      _appendLog('sing-box cache configured in writable app data.');
+    }
+    return prepared;
   }
 
   Future<bool> _ensureGeoIpRuleSet(Directory runtimeDir, File cacheFile) async {

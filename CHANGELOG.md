@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.102 - 2026-08-10
+
+### Fixed
+
+- Moved the sing-box runtime cache from the protected installation directory to `%APPDATA%\Yurich Connect\cache\sing-box.db`.
+- Prevented `start service: initialize cache-file: open cache.db: Access is denied` failures for non-elevated Stable Proxy Mode starts.
+- Applied the writable cache path before preflight, startup canary, and the real core start for every sing-box protocol.
+- Corrected the primary Windows subscription User-Agent to a valid product-token format.
+
+### Tests
+
+- Added cache-path preservation, disabled-cache, and bundled sing-box startup coverage.
+
 ## 1.0.101 - 2026-07-17
 
 ### Changed
