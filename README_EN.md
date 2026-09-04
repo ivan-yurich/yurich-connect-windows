@@ -43,6 +43,18 @@ This mode may require:
 
 If you do not explicitly need a full TUN tunnel, start with Stable Proxy Mode.
 
+## Adaptive Access
+
+The **Adaptive access** switch is intended for networks where an ISP interferes with TLS or blocks individual VPN endpoints.
+
+When enabled:
+
+- compatible sing-box VLESS profiles use safe TLS record fragmentation without changing SNI or Reality settings;
+- after a confirmed startup failure, the client may try an available profile using another protocol;
+- XHTTP/Xray, NaiveProxy, raw sing-box JSON, and DNS settings are not rewritten.
+
+The mode is experimental and disabled by default. Reconnect the VPN after changing it. **Blocking diagnostics** checks selected-server DNS, endpoint reachability, TCP 443, and public TLS without changing routes.
+
 ## Yurich ID And Subscription Import
 
 Yurich Connect can import not only a single profile link, but also a subscription containing multiple servers.

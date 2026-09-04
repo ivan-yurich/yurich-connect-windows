@@ -5,6 +5,32 @@ import 'package:yurich_connect_windows/src/services/profile_store.dart';
 
 void main() {
   group('profile failover ranking', () {
+    test('adaptive access allows a cross-protocol startup fallback', () {
+      final preferred = _profile('preferred', 'Reality');
+      final naive = _profile(
+        'naive',
+        'Naive HTTPS',
+        kind: VpnProfileKind.naive,
+      );
+
+      expect(
+        profileFailoverPool(
+          profiles: [preferred, naive],
+          preferred: preferred,
+          adaptiveAccess: false,
+        ).map((profile) => profile.id),
+        ['preferred'],
+      );
+      expect(
+        profileFailoverPool(
+          profiles: [preferred, naive],
+          preferred: preferred,
+          adaptiveAccess: true,
+        ).map((profile) => profile.id),
+        ['preferred', 'naive'],
+      );
+    });
+
     test('auto-selects a healthier profile when preferred is unstable', () {
       final preferred = _profile('preferred', 'Slow RU');
       final best = _profile('best', 'Fast FI');
@@ -293,7 +319,7 @@ VpnProfile _profile(
   VpnProfileKind kind = VpnProfileKind.vlessReality,
 }) {
   final outbound = <String, dynamic>{
-    'type': 'vless',
+    'type': kind == VpnProfileKind.naive ? 'naive' : 'vless',
     'server': 'example.com',
     'uuid': '11111111-1111-4111-8111-111111111111',
     if (transport != 'tcp') 'transport': {'type': transport},

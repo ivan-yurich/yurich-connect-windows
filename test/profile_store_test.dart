@@ -13,6 +13,7 @@ void main() {
       expect(await store.loadDeveloperMode(), isTrue);
       expect(await store.loadTerminalThroughVpn(), isFalse);
       expect(await store.loadDnsOnlyThroughVpn(), isTrue);
+      expect(await store.loadAdaptiveAccess(), isFalse);
       expect(await store.loadVpnOnlyProcesses(), isEmpty);
     });
 
@@ -70,6 +71,15 @@ void main() {
       await store.saveDnsOnlyThroughVpn(false);
 
       expect(await store.loadDnsOnlyThroughVpn(), isFalse);
+    });
+
+    test('saves adaptive access preference', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveAdaptiveAccess(true);
+
+      expect(await store.loadAdaptiveAccess(), isTrue);
     });
   });
 

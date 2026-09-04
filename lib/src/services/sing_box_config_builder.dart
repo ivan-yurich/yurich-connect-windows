@@ -109,6 +109,7 @@ class SingBoxConfigBuilder {
     bool terminalThroughVpn = false,
     bool dnsOnlyThroughVpn = false,
     bool windowsTunMode = false,
+    bool adaptiveAccess = false,
   }) {
     if (profile.kind == VpnProfileKind.singBoxConfig) {
       final raw = profile.rawConfig;
@@ -127,6 +128,12 @@ class SingBoxConfigBuilder {
         jsonDecode(jsonEncode(outbound)) as Map<String, dynamic>;
     proxyOutbound['tag'] = 'proxy';
     _normalizeOutbound(profile, proxyOutbound, naiveMode);
+    _applyAdaptiveAccess(
+      profile,
+      proxyOutbound,
+      target: target,
+      enabled: adaptiveAccess,
+    );
     final usesNaiveProxyCore =
         target == SingBoxConfigTarget.windows &&
         proxyOutbound['type'] == 'socks';
@@ -497,6 +504,28 @@ class SingBoxConfigBuilder {
       proxyOutbound.putIfAbsent('network_strategy', () => 'fallback');
       proxyOutbound.putIfAbsent('fallback_delay', () => '300ms');
     }
+  }
+
+  void _applyAdaptiveAccess(
+    VpnProfile profile,
+    Map<String, dynamic> proxyOutbound, {
+    required SingBoxConfigTarget target,
+    required bool enabled,
+  }) {
+    if (!enabled ||
+        target != SingBoxConfigTarget.windows ||
+        !VlessProfileTools.isVlessProfile(profile) ||
+        VlessProfileTools.requiresXrayBackend(profile)) {
+      return;
+    }
+    final tls = (proxyOutbound['tls'] as Map?)?.cast<String, dynamic>();
+    if (tls == null || tls['enabled'] == false) {
+      return;
+    }
+
+    // TLS record fragmentation is the conservative sing-box DPI fallback.
+    // The heavier network-layer fragment option is intentionally not enabled.
+    tls.putIfAbsent('record_fragment', () => true);
   }
 
   Object _domainResolver(

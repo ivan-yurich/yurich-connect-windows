@@ -246,6 +246,7 @@ class ProfileStore {
   static const _developerModeKey = 'developerMode';
   static const _terminalThroughVpnKey = 'terminalThroughVpn';
   static const _dnsOnlyThroughVpnKey = 'dnsOnlyThroughVpn';
+  static const _adaptiveAccessKey = 'adaptiveAccess';
   static const _windowsConnectionModeKey = 'windowsConnectionMode';
   static const _profileRuntimeStatsKey = 'profileRuntimeStats';
   static const _connectionSessionHistoryKey = 'connectionSessionHistory';
@@ -256,6 +257,7 @@ class ProfileStore {
   static const defaultDeveloperMode = true;
   static const defaultTerminalThroughVpn = false;
   static const defaultDnsOnlyThroughVpn = true;
+  static const defaultAdaptiveAccess = false;
   static const defaultWindowsConnectionMode = WindowsConnectionMode.stableProxy;
 
   Future<List<VpnProfile>> loadProfiles() async {
@@ -473,6 +475,16 @@ class ProfileStore {
   Future<void> saveDnsOnlyThroughVpn(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_dnsOnlyThroughVpnKey, enabled);
+  }
+
+  Future<bool> loadAdaptiveAccess() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_adaptiveAccessKey) ?? defaultAdaptiveAccess;
+  }
+
+  Future<void> saveAdaptiveAccess(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_adaptiveAccessKey, enabled);
   }
 
   Future<WindowsConnectionMode> loadWindowsConnectionMode() async {

@@ -21,6 +21,40 @@ void main() {
     expect(profiles.first.outbound?['tls']['reality']['public_key'], 'abc123');
   });
 
+  test('adaptive access uses safe TLS record fragmentation on Windows', () async {
+    const link =
+        'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01#Reality';
+    final profile = (await ProfileImporter().importFromText(link)).single;
+    final regular =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+              ),
+            )
+            as Map<String, dynamic>;
+    final adaptive =
+        jsonDecode(
+              SingBoxConfigBuilder().build(
+                profile,
+                target: SingBoxConfigTarget.windows,
+                adaptiveAccess: true,
+              ),
+            )
+            as Map<String, dynamic>;
+    final regularTls =
+        ((regular['outbounds'] as List).first as Map<String, dynamic>)['tls']
+            as Map<String, dynamic>;
+    final adaptiveTls =
+        ((adaptive['outbounds'] as List).first as Map<String, dynamic>)['tls']
+            as Map<String, dynamic>;
+
+    expect(regularTls.containsKey('record_fragment'), isFalse);
+    expect(adaptiveTls['record_fragment'], isTrue);
+    expect(adaptiveTls['server_name'], 'www.example.com');
+    expect(adaptiveTls['reality'], regularTls['reality']);
+  });
+
   test('imports VLESS Reality link with expiry date from query', () async {
     const link =
         'vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&type=tcp&flow=xtls-rprx-vision&sni=www.example.com&fp=chrome&pbk=abc123&sid=01&expires=2026-12-31#Reality';
@@ -1175,6 +1209,7 @@ void main() {
       target: SingBoxConfigTarget.windows,
       windowsTunMode: true,
       codexThroughVpn: true,
+      adaptiveAccess: true,
     );
     final tempDirectory = await Directory.systemTemp.createTemp(
       'yurich-codex-vpn-test-',

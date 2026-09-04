@@ -13,6 +13,10 @@ It runs on Windows 10/11 and uses Yurich Core powered by sing-box, Xray-core, Na
 
 Start with Stable Proxy Mode unless you explicitly need a full TUN tunnel.
 
+### Adaptive Access
+
+The opt-in **Adaptive Access** mode adds conservative TLS record fragmentation to compatible sing-box VLESS profiles and permits cross-protocol startup failover when an ISP blocks a specific endpoint. It does not rewrite XHTTP/Xray, NaiveProxy, raw sing-box JSON, DNS, SNI, or Reality settings. **Blocking diagnostics** tests profile DNS, endpoint reachability, public TCP 443, and TLS without changing routes.
+
 ### Subscriptions And Profiles
 
 Yurich Connect imports single profile links and full subscriptions with multiple servers.
@@ -108,6 +112,10 @@ The old Aurum VPN name is no longer used for the Windows product. Current names 
 - **Advanced TUN Mode** - отдельный продвинутый режим для маршрутизации всех приложений, Wintun, DNS hijack, split routing и полного системного VPN. Может требовать права администратора.
 
 Начинайте со Stable Proxy Mode, если нет явной необходимости в полном TUN-туннеле.
+
+### Адаптивный обход блокировок
+
+Отключаемый режим **Адаптивный обход блокировок** добавляет безопасное дробление TLS-записей для совместимых VLESS-профилей sing-box и разрешает резерв другого протокола при подтверждённой ошибке старта. Он не переписывает XHTTP/Xray, NaiveProxy, raw sing-box JSON, DNS, SNI и Reality. Кнопка **Проверка блокировок** проверяет DNS профиля, доступность endpoint, TCP 443 и TLS без изменения маршрутов.
 
 ### Подписки и профили
 

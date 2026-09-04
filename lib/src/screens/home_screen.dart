@@ -15,6 +15,7 @@ import '../branding.dart';
 import '../services/bounded_async_mapper.dart';
 import '../services/connection_health_presentation.dart';
 import '../services/connection_operation_coordinator.dart';
+import '../services/network_compatibility_service.dart';
 import '../services/profile_importer.dart';
 import '../services/profile_failover.dart';
 import '../services/profile_identity.dart';
@@ -44,7 +45,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.103';
+const _appVersion = '1.0.104';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 5;
@@ -183,6 +184,7 @@ class _HomeScreenState extends State<HomeScreen>
   final _importer = ProfileImporter();
   final _configBuilder = SingBoxConfigBuilder();
   final _xrayConfigBuilder = const XrayConfigBuilder();
+  final _networkCompatibility = NetworkCompatibilityService();
   final _windowsIntegration = WindowsIntegrationService();
   final _connectionOperations = ConnectionOperationCoordinator();
   final _manualController = TextEditingController();
@@ -223,6 +225,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _developerMode = ProfileStore.defaultDeveloperMode;
   bool _terminalThroughVpn = ProfileStore.defaultTerminalThroughVpn;
   bool _dnsOnlyThroughVpn = ProfileStore.defaultDnsOnlyThroughVpn;
+  bool _adaptiveAccess = ProfileStore.defaultAdaptiveAccess;
   WindowsConnectionMode _windowsConnectionMode =
       ProfileStore.defaultWindowsConnectionMode;
   bool _systemProxyEnabled = false;
@@ -257,6 +260,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _terminalDiagnosticsBusy = false;
   bool _dnsDiagnosticsBusy = false;
   bool _vpnDiagnosticsBusy = false;
+  bool _networkCompatibilityDiagnosticsBusy = false;
   String? _dismissedUpdateVersion;
   String? _lastConfigSummary;
   DateTime? _lastVpnReconnectAt;
@@ -514,6 +518,7 @@ class _HomeScreenState extends State<HomeScreen>
     var developerMode = await _store.loadDeveloperMode();
     var terminalThroughVpn = await _store.loadTerminalThroughVpn();
     final dnsOnlyThroughVpn = await _store.loadDnsOnlyThroughVpn();
+    final adaptiveAccess = await _store.loadAdaptiveAccess();
     final windowsConnectionMode = await _store.loadWindowsConnectionMode();
     if (windowsConnectionMode != WindowsConnectionMode.advancedTun &&
         terminalThroughVpn) {
@@ -610,6 +615,7 @@ class _HomeScreenState extends State<HomeScreen>
       _developerMode = developerMode;
       _terminalThroughVpn = terminalThroughVpn;
       _dnsOnlyThroughVpn = dnsOnlyThroughVpn;
+      _adaptiveAccess = adaptiveAccess;
       _windowsConnectionMode = windowsConnectionMode;
       _systemProxyEnabled = systemProxyEnabled;
       _autoStart = autoStart;
@@ -1392,9 +1398,11 @@ class _HomeScreenState extends State<HomeScreen>
 
   List<VpnProfile> _connectCandidateProfiles(VpnProfile preferred) {
     final latencySnapshots = _profileLatencySnapshots();
-    final failoverProfiles = VlessProfileTools.isVlessProfile(preferred)
-        ? _profiles.where(VlessProfileTools.isVlessProfile).toList()
-        : _profiles;
+    final failoverProfiles = profileFailoverPool(
+      profiles: _profiles,
+      preferred: preferred,
+      adaptiveAccess: _adaptiveAccess,
+    );
     final selection = selectProfileFailoverCandidates(
       profiles: failoverProfiles,
       preferred: preferred,
@@ -1984,6 +1992,7 @@ class _HomeScreenState extends State<HomeScreen>
       terminalThroughVpn: _terminalThroughVpn && _advancedTunMode,
       dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
       windowsTunMode: _advancedTunMode,
+      adaptiveAccess: _adaptiveAccess,
     );
   }
 
@@ -3250,6 +3259,25 @@ if ($null -ne $match) { 'true' } else { 'false' }
     );
   }
 
+  Future<void> _setAdaptiveAccess(bool value) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    await _store.saveAdaptiveAccess(value);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _adaptiveAccess = value;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      value
+          ? 'Adaptive access enabled: compatible VLESS profiles use TLS record fragmentation and startup failover may try another protocol.'
+          : 'Adaptive access disabled: standard profile transport and protocol-local VLESS failover restored.',
+    );
+  }
+
   Future<void> _setAdvancedTunMode(bool value) async {
     if (!Platform.isWindows || _windowsSettingsBusy) {
       return;
@@ -3520,6 +3548,89 @@ if ($null -ne $match) { 'true' } else { 'false' }
         _showSnack(s.vpnDiagnosticsDone);
       }
     }
+  }
+
+  Future<void> _runNetworkCompatibilityDiagnostics() async {
+    if (_networkCompatibilityDiagnosticsBusy) {
+      return;
+    }
+    setState(() => _networkCompatibilityDiagnosticsBusy = true);
+    final lines = <String>[
+      'Network compatibility diagnostics started. adaptive_access=$_adaptiveAccess, '
+          'connected=$_connected, mode=${_windowsConnectionMode.code}.',
+    ];
+    var verdict = NetworkCompatibilityIssue.unavailable;
+    try {
+      Uri? subscriptionUri;
+      for (final source in _subscriptionSources) {
+        final candidate = Uri.tryParse(source);
+        if (candidate != null && candidate.host.isNotEmpty) {
+          subscriptionUri = candidate;
+          break;
+        }
+      }
+      final report = await _networkCompatibility.run(
+        profile: _selectedProfile,
+        subscriptionUri: subscriptionUri,
+      );
+      verdict = report.issue;
+      for (final check in report.checks) {
+        lines.add(
+          'Network compatibility check kind=${check.kind.name} '
+          'state=${check.state.name} target=${_redactSensitive(check.target)} '
+          'duration_ms=${check.duration.inMilliseconds} '
+          'result=${check.resultCode}.',
+        );
+      }
+      lines.add('Network compatibility verdict=${report.issue.code}.');
+    } on Object catch (error) {
+      lines.add(
+        'Network compatibility diagnostics failed: '
+        '${_redactSensitive('$error')}',
+      );
+    } finally {
+      for (final line in lines) {
+        _queueLog(line);
+      }
+      if (mounted) {
+        final message = _networkCompatibilityVerdict(verdict);
+        setState(() {
+          _networkCompatibilityDiagnosticsBusy = false;
+          _message = message;
+        });
+        _showSnack(message);
+      }
+    }
+  }
+
+  String _networkCompatibilityVerdict(NetworkCompatibilityIssue issue) {
+    final russian = _isRu(s);
+    return switch (issue) {
+      NetworkCompatibilityIssue.none =>
+        russian
+            ? 'Сеть доступна: явной блокировки DNS, TCP или TLS не найдено.'
+            : 'Network available: no clear DNS, TCP, or TLS blocking detected.',
+      NetworkCompatibilityIssue.dns =>
+        russian
+            ? 'Похоже на блокировку DNS выбранного сервера.'
+            : 'The selected server appears to be blocked at DNS level.',
+      NetworkCompatibilityIssue.tcp =>
+        russian
+            ? 'Похоже на блокировку или обрыв TCP/443 у провайдера.'
+            : 'The provider appears to block or drop TCP/443.',
+      NetworkCompatibilityIssue.tlsInterference =>
+        russian
+            ? 'TCP работает, но TLS-подключение перехватывается или блокируется.'
+            : 'TCP works, but TLS appears to be intercepted or blocked.',
+      NetworkCompatibilityIssue.endpoint =>
+        russian
+            ? 'Интернет работает, но адрес VPN или подписки недоступен.'
+            : 'Internet works, but the VPN or subscription endpoint is unavailable.',
+      NetworkCompatibilityIssue.unavailable =>
+        russian
+            ? 'Недостаточно данных для определения типа блокировки.'
+            : 'Not enough data to classify the network restriction.',
+    };
   }
 
   Future<bool> _diagnoseLocalTcpPort(int port) async {
@@ -4150,6 +4261,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       'developer_mode: $_developerMode',
       'terminal_through_vpn: $_terminalThroughVpn',
       'dns_only_through_vpn: $_dnsOnlyThroughVpn',
+      'adaptive_access: $_adaptiveAccess',
       if (_dnsFallbackAppliedAt != null)
         'dns_fallback_applied: ${_dnsFallbackAppliedAt!.toIso8601String()}',
       'developer_direct_apps: ${_formatProcessList(SingBoxConfigBuilder.developerDirectProcesses)}',
@@ -4877,6 +4989,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       developerMode: _developerMode,
       terminalThroughVpn: _terminalThroughVpn,
       dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
+      adaptiveAccess: _adaptiveAccess,
       codexThroughVpn: _codexThroughVpn,
       codexThroughVpnSupported: _codexThroughVpnSupported,
       chatGptThroughVpn: _chatGptThroughVpn,
@@ -4887,6 +5000,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       terminalDiagnosticsBusy: _terminalDiagnosticsBusy,
       dnsDiagnosticsBusy: _dnsDiagnosticsBusy,
       vpnDiagnosticsBusy: _vpnDiagnosticsBusy,
+      networkCompatibilityDiagnosticsBusy: _networkCompatibilityDiagnosticsBusy,
       excludedProcessCount: _splitTunnelExcludedProcesses.length,
       vpnOnlyProcessCount: _vpnOnlyProcesses.length,
       updateInfo: _updateInfo,
@@ -4900,6 +5014,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
           unawaited(_setTerminalThroughVpn(value)),
       onDnsOnlyThroughVpnChanged: (value) =>
           unawaited(_setDnsOnlyThroughVpn(value)),
+      onAdaptiveAccessChanged: (value) => unawaited(_setAdaptiveAccess(value)),
       onCodexThroughVpnChanged: (value) =>
           unawaited(_setCodexThroughVpn(value)),
       onChatGptThroughVpnChanged: (value) =>
@@ -4910,6 +5025,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       onTerminalDiagnostics: () => unawaited(_runTerminalDiagnostics()),
       onDnsDiagnostics: () => unawaited(_runDnsDiagnostics()),
       onVpnDiagnostics: () => unawaited(_runVpnDiagnostics()),
+      onNetworkCompatibilityDiagnostics: () =>
+          unawaited(_runNetworkCompatibilityDiagnostics()),
       onCheckUpdate: _checkForUpdates,
       onOpenReleases: () => _openUrl(WindowsIntegrationService.releasesUrl),
       onRepairConnection: () => unawaited(_repairConnection()),
@@ -6134,6 +6251,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.developerMode,
     required this.terminalThroughVpn,
     required this.dnsOnlyThroughVpn,
+    required this.adaptiveAccess,
     required this.codexThroughVpn,
     required this.codexThroughVpnSupported,
     required this.chatGptThroughVpn,
@@ -6144,6 +6262,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.terminalDiagnosticsBusy,
     required this.dnsDiagnosticsBusy,
     required this.vpnDiagnosticsBusy,
+    required this.networkCompatibilityDiagnosticsBusy,
     required this.excludedProcessCount,
     required this.vpnOnlyProcessCount,
     required this.updateInfo,
@@ -6154,6 +6273,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onDeveloperModeChanged,
     required this.onTerminalThroughVpnChanged,
     required this.onDnsOnlyThroughVpnChanged,
+    required this.onAdaptiveAccessChanged,
     required this.onCodexThroughVpnChanged,
     required this.onChatGptThroughVpnChanged,
     required this.onEditSplitTunnel,
@@ -6162,6 +6282,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onTerminalDiagnostics,
     required this.onDnsDiagnostics,
     required this.onVpnDiagnostics,
+    required this.onNetworkCompatibilityDiagnostics,
     required this.onCheckUpdate,
     required this.onOpenReleases,
     required this.onRepairConnection,
@@ -6178,6 +6299,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool developerMode;
   final bool terminalThroughVpn;
   final bool dnsOnlyThroughVpn;
+  final bool adaptiveAccess;
   final bool codexThroughVpn;
   final bool codexThroughVpnSupported;
   final bool chatGptThroughVpn;
@@ -6188,6 +6310,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool terminalDiagnosticsBusy;
   final bool dnsDiagnosticsBusy;
   final bool vpnDiagnosticsBusy;
+  final bool networkCompatibilityDiagnosticsBusy;
   final int excludedProcessCount;
   final int vpnOnlyProcessCount;
   final WindowsUpdateInfo? updateInfo;
@@ -6198,6 +6321,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final ValueChanged<bool> onDeveloperModeChanged;
   final ValueChanged<bool> onTerminalThroughVpnChanged;
   final ValueChanged<bool> onDnsOnlyThroughVpnChanged;
+  final ValueChanged<bool> onAdaptiveAccessChanged;
   final ValueChanged<bool> onCodexThroughVpnChanged;
   final ValueChanged<bool> onChatGptThroughVpnChanged;
   final VoidCallback onEditSplitTunnel;
@@ -6206,6 +6330,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final VoidCallback onTerminalDiagnostics;
   final VoidCallback onDnsDiagnostics;
   final VoidCallback onVpnDiagnostics;
+  final VoidCallback onNetworkCompatibilityDiagnostics;
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenReleases;
   final VoidCallback onRepairConnection;
@@ -6271,6 +6396,14 @@ class _WindowsToolsPanel extends StatelessWidget {
                       ? strings.systemProxyTunConflict
                       : strings.systemProxyHint,
                 ),
+              ),
+              const SizedBox(height: 8),
+              _SettingsSwitchRow(
+                icon: Icons.route_outlined,
+                value: adaptiveAccess,
+                onChanged: busy ? null : onAdaptiveAccessChanged,
+                title: Text(strings.adaptiveAccess),
+                subtitle: Text(strings.adaptiveAccessHint),
               ),
               const SizedBox(height: 8),
               _SettingsSwitchRow(
@@ -6408,6 +6541,18 @@ class _WindowsToolsPanel extends StatelessWidget {
                           )
                         : const Icon(Icons.network_check_outlined),
                     label: Text(strings.vpnDiagnostics),
+                  ),
+                  _ActionTile(
+                    onPressed: networkCompatibilityDiagnosticsBusy
+                        ? null
+                        : onNetworkCompatibilityDiagnostics,
+                    icon: networkCompatibilityDiagnosticsBusy
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.security_update_warning_outlined),
+                    label: Text(strings.networkCompatibilityDiagnostics),
                   ),
                   _ActionTile(
                     onPressed: checkingUpdate || installingUpdate
@@ -6884,6 +7029,8 @@ class _Strings {
     required this.terminalThroughVpnTunOnly,
     required this.dnsOnlyThroughVpn,
     required this.dnsOnlyThroughVpnHint,
+    required this.adaptiveAccess,
+    required this.adaptiveAccessHint,
     required this.codexThroughVpn,
     required this.codexThroughVpnHint,
     required this.codexThroughVpnTunOnly,
@@ -6897,6 +7044,7 @@ class _Strings {
     required this.dnsDiagnosticsDone,
     required this.vpnDiagnostics,
     required this.vpnDiagnosticsDone,
+    required this.networkCompatibilityDiagnostics,
     required this.splitTunnelTitle,
     required this.splitTunnelDescription,
     required this.splitTunnelHint,
@@ -7016,6 +7164,8 @@ class _Strings {
   final String terminalThroughVpnTunOnly;
   final String dnsOnlyThroughVpn;
   final String dnsOnlyThroughVpnHint;
+  final String adaptiveAccess;
+  final String adaptiveAccessHint;
   final String codexThroughVpn;
   final String codexThroughVpnHint;
   final String codexThroughVpnTunOnly;
@@ -7029,6 +7179,7 @@ class _Strings {
   final String dnsDiagnosticsDone;
   final String vpnDiagnostics;
   final String vpnDiagnosticsDone;
+  final String networkCompatibilityDiagnostics;
   final String splitTunnelTitle;
   final String splitTunnelDescription;
   final String splitTunnelHint;
@@ -7472,6 +7623,9 @@ class _Strings {
     dnsOnlyThroughVpn: 'DNS только через VPN',
     dnsOnlyThroughVpnHint:
         'Обычные DNS-запросы идут через Yurich Core и DoH поверх VPN/proxy. Bootstrap использует Cloudflare DoH без DNS провайдера.',
+    adaptiveAccess: 'Адаптивный обход блокировок',
+    adaptiveAccessHint:
+        'Экспериментально: безопасно дробит TLS-записи совместимых VLESS-профилей и при неудаче старта пробует другой протокол. Требуется переподключение.',
     codexThroughVpn: 'Codex CLI только через VPN',
     codexThroughVpnHint:
         'Процессы Codex принудительно идут через текущий VPN. Применяется после переподключения.',
@@ -7488,6 +7642,7 @@ class _Strings {
     dnsDiagnosticsDone: 'Диагностика DNS записана в логи',
     vpnDiagnostics: 'Диагностика VPN',
     vpnDiagnosticsDone: 'Диагностика VPN записана в логи',
+    networkCompatibilityDiagnostics: 'Проверка блокировок',
     splitTunnelTitle: 'Исключения приложений',
     splitTunnelDescription:
         'Укажи exe-файлы, которые должны идти напрямую, минуя VPN. По одному в строке.',
@@ -7658,6 +7813,9 @@ class _Strings {
     dnsOnlyThroughVpn: 'DNS only through VPN',
     dnsOnlyThroughVpnHint:
         'Regular DNS queries use Yurich Core and DoH over VPN/proxy. Bootstrap uses Cloudflare DoH without ISP DNS.',
+    adaptiveAccess: 'Adaptive access',
+    adaptiveAccessHint:
+        'Experimental: safely fragments TLS records for compatible VLESS profiles and tries another protocol after a startup failure. Reconnect to apply.',
     codexThroughVpn: 'Codex CLI through VPN only',
     codexThroughVpnHint:
         'Codex processes are forced through the current VPN. Reconnect to apply.',
@@ -7674,6 +7832,7 @@ class _Strings {
     dnsDiagnosticsDone: 'DNS diagnostics written to logs',
     vpnDiagnostics: 'VPN diagnostics',
     vpnDiagnosticsDone: 'VPN diagnostics written to logs',
+    networkCompatibilityDiagnostics: 'Blocking diagnostics',
     splitTunnelTitle: 'App exclusions',
     splitTunnelDescription:
         'Enter exe files that should go directly and bypass the VPN. One per line.',

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.104 - 2026-09-04
+
+### Added
+
+- Added an opt-in Adaptive Access mode for networks that interfere with VPN traffic.
+- Added safe TLS record fragmentation for compatible sing-box VLESS profiles without changing Reality SNI or enabling heavy IP fragmentation.
+- Added read-only network compatibility diagnostics for profile DNS, VPN/subscription endpoints, public TCP/443, and TLS handshakes.
+- Added cross-protocol startup failover while Adaptive Access is enabled.
+
+### Safety
+
+- Adaptive Access is disabled by default and never changes XHTTP/Xray, NaiveProxy, raw sing-box profiles, or DNS settings.
+- Network diagnostics log only host names, timings, states, and normalized error classes; subscription paths and tokens are never included.
+
+### Tests
+
+- Added coverage for adaptive configuration, cross-protocol fallback, persisted settings, diagnostic classification, and subscription URL redaction.
+
 ## 1.0.103 - 2026-09-04
 
 ### Fixed

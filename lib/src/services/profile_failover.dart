@@ -41,6 +41,17 @@ class ProfileFailoverSelection {
   final VpnProfile? autoSelectedProfile;
 }
 
+List<VpnProfile> profileFailoverPool({
+  required List<VpnProfile> profiles,
+  required VpnProfile preferred,
+  required bool adaptiveAccess,
+}) {
+  if (adaptiveAccess || !VlessProfileTools.isVlessProfile(preferred)) {
+    return List.unmodifiable(profiles);
+  }
+  return List.unmodifiable(profiles.where(VlessProfileTools.isVlessProfile));
+}
+
 List<RankedProfile> rankProfilesForFailover({
   required List<VpnProfile> profiles,
   required VpnProfile preferred,
