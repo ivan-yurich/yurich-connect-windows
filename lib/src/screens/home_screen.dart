@@ -44,10 +44,10 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.102';
+const _appVersion = '1.0.103';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
-const _maxProfileFailoverAttempts = 3;
+const _maxProfileFailoverAttempts = 5;
 const _statusPanelHeight = 228.0;
 const _healthWatchdogTick = Duration(seconds: 45);
 const _healthWatchdogStartupGrace = Duration(seconds: 75);
@@ -60,10 +60,10 @@ const _softRecoveryCooldown = Duration(minutes: 2);
 const _vlessEofStormWindow = Duration(seconds: 25);
 const _vlessEofStormThreshold = 8;
 const _vlessEofStormFailoverCooldown = Duration(minutes: 2);
-const _vlessStartupProbeQuarantine = Duration(minutes: 12);
-const _vlessStartupProbeAttempts = 2;
-const _vlessStartupProbeConnectTimeout = Duration(seconds: 6);
-const _vlessStartupProbeResponseTimeout = Duration(seconds: 8);
+const _startupProbeQuarantine = Duration(minutes: 15);
+const _startupProbeAttempts = 1;
+const _startupProbeConnectTimeout = Duration(seconds: 5);
+const _startupProbeResponseTimeout = Duration(seconds: 6);
 const _serverLatencyCacheTtl = Duration(minutes: 8);
 const _healthProbeHistoryWindow = Duration(hours: 1);
 const _healthProbeHistoryLimit = 240;
@@ -1257,7 +1257,34 @@ class _HomeScreenState extends State<HomeScreen>
         final stopwatch = Stopwatch()..start();
         await _prepareProfileConfigForStart(profile);
         await _stopVpnForProfileSwitch();
-        await _startVpnCore(profile, fastReconnect: true);
+        try {
+          await _startVpnCore(profile, fastReconnect: true);
+        } on Object catch (switchError) {
+          if (current == null) {
+            rethrow;
+          }
+          _queueLog(
+            'Profile switch failed for ${_redactSensitive(profile.name)}; '
+            'restoring ${_redactSensitive(current.name)}. '
+            'Reason: ${_redactSensitive('$switchError')}',
+          );
+          try {
+            await _startVpnCore(current, fastReconnect: true);
+          } on Object catch (restoreError) {
+            _queueLog(
+              'Previous profile restore failed: '
+              '${_redactSensitive('$restoreError')}',
+            );
+            throw StateError(s.profileSwitchAndRestoreFailed);
+          }
+          final restoredMessage = s.profileSwitchRestored(current.name);
+          _queueLog(restoredMessage);
+          if (mounted) {
+            setState(() => _message = restoredMessage);
+            _showSnack(restoredMessage);
+          }
+          return;
+        }
         stopwatch.stop();
         _recordStageTiming('profile_switch.total', stopwatch.elapsed);
         _queueLog(
@@ -1305,7 +1332,7 @@ class _HomeScreenState extends State<HomeScreen>
       reason: 'connect requested',
     );
     if (!_checkingServerLatency) {
-      await _refreshServerLatencies();
+      unawaited(_refreshServerLatencies());
     }
 
     final candidates = _connectCandidateProfiles(preferred);
@@ -1327,7 +1354,7 @@ class _HomeScreenState extends State<HomeScreen>
 
       if (index > 0) {
         await Future<void>.delayed(
-          Duration(milliseconds: index == 1 ? 1200 : 3000),
+          Duration(milliseconds: index == 1 ? 350 : 900),
         );
       }
 
@@ -1368,67 +1395,37 @@ class _HomeScreenState extends State<HomeScreen>
     final failoverProfiles = VlessProfileTools.isVlessProfile(preferred)
         ? _profiles.where(VlessProfileTools.isVlessProfile).toList()
         : _profiles;
-    final ranked = rankProfilesForFailover(
+    final selection = selectProfileFailoverCandidates(
       profiles: failoverProfiles,
       preferred: preferred,
       runtimeStats: _profileRuntimeStats,
       latencies: latencySnapshots,
+      maxAttempts: _maxProfileFailoverAttempts,
     );
-    if (ranked.isEmpty) {
-      return [preferred];
-    }
-
-    final best = ranked.first;
-    final useBest = shouldAutoSelectBestProfile(
-      preferred: preferred,
-      best: best,
-      runtimeStats: _profileRuntimeStats,
-      latencies: latencySnapshots,
-    );
-    final preferredScore = profileFailoverScore(
-      profile: preferred,
-      preferred: preferred,
-      runtimeStats: _profileRuntimeStats[preferred.id],
-      latency: latencySnapshots[preferred.id],
-    );
-
-    final ordered = <VpnProfile>[];
-    void add(VpnProfile profile) {
-      if (!ordered.any((item) => item.id == profile.id)) {
-        ordered.add(profile);
-      }
-    }
-
-    if (useBest) {
-      add(best.profile);
-      if (preferredScore > -1000) {
-        add(preferred);
-      }
-      _queueLog(
-        'Auto-selected better profile: ${_redactSensitive(best.profile.name)} '
-        'score=${best.score}; preferred=${_redactSensitive(preferred.name)}.',
+    final autoSelected = selection.autoSelectedProfile;
+    if (autoSelected != null) {
+      final score = profileFailoverScore(
+        profile: autoSelected,
+        preferred: preferred,
+        runtimeStats: _profileRuntimeStats[autoSelected.id],
+        latency: latencySnapshots[autoSelected.id],
       );
-    } else {
-      add(preferred);
-    }
-
-    for (final candidate in ranked) {
-      add(candidate.profile);
-      if (ordered.length >= _maxProfileFailoverAttempts) {
-        break;
-      }
+      _queueLog(
+        'Auto-selected better profile: ${_redactSensitive(autoSelected.name)} '
+        'score=$score; preferred=${_redactSensitive(preferred.name)}.',
+      );
     }
     final quarantined = failoverProfiles.where(
       (profile) => _profileRuntimeStats[profile.id]?.isQuarantined() == true,
     );
     for (final profile in quarantined) {
       _queueLog(
-        'Profile quarantined and skipped by failover: '
+        'Profile quarantined and excluded from automatic failover: '
         '${_redactSensitive(profile.name)} until '
         '${_profileRuntimeStats[profile.id]?.quarantinedUntil?.toIso8601String() ?? 'unknown'}.',
       );
     }
-    return ordered.take(_maxProfileFailoverAttempts).toList();
+    return selection.candidates;
   }
 
   Map<String, ProfileLatencySnapshot> _profileLatencySnapshots() {
@@ -1722,7 +1719,6 @@ class _HomeScreenState extends State<HomeScreen>
               _ConnectionLifecycle.probing,
               reason: plan.label,
             );
-            final isVlessProfile = VlessProfileTools.isVlessProfile(profile);
             final probeResult =
                 _vpnEngine.configTarget != SingBoxConfigTarget.windows
                 ? const _HealthProbeResult(
@@ -1732,15 +1728,9 @@ class _HomeScreenState extends State<HomeScreen>
                   )
                 : await _probeLocalMixedProxy(
                     startupProbe: true,
-                    attemptsPerEndpoint: isVlessProfile
-                        ? _vlessStartupProbeAttempts
-                        : null,
-                    connectionTimeout: isVlessProfile
-                        ? _vlessStartupProbeConnectTimeout
-                        : null,
-                    responseTimeout: isVlessProfile
-                        ? _vlessStartupProbeResponseTimeout
-                        : null,
+                    attemptsPerEndpoint: _startupProbeAttempts,
+                    connectionTimeout: _startupProbeConnectTimeout,
+                    responseTimeout: _startupProbeResponseTimeout,
                   );
             if (probeResult.success) {
               _resetHealthProbeHistoryForStableConnection(probeResult);
@@ -1761,26 +1751,14 @@ class _HomeScreenState extends State<HomeScreen>
               'attempts=$attemptCount, p95=${_formatLatency(p95Latency)}, '
               'p99=${_formatLatency(p99Latency)}.',
             );
-            final guardedSessionReason = await _healthReconnectGuardReason();
-            if (guardedSessionReason != null) {
-              _queueLog(
-                'VPN start probe failed during $guardedSessionReason; keeping tunnel alive '
-                'to preserve long-lived connections. Reason: $probeInfo.',
-              );
-              _setConnectionLifecycle(
-                _ConnectionLifecycle.degraded,
-                reason: probeInfo,
-              );
-              connected = true;
-              break;
-            }
+            // No established tunnel remains to protect at this stage.
             final startupFailureReason = _startupProbeFailFastReason(
               profile,
               probeResult,
             );
             if (startupFailureReason != null) {
               _queueLog(
-                'VLESS startup probe fail-fast: $startupFailureReason. '
+                'Profile startup probe fail-fast: $startupFailureReason. '
                 'Current profile will be quarantined and failover will try another server. '
                 'Reason: $probeInfo.',
               );
@@ -1792,7 +1770,7 @@ class _HomeScreenState extends State<HomeScreen>
               throw _ProfileStartFailure(
                 s.connectionProbeFailed,
                 reason: startupFailureReason,
-                quarantineFor: _vlessStartupProbeQuarantine,
+                quarantineFor: _startupProbeQuarantine,
               );
             }
             lastStartError = s.connectionProbeFailed;
@@ -2352,28 +2330,13 @@ class _HomeScreenState extends State<HomeScreen>
     VpnProfile profile,
     _HealthProbeResult result,
   ) {
-    if (!VlessProfileTools.isVlessProfile(profile) || result.success) {
+    if (result.success) {
       return null;
     }
-    final attempts = result.attempts;
-    if (attempts.isEmpty) {
-      return null;
-    }
-    var networkFailures = 0;
-    for (final attempt in attempts) {
-      final failureClass = _healthProbeFailureClass(attempt);
-      if (failureClass == 'proxy_probe_timeout' ||
-          failureClass == 'tcp' ||
-          failureClass == 'socket' ||
-          failureClass == 'route') {
-        networkFailures += 1;
-      }
-    }
-    final quorum = attempts.length <= 2 ? attempts.length : attempts.length - 1;
-    if (networkFailures >= quorum) {
-      return 'vless_upstream_timeout';
-    }
-    return null;
+    return startupProbeQuarantineReason(
+      profileKind: profile.kind,
+      failureClasses: result.attempts.map(_healthProbeFailureClass),
+    );
   }
 
   String _formatLatency(int ms) => ms <= 0 ? 'n/a' : '${ms}ms';
@@ -7131,6 +7094,19 @@ class _Strings {
   String selectedProfile(String name) => switch (this) {
     _Strings.en => 'Selected profile: $name',
     _ => 'Выбран профиль: $name',
+  };
+
+  String profileSwitchRestored(String name) => switch (this) {
+    _Strings.en =>
+      'The new profile did not respond. Previous connection restored: $name',
+    _ => 'Новый профиль не ответил. Прежнее подключение восстановлено: $name',
+  };
+
+  String get profileSwitchAndRestoreFailed => switch (this) {
+    _Strings.en =>
+      'The new profile failed and the previous connection could not be restored.',
+    _ =>
+      'Новый профиль не запустился, и прежнее подключение восстановить не удалось.',
   };
 
   String connectingTo(String name) => switch (this) {

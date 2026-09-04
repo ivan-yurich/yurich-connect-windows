@@ -31,6 +31,16 @@ class RankedProfile {
   final int score;
 }
 
+class ProfileFailoverSelection {
+  const ProfileFailoverSelection({
+    required this.candidates,
+    this.autoSelectedProfile,
+  });
+
+  final List<VpnProfile> candidates;
+  final VpnProfile? autoSelectedProfile;
+}
+
 List<RankedProfile> rankProfilesForFailover({
   required List<VpnProfile> profiles,
   required VpnProfile preferred,
@@ -48,12 +58,7 @@ List<RankedProfile> rankProfilesForFailover({
             runtimeStats[profile.id]?.isQuarantined(currentTime) != true,
       )
       .toList();
-  final candidates = nonQuarantinedProfiles.isNotEmpty
-      ? nonQuarantinedProfiles
-      : activeProfiles.isNotEmpty
-      ? activeProfiles
-      : profiles;
-  final ranked = candidates
+  final ranked = nonQuarantinedProfiles
       .map(
         (profile) => RankedProfile(
           profile: profile,
@@ -88,6 +93,100 @@ List<RankedProfile> rankProfilesForFailover({
     return a.profile.name.compareTo(b.profile.name);
   });
   return ranked;
+}
+
+ProfileFailoverSelection selectProfileFailoverCandidates({
+  required List<VpnProfile> profiles,
+  required VpnProfile preferred,
+  required Map<String, ProfileRuntimeStats> runtimeStats,
+  required Map<String, ProfileLatencySnapshot> latencies,
+  int maxAttempts = 3,
+  DateTime? now,
+}) {
+  if (maxAttempts < 1) {
+    throw RangeError.range(maxAttempts, 1, null, 'maxAttempts');
+  }
+  final currentTime = now ?? DateTime.now();
+  final ranked = rankProfilesForFailover(
+    profiles: profiles,
+    preferred: preferred,
+    runtimeStats: runtimeStats,
+    latencies: latencies,
+    now: currentTime,
+  );
+  if (ranked.isEmpty) {
+    return ProfileFailoverSelection(candidates: [preferred]);
+  }
+
+  final best = ranked.first;
+  final useBest = shouldAutoSelectBestProfile(
+    preferred: preferred,
+    best: best,
+    runtimeStats: runtimeStats,
+    latencies: latencies,
+    now: currentTime,
+  );
+  final preferredEligible =
+      !_isExpired(preferred, currentTime) &&
+      runtimeStats[preferred.id]?.isQuarantined(currentTime) != true;
+  final ordered = <VpnProfile>[];
+
+  void add(VpnProfile profile) {
+    if (!ordered.any((item) => item.id == profile.id)) {
+      ordered.add(profile);
+    }
+  }
+
+  if (useBest) {
+    add(best.profile);
+  } else if (preferredEligible) {
+    add(preferred);
+  }
+
+  for (final candidate in ranked) {
+    add(candidate.profile);
+    if (ordered.length >= maxAttempts) {
+      break;
+    }
+  }
+
+  return ProfileFailoverSelection(
+    candidates: List.unmodifiable(ordered.take(maxAttempts)),
+    autoSelectedProfile: useBest ? best.profile : null,
+  );
+}
+
+String? startupProbeQuarantineReason({
+  required VpnProfileKind profileKind,
+  required Iterable<String> failureClasses,
+}) {
+  final failures = failureClasses.toList(growable: false);
+  if (failures.length < 2) {
+    return null;
+  }
+
+  const upstreamFailureClasses = {
+    'proxy_probe_timeout',
+    'tcp',
+    'socket',
+    'route',
+  };
+  final upstreamFailures = failures
+      .where(upstreamFailureClasses.contains)
+      .length;
+  final quorum = (failures.length * 0.75).ceil();
+  if (upstreamFailures < quorum) {
+    return null;
+  }
+
+  return switch (profileKind) {
+    VpnProfileKind.vlessReality ||
+    VpnProfileKind.vlessTls => 'vless_upstream_unreachable',
+    VpnProfileKind.naive => 'naive_upstream_unreachable',
+    VpnProfileKind.hysteria ||
+    VpnProfileKind.hysteria2 => 'hysteria_upstream_unreachable',
+    VpnProfileKind.singBoxConfig => 'proxy_upstream_unreachable',
+  };
 }
 
 bool shouldAutoSelectBestProfile({

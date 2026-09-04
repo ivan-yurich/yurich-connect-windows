@@ -175,6 +175,113 @@ void main() {
       expect(ranked.first.profile.id, sameTransport.id);
       expect(ranked.map((entry) => entry.profile.id), contains(grpc.id));
     });
+
+    test('does not retry a quarantined preferred profile after failover', () {
+      final preferred = _profile('preferred', 'Estonia Broken');
+      final healthy = _profile('healthy', 'France Healthy');
+      final now = DateTime(2026, 9, 4);
+      final selection = selectProfileFailoverCandidates(
+        profiles: [preferred, healthy],
+        preferred: preferred,
+        runtimeStats: {
+          preferred.id: ProfileRuntimeStats(
+            failures: 2,
+            consecutiveFailures: 2,
+            quarantinedUntil: now.add(const Duration(minutes: 15)),
+          ),
+          healthy.id: const ProfileRuntimeStats(
+            successes: 3,
+            totalStartMs: 1800,
+          ),
+        },
+        latencies: {
+          preferred.id: const ProfileLatencySnapshot.ok(35),
+          healthy.id: const ProfileLatencySnapshot.ok(90),
+        },
+        maxAttempts: 5,
+        now: now,
+      );
+
+      expect(selection.candidates.map((profile) => profile.id), ['healthy']);
+      expect(selection.autoSelectedProfile?.id, 'healthy');
+    });
+
+    test(
+      'tries only the requested profile when every profile is quarantined',
+      () {
+        final preferred = _profile('preferred', 'Requested');
+        final alternative = _profile('alternative', 'Alternative');
+        final now = DateTime(2026, 9, 4);
+        final quarantinedUntil = now.add(const Duration(minutes: 15));
+        final selection = selectProfileFailoverCandidates(
+          profiles: [preferred, alternative],
+          preferred: preferred,
+          runtimeStats: {
+            preferred.id: ProfileRuntimeStats(
+              consecutiveFailures: 2,
+              quarantinedUntil: quarantinedUntil,
+            ),
+            alternative.id: ProfileRuntimeStats(
+              consecutiveFailures: 2,
+              quarantinedUntil: quarantinedUntil,
+            ),
+          },
+          latencies: const {},
+          maxAttempts: 5,
+          now: now,
+        );
+
+        expect(selection.candidates.map((profile) => profile.id), [
+          'preferred',
+        ]);
+        expect(selection.autoSelectedProfile, isNull);
+      },
+    );
+  });
+
+  group('startup probe quarantine policy', () {
+    test('classifies repeated upstream failures for every protocol', () {
+      const failures = ['proxy_probe_timeout', 'tcp', 'socket'];
+
+      expect(
+        startupProbeQuarantineReason(
+          profileKind: VpnProfileKind.vlessReality,
+          failureClasses: failures,
+        ),
+        'vless_upstream_unreachable',
+      );
+      expect(
+        startupProbeQuarantineReason(
+          profileKind: VpnProfileKind.naive,
+          failureClasses: failures,
+        ),
+        'naive_upstream_unreachable',
+      );
+      expect(
+        startupProbeQuarantineReason(
+          profileKind: VpnProfileKind.hysteria2,
+          failureClasses: failures,
+        ),
+        'hysteria_upstream_unreachable',
+      );
+    });
+
+    test('does not quarantine after one or mixed endpoint failure', () {
+      expect(
+        startupProbeQuarantineReason(
+          profileKind: VpnProfileKind.vlessReality,
+          failureClasses: const ['proxy_probe_timeout'],
+        ),
+        isNull,
+      );
+      expect(
+        startupProbeQuarantineReason(
+          profileKind: VpnProfileKind.vlessReality,
+          failureClasses: const ['proxy_probe_timeout', 'http_status', 'http'],
+        ),
+        isNull,
+      );
+    });
   });
 }
 
@@ -183,6 +290,7 @@ VpnProfile _profile(
   String name, {
   DateTime? expiresAt,
   String transport = 'tcp',
+  VpnProfileKind kind = VpnProfileKind.vlessReality,
 }) {
   final outbound = <String, dynamic>{
     'type': 'vless',
@@ -193,7 +301,7 @@ VpnProfile _profile(
   return VpnProfile(
     id: id,
     name: name,
-    kind: VpnProfileKind.vlessReality,
+    kind: kind,
     originalInput: 'vless://example',
     server: '$id.example.com',
     port: 443,

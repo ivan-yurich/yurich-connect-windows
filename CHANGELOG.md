@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.103 - 2026-09-04
+
+### Fixed
+
+- Prevented a quarantined selected profile from being inserted back into the automatic failover queue.
+- Removed the false `Connected` state when every startup proxy probe fails while Codex, SSH, or browser processes are active.
+- Restored the previous working profile automatically when a manual profile switch fails.
+- Stopped blocking a connection attempt while all profile latency checks are running.
+
+### Changed
+
+- Extended automatic failover from three to five eligible profiles while excluding expired and quarantined candidates.
+- Added multi-endpoint startup failure classification for VLESS, NaiveProxy, and Hysteria profiles with a 15-minute cooldown for confirmed unreachable servers.
+- Reduced delays between startup failover candidates without enabling runtime auto-reconnect.
+- Reduced startup probes to one attempt per independent endpoint to detect unavailable profiles sooner.
+
+### Tests
+
+- Added coverage for quarantined preferred profiles, all-quarantined fallback, protocol-aware startup failures, and mixed transient probe failures.
+
 ## 1.0.102 - 2026-08-10
 
 ### Fixed
