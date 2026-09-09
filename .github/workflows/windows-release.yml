@@ -9,6 +9,7 @@ on:
       - pubspec.yaml
       - .github/workflows/windows-release.yml
       - windows/qa/smoke_windows.ps1
+      - windows/qa/prepare_release_metadata.ps1
 
 permissions:
   contents: write
@@ -24,15 +25,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 9.0.x
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: stable
           flutter-version: 3.41.9
@@ -51,7 +52,7 @@ jobs:
           "tag=v$version" >> $env:GITHUB_OUTPUT
 
       - name: Resolve dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Analyze
         run: flutter analyze --no-pub
@@ -62,25 +63,13 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release --split-debug-info=build\symbols\windows
 
-      - name: Install smoke-test tools
-        run: choco install ripgrep -y --no-progress
-
       - name: Build installer and portable archive
         shell: pwsh
         run: .\windows\qa\smoke_windows.ps1 -SkipBuild
 
       - name: Create checksums
         shell: pwsh
-        run: |
-          $files = @(
-            'release\windows\YurichConnect_Setup.exe',
-            'release\windows\YurichConnect_Windows_Portable.zip'
-          )
-          $lines = foreach ($file in $files) {
-            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-            "$hash  $([IO.Path]::GetFileName($file))"
-          }
-          $lines | Set-Content -LiteralPath 'release\windows\SHA256SUMS.txt' -Encoding ascii
+        run: .\windows\qa\prepare_release_metadata.ps1 -Version '${{ steps.version.outputs.version }}'
 
       - name: Publish GitHub Release
         shell: pwsh
@@ -89,29 +78,64 @@ jobs:
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
           $version = '${{ steps.version.outputs.version }}'
-          $notes = @"
-          ## Yurich Connect for Windows v$version
-
-          - A transient watchdog or VLESS warning no longer appears as a failed connection while VPN is running.
-          - Health warnings clear automatically after the next successful proxy probe.
-          - Repeated connection-refused errors from direct application endpoints no longer flood the UI log.
-          - Added a four-section Windows interface with fixed navigation and a bounded runtime log buffer.
-          - Prevented overlapping health-watchdog probes under slow or unstable networks.
-          - Added Windows soak validation for proxy uptime, core/app process health, memory, handles, and latency.
-          - Ten-minute validation completed with 112,938 requests and zero errors.
-
-          Проверено: Flutter analyze, 93 tests, Windows release build, installer smoke-test, payload safety scan, and soak test.
-          "@
-
-          if (gh release view $tag --repo '${{ github.repository }}' *> $null) {
-            gh release edit $tag --repo '${{ github.repository }}' --title "Yurich Connect for Windows v$version" --notes $notes
-          } else {
-            gh release create $tag --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "Yurich Connect for Windows v$version" --notes $notes
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $existingRelease = $null
+          try {
+            $existingRelease = Invoke-RestMethod `
+              -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" `
+              -Headers $headers `
+              -TimeoutSec 30
+          } catch {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+            if ($statusCode -ne 404) {
+              throw "Could not verify whether release $tag already exists: $($_.Exception.Message)"
+            }
+          }
+          if ($null -ne $existingRelease) {
+            throw "Release $tag already exists. Refusing to overwrite a published release."
           }
 
-          gh release upload $tag `
+          gh release create $tag `
             'release\windows\YurichConnect_Setup.exe' `
+            'release\windows\YurichConnect_Setup.exe.sha256' `
             'release\windows\YurichConnect_Windows_Portable.zip' `
+            'release\windows\YurichConnect_Windows_Portable.zip.sha256' `
             'release\windows\SHA256SUMS.txt' `
             --repo '${{ github.repository }}' `
-            --clobber
+            --target '${{ github.sha }}' `
+            --title "Yurich Connect for Windows v$version" `
+            --notes-file 'release\windows\RELEASE_NOTES.md' `
+            --draft
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not create draft release $tag."
+          }
+
+          $draft = gh api "repos/${{ github.repository }}/releases/tags/$tag" | ConvertFrom-Json
+          if (-not $draft.draft -or $draft.assets.Count -ne 5) {
+            throw "Draft release $tag failed asset-count verification."
+          }
+          foreach ($file in @(
+            'release\windows\YurichConnect_Setup.exe',
+            'release\windows\YurichConnect_Windows_Portable.zip'
+          )) {
+            $name = [IO.Path]::GetFileName($file)
+            $expected = 'sha256:' + (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            $asset = $draft.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+            if ($null -eq $asset -or $asset.digest -ne $expected) {
+              throw "Draft release digest mismatch for $name."
+            }
+          }
+
+          gh release edit $tag --repo '${{ github.repository }}' --draft=false --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release $tag remains a draft because publication failed."
+          }
+
+          $published = gh api "repos/${{ github.repository }}/releases/tags/$tag" | ConvertFrom-Json
+          if ($published.draft -or $published.prerelease -or $published.assets.Count -ne 5) {
+            throw "Published release $tag failed final verification."
+          }

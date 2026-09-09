@@ -45,7 +45,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.104';
+const _appVersion = '1.0.105';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 5;
@@ -7345,8 +7345,9 @@ class _Strings {
   };
 
   String get updateInstallerMissing => switch (this) {
-    _Strings.en => 'Release found, but Windows installer is missing.',
-    _ => 'Релиз найден, но Windows-установщик не прикреплён.',
+    _Strings.en =>
+      'Release found, but its Windows installer or SHA-256 is missing.',
+    _ => 'Релиз найден, но установщик Windows или его SHA-256 отсутствует.',
   };
 
   String get updateFailed => switch (this) {

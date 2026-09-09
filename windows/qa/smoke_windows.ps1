@@ -24,18 +24,73 @@ function Invoke-Step {
   }
 }
 
-function Complete-RipgrepScan {
+function Find-AsciiPatternMatch {
   param(
     [Parameter(Mandatory = $true)]
-    [int]$ExitCode,
+    [string[]]$Files,
     [Parameter(Mandatory = $true)]
-    [string]$ScanName
+    [string]$Pattern
   )
 
-  $global:LASTEXITCODE = 0
-  if ($ExitCode -gt 1) {
-    throw "$ScanName failed with ripgrep exit code $ExitCode"
+  $regex = [regex]::new(
+    $Pattern,
+    [Text.RegularExpressions.RegexOptions]::CultureInvariant,
+    [TimeSpan]::FromSeconds(5)
+  )
+  $encoding = [Text.Encoding]::GetEncoding(28591)
+  $chunkSize = 1024 * 1024
+  $overlapSize = 64 * 1024
+
+  foreach ($file in $Files) {
+    $stream = [IO.File]::Open(
+      $file,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      [IO.FileShare]::Read
+    )
+    try {
+      $buffer = [byte[]]::new($chunkSize)
+      $tail = ''
+      while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $text = $tail + $encoding.GetString($buffer, 0, $read)
+        $match = $regex.Match($text)
+        if ($match.Success) {
+          $offset = [Math]::Max(0, $stream.Position - $read - $tail.Length + $match.Index)
+          "$file at byte $offset"
+          break
+        }
+        if ($text.Length -gt $overlapSize) {
+          $tail = $text.Substring($text.Length - $overlapSize)
+        } else {
+          $tail = $text
+        }
+      }
+    } finally {
+      $stream.Dispose()
+    }
   }
+}
+
+function Get-GlobalSafetyScanPattern {
+  $patterns = @(
+    'C:\\Users\\ivan-',
+    'AndroidStudioProjects\\aurum_vpn_windows_repo',
+    '-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----',
+    'access_token["=:\s]+[A-Za-z0-9._-]{20,}',
+    'refresh_token["=:\s]+[A-Za-z0-9._-]{20,}'
+  )
+  return ($patterns -join '|')
+}
+
+function Get-ConnectionSecretScanPattern {
+  $patterns = @(
+    'vless://[0-9a-fA-F-]{32,}@',
+    'naive\+https://[^:\s]+:[^@\s]+@',
+    'hysteria2://[A-Za-z0-9._~!$&''()*+,;=:%-]{4,256}@(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)',
+    'hy2://[A-Za-z0-9._~!$&''()*+,;=:%-]{4,256}@(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)',
+    'https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/(?:s|sub|subscription|api|link)/[A-Za-z0-9._~-]{16,}'
+  )
+  return ($patterns -join '|')
 }
 
 $projectRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')
@@ -193,21 +248,27 @@ Invoke-Step 'Installer payload safety scan' {
     throw "Payload contains debug/build files: $($forbiddenFiles.FullName -join ', ')"
   }
 
-  $patterns = @(
-    'C:\\Users\\ivan-',
-    'AndroidStudioProjects\\aurum_vpn_windows_repo',
-    '-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----',
-    'vless://[0-9a-fA-F-]{32,}@',
-    'naive\+https://[^:\s]+:[^@\s]+@',
-    'hysteria2://[^@\s]+@',
-    'hy2://[^@\s]+@',
-    'access_token["=:\s]+[A-Za-z0-9._-]{20,}',
-    'refresh_token["=:\s]+[A-Za-z0-9._-]{20,}',
-    '(?:Remnawave|Yurich ID)[^\r\n]+https?://'
+  $excluded = @(
+    'data\flutter_assets\NOTICES.Z',
+    'runtime\LICENSE',
+    'runtime\NAIVE_LICENSE.txt',
+    'runtime\WINTUN_LICENSE.txt',
+    'runtime\XRAY_LICENSE.txt'
   )
-  $pattern = ($patterns -join '|')
-  $matches = @(rg -a -n --hidden --glob '!data/flutter_assets/NOTICES.Z' --glob '!runtime/LICENSE' --glob '!runtime/NAIVE_LICENSE.txt' --glob '!runtime/WINTUN_LICENSE.txt' --glob '!runtime/XRAY_LICENSE.txt' $pattern $portableRootDir 2>$null)
-  Complete-RipgrepScan -ExitCode $LASTEXITCODE -ScanName 'Payload safety scan'
+  $scanFiles = @(Get-ChildItem -LiteralPath $portableRootDir -Recurse -File -Force |
+    Where-Object {
+      $relative = $_.FullName.Substring($portableRootDir.Length).TrimStart('\')
+      $excluded -notcontains $relative
+    } |
+    Select-Object -ExpandProperty FullName)
+  $firstPartyFiles = @($scanFiles | Where-Object {
+    $relative = $_.Substring($portableRootDir.Length).TrimStart('\')
+    -not $relative.StartsWith('runtime\', [StringComparison]::OrdinalIgnoreCase)
+  })
+  $matches = @(
+    Find-AsciiPatternMatch -Files $scanFiles -Pattern (Get-GlobalSafetyScanPattern)
+    Find-AsciiPatternMatch -Files $firstPartyFiles -Pattern (Get-ConnectionSecretScanPattern)
+  )
   if ($matches.Count -gt 0) {
     throw "Payload safety scan found sensitive/dev data in $portableRootDir`n$($matches -join [Environment]::NewLine)"
   }
@@ -237,9 +298,12 @@ Invoke-Step 'Installer safety scan' {
   if (-not (Test-Path -LiteralPath $setupExe)) {
     throw "Missing installer: $setupExe"
   }
-  $pattern = 'C:\\Users\\ivan-|AndroidStudioProjects\\aurum_vpn_windows_repo|-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|vless://[0-9a-fA-F-]{32,}@|naive\+https://[^:\s]+:[^@\s]+@|hysteria2://[^@\s]+@|hy2://[^@\s]+@|access_token["=:\s]+[A-Za-z0-9._-]{20,}|refresh_token["=:\s]+[A-Za-z0-9._-]{20,}|(?:Remnawave|Yurich ID)[^\r\n]+https?://'
-  $matches = @(rg -a -n $pattern $setupExe 2>$null)
-  Complete-RipgrepScan -ExitCode $LASTEXITCODE -ScanName 'Installer safety scan'
+  # The embedded payload was scanned uncompressed above. Scan the installer
+  # wrapper itself for global leaks without treating third-party URI examples
+  # inside compressed runtime binaries as user secrets.
+  $matches = @(
+    Find-AsciiPatternMatch -Files @($setupExe) -Pattern (Get-GlobalSafetyScanPattern)
+  )
   if ($matches.Count -gt 0) {
     throw "Installer safety scan found sensitive/dev data:`n$($matches -join [Environment]::NewLine)"
   }

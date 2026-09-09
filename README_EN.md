@@ -165,7 +165,9 @@ The app stops its own processes, clears temporary configs, restores Windows prox
 
 Yurich Connect checks Windows builds on GitHub Releases.
 
-Updates are downloaded to a temporary `.download` file, checked, and only then renamed to the final installer file. This prevents broken partial downloads from being used.
+Updates are downloaded to a temporary `.download` file and launch only after mandatory verification against the official release SHA-256. Cached files are checked again, and integrity is re-verified immediately before UAC. After code signing is introduced, automatic updates will also require the same Authenticode publisher certificate.
+
+See [`SECURITY.md`](SECURITY.md) for the security policy and private vulnerability reporting guidance.
 
 ## Uninstall
 

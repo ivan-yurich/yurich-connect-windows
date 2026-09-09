@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.105 - 2026-09-08
+
+### Security
+
+- Added mandatory SHA-256 verification for downloaded and cached Windows installers.
+- Added checksum sidecar fallback when the GitHub Releases API is unavailable.
+- Added Authenticode policy enforcement: once Yurich Connect is signed, updates must be signed by the same publisher certificate.
+- Restricted automatic update downloads to the official Yurich Connect GitHub release path.
+- Re-checks installer integrity immediately before the UAC launch.
+
+### Fixed
+
+- Removed the temporary updater helper script and preserved the running app when the user declines UAC.
+- Prevented a public GitHub release from being silently overwritten by a later workflow run.
+- Kept installer, portable archive, individual checksums, combined checksums, and release notes in one draft-first publication transaction.
+
+### Tests
+
+- Added update-integrity, checksum parsing, signer policy, trusted URL, and missing-integrity metadata coverage.
+
 ## 1.0.104 - 2026-09-04
 
 ### Added

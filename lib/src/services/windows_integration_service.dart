@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../branding.dart';
 import 'sing_box_config_builder.dart';
+import 'windows_update_integrity.dart';
 
 class WindowsUpdateInfo {
   const WindowsUpdateInfo({
@@ -13,6 +15,8 @@ class WindowsUpdateInfo {
     this.installerUrl,
     this.installerName,
     this.installerSize,
+    this.installerSha256,
+    this.installerChecksumUrl,
     this.available = false,
     this.latestIsOlder = false,
   });
@@ -24,10 +28,28 @@ class WindowsUpdateInfo {
   final Uri? installerUrl;
   final String? installerName;
   final int? installerSize;
+  final String? installerSha256;
+  final Uri? installerChecksumUrl;
   final bool available;
   final bool latestIsOlder;
 
-  bool get canInstall => available && installerUrl != null;
+  bool get canInstall =>
+      available &&
+      installerUrl != null &&
+      (WindowsUpdateIntegrity.normalizeSha256(installerSha256) != null ||
+          installerChecksumUrl != null);
+}
+
+class VerifiedWindowsInstaller {
+  const VerifiedWindowsInstaller({
+    required this.file,
+    required this.sha256,
+    this.signerThumbprint,
+  });
+
+  final File file;
+  final String sha256;
+  final String? signerThumbprint;
 }
 
 class WindowsIntegrationService {
@@ -357,7 +379,12 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
       final json = jsonDecode(body) as Map<String, dynamic>;
       final tag = (json['tag_name'] as String?)?.trim();
       final htmlUrl = (json['html_url'] as String?)?.trim();
-      final installerAsset = _findInstallerAsset(json['assets']);
+      final assets = json['assets'];
+      final installerAsset = _findInstallerAsset(assets);
+      final checksumAsset = _findInstallerChecksumAsset(
+        assets,
+        installerAsset?.name,
+      );
       if (tag == null || tag.isEmpty) {
         return const WindowsUpdateInfo(message: 'Latest release has no tag.');
       }
@@ -369,6 +396,7 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
             ? null
             : Uri.parse(htmlUrl),
         installerAsset: installerAsset,
+        checksumAsset: checksumAsset,
       );
     } finally {
       client.close(force: true);
@@ -413,6 +441,10 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         'github.com',
         '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe',
       );
+      final checksumUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe.sha256',
+      );
       return _buildUpdateInfo(
         currentVersion: currentVersion,
         tag: tag,
@@ -420,6 +452,11 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         installerAsset: _ReleaseAsset(
           name: 'YurichConnect_Setup.exe',
           downloadUrl: installerUrl,
+          size: null,
+        ),
+        checksumAsset: _ReleaseAsset(
+          name: 'YurichConnect_Setup.exe.sha256',
+          downloadUrl: checksumUrl,
           size: null,
         ),
       );
@@ -467,6 +504,10 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         'github.com',
         '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe',
       );
+      final checksumUrl = Uri.https(
+        'github.com',
+        '/$githubOwner/$githubRepo/releases/download/$tag/YurichConnect_Setup.exe.sha256',
+      );
       return _buildUpdateInfo(
         currentVersion: currentVersion,
         tag: tag,
@@ -474,6 +515,11 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         installerAsset: _ReleaseAsset(
           name: 'YurichConnect_Setup.exe',
           downloadUrl: installerUrl,
+          size: null,
+        ),
+        checksumAsset: _ReleaseAsset(
+          name: 'YurichConnect_Setup.exe.sha256',
+          downloadUrl: checksumUrl,
           size: null,
         ),
       );
@@ -487,6 +533,7 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     required String tag,
     required Uri? releaseUrl,
     required _ReleaseAsset? installerAsset,
+    _ReleaseAsset? checksumAsset,
   }) {
     final versionComparison = compareReleaseVersions(tag, currentVersion);
     final available = versionComparison > 0;
@@ -500,6 +547,10 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
       installerUrl: installerAsset?.downloadUrl,
       installerName: installerAsset?.name,
       installerSize: installerAsset?.size,
+      installerSha256: WindowsUpdateIntegrity.normalizeSha256(
+        installerAsset?.digest,
+      ),
+      installerChecksumUrl: checksumAsset?.downloadUrl,
       message: available
           ? 'Update available: $tag'
           : latestIsOlder
@@ -508,10 +559,19 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     );
   }
 
-  Future<File> downloadInstaller(WindowsUpdateInfo update) async {
+  Future<VerifiedWindowsInstaller> downloadInstaller(
+    WindowsUpdateInfo update,
+  ) async {
     if (update.installerUrl == null) {
       throw StateError('Latest release has no Windows installer asset.');
     }
+    if (!isTrustedReleaseDownloadUrl(
+      update.installerUrl!,
+      expectedTag: update.latestVersion,
+    )) {
+      throw StateError('The update installer URL is not trusted.');
+    }
+    final expectedSha256 = await _resolveInstallerSha256(update);
 
     final safeVersion = (update.latestVersion ?? 'latest').replaceAll(
       RegExp(r'[^A-Za-z0-9._-]+'),
@@ -526,8 +586,15 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
       await target.parent.create(recursive: true);
     }
 
-    if (await _isValidDownloadedInstaller(target, update.installerSize)) {
-      return target;
+    if (await _isValidDownloadedInstaller(
+      target,
+      update.installerSize,
+      expectedSha256,
+    )) {
+      return _verifyInstallerForLaunch(target, expectedSha256);
+    }
+    if (await target.exists()) {
+      await target.delete();
     }
 
     final errors = <String>[];
@@ -561,10 +628,11 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
           target: target,
           partial: partial,
           viaLocalProxy: viaLocalProxy,
+          expectedSha256: expectedSha256,
         ),
       );
       if (result != null) {
-        return result;
+        return _verifyInstallerForLaunch(result, expectedSha256);
       }
     }
 
@@ -577,10 +645,11 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
             target: target,
             partial: partial,
             viaLocalProxy: viaLocalProxy,
+            expectedSha256: expectedSha256,
           ),
         );
         if (result != null) {
-          return result;
+          return _verifyInstallerForLaunch(result, expectedSha256);
         }
       }
 
@@ -592,10 +661,11 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
             target: target,
             partial: partial,
             viaLocalProxy: viaLocalProxy,
+            expectedSha256: expectedSha256,
           ),
         );
         if (result != null) {
-          return result;
+          return _verifyInstallerForLaunch(result, expectedSha256);
         }
       }
     }
@@ -608,11 +678,88 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     );
   }
 
+  Future<String> _resolveInstallerSha256(WindowsUpdateInfo update) async {
+    final fromApi = WindowsUpdateIntegrity.normalizeSha256(
+      update.installerSha256,
+    );
+    if (fromApi != null) {
+      return fromApi;
+    }
+
+    final checksumUrl = update.installerChecksumUrl;
+    if (checksumUrl == null ||
+        !isTrustedReleaseDownloadUrl(
+          checksumUrl,
+          expectedTag: update.latestVersion,
+        )) {
+      throw StateError(
+        'The release has no trusted SHA-256 metadata. Open GitHub Releases and update manually.',
+      );
+    }
+    final fileName = update.installerName ?? 'YurichConnect_Setup.exe';
+    final errors = <String>[];
+    for (final viaLocalProxy in const [false, true]) {
+      try {
+        final checksum = await _downloadChecksum(
+          checksumUrl,
+          fileName: fileName,
+          viaLocalProxy: viaLocalProxy,
+        );
+        if (checksum != null) {
+          return checksum;
+        }
+        errors.add(
+          '${_updateRouteLabel(viaLocalProxy)}: invalid checksum file',
+        );
+      } on Object catch (error) {
+        errors.add(
+          '${_updateRouteLabel(viaLocalProxy)}: ${_shortUpdateError(error)}',
+        );
+      }
+    }
+    throw StateError(
+      'Could not verify the release checksum. ${errors.take(2).join('; ')}',
+    );
+  }
+
+  Future<String?> _downloadChecksum(
+    Uri url, {
+    required String fileName,
+    required bool viaLocalProxy,
+  }) async {
+    final client = _githubHttpClient(viaLocalProxy: viaLocalProxy)
+      ..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.userAgentHeader, 'YurichConnect updater');
+      final response = await request.close().timeout(
+        const Duration(seconds: 20),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError(
+          'GitHub checksum returned HTTP ${response.statusCode}.',
+        );
+      }
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in response.timeout(const Duration(seconds: 20))) {
+        bytes.add(chunk);
+        if (bytes.length > 64 * 1024) {
+          throw StateError('GitHub checksum file is unexpectedly large.');
+        }
+      }
+      final content = utf8.decode(bytes.takeBytes(), allowMalformed: false);
+      return WindowsUpdateIntegrity.checksumForFile(content, fileName);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<File> _downloadInstaller(
     WindowsUpdateInfo update, {
     required File target,
     required File partial,
     required bool viaLocalProxy,
+    required String expectedSha256,
   }) async {
     final url = update.installerUrl!;
     final client = _githubHttpClient(viaLocalProxy: viaLocalProxy)
@@ -634,6 +781,7 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
         target,
         partial,
         update.installerSize,
+        expectedSha256,
       );
     } on Object {
       try {
@@ -654,6 +802,7 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     required File target,
     required File partial,
     required bool viaLocalProxy,
+    required String expectedSha256,
   }) async {
     final args = <String>[
       '--fail',
@@ -670,8 +819,9 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
       '2',
       '--retry-all-errors',
       '--tlsv1.2',
-      '--ssl-no-revoke',
       '--proto',
+      '=https',
+      '--proto-redir',
       '=https',
       '--user-agent',
       'YurichConnect updater',
@@ -700,7 +850,12 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
             : 'curl.exe exited with code ${result.exitCode}: $output',
       );
     }
-    return _finalizeDownloadedInstaller(target, partial, update.installerSize);
+    return _finalizeDownloadedInstaller(
+      target,
+      partial,
+      update.installerSize,
+      expectedSha256,
+    );
   }
 
   Future<File> _downloadInstallerWithPowerShell(
@@ -708,6 +863,7 @@ Remove-ItemProperty -Path $key -Name $backupServer -Force -ErrorAction SilentlyC
     required File target,
     required File partial,
     required bool viaLocalProxy,
+    required String expectedSha256,
   }) async {
     final url = _quotePowerShell(update.installerUrl!.toString());
     final outFile = _quotePowerShell(partial.path);
@@ -732,13 +888,19 @@ Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirecti
             : output,
       );
     }
-    return _finalizeDownloadedInstaller(target, partial, update.installerSize);
+    return _finalizeDownloadedInstaller(
+      target,
+      partial,
+      update.installerSize,
+      expectedSha256,
+    );
   }
 
   Future<File> _finalizeDownloadedInstaller(
     File target,
     File partial,
     int? expectedSize,
+    String expectedSha256,
   ) async {
     final actualSize = await partial.length();
     if (expectedSize != null && actualSize != expectedSize) {
@@ -749,6 +911,12 @@ Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirecti
     if (actualSize < 1024 * 1024) {
       throw StateError('Downloaded installer is too small: $actualSize bytes.');
     }
+    if (!await WindowsUpdateIntegrity.fileMatchesSha256(
+      partial,
+      expectedSha256,
+    )) {
+      throw StateError('Downloaded installer SHA-256 mismatch.');
+    }
     if (await target.exists()) {
       await target.delete();
     }
@@ -756,7 +924,11 @@ Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirecti
     return target;
   }
 
-  Future<bool> _isValidDownloadedInstaller(File file, int? expectedSize) async {
+  Future<bool> _isValidDownloadedInstaller(
+    File file,
+    int? expectedSize,
+    String expectedSha256,
+  ) async {
     if (!await file.exists()) {
       return false;
     }
@@ -764,7 +936,73 @@ Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirecti
     if (size < 1024 * 1024) {
       return false;
     }
-    return expectedSize == null || size == expectedSize;
+    if (expectedSize != null && size != expectedSize) {
+      return false;
+    }
+    return WindowsUpdateIntegrity.fileMatchesSha256(file, expectedSha256);
+  }
+
+  Future<VerifiedWindowsInstaller> _verifyInstallerForLaunch(
+    File installer,
+    String expectedSha256,
+  ) async {
+    if (!await WindowsUpdateIntegrity.fileMatchesSha256(
+      installer,
+      expectedSha256,
+    )) {
+      throw StateError('The update installer failed SHA-256 verification.');
+    }
+    final currentSignature = await _readAuthenticode(
+      File(Platform.resolvedExecutable),
+    );
+    final installerSignature = await _readAuthenticode(installer);
+    final policyError = WindowsUpdateIntegrity.authenticodePolicyError(
+      currentApp: currentSignature,
+      installer: installerSignature,
+    );
+    if (policyError != null) {
+      throw StateError(policyError);
+    }
+    return VerifiedWindowsInstaller(
+      file: installer,
+      sha256: expectedSha256,
+      signerThumbprint: currentSignature.isValid
+          ? currentSignature.thumbprint
+          : null,
+    );
+  }
+
+  Future<WindowsAuthenticodeInfo> _readAuthenticode(File file) async {
+    final path = _quotePowerShell(file.path);
+    final result = await _runPowerShell('''
+\$signature = Get-AuthenticodeSignature -LiteralPath $path
+\$thumbprint = ''
+\$subject = ''
+if (\$null -ne \$signature.SignerCertificate) {
+  \$thumbprint = [string]\$signature.SignerCertificate.Thumbprint
+  \$subject = [string]\$signature.SignerCertificate.Subject
+}
+[pscustomobject]@{
+  status = [string]\$signature.Status
+  thumbprint = \$thumbprint
+  subject = \$subject
+} | ConvertTo-Json -Compress
+''', timeout: const Duration(seconds: 20));
+    if (result.exitCode != 0) {
+      final error = '${result.stderr}${result.stdout}'.trim();
+      throw StateError(
+        error.isEmpty
+            ? 'Could not inspect the installer signature.'
+            : 'Could not inspect the installer signature: $error',
+      );
+    }
+    final parsed = WindowsUpdateIntegrity.parseAuthenticodeJson(
+      '${result.stdout}',
+    );
+    if (parsed == null) {
+      throw StateError('Windows returned invalid Authenticode information.');
+    }
+    return parsed;
   }
 
   HttpClient _githubHttpClient({required bool viaLocalProxy}) {
@@ -799,59 +1037,60 @@ Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -MaximumRedirecti
     return '${text.substring(0, 260)}...';
   }
 
-  Future<void> runInstallerAsAdmin(File installer) async {
+  Future<void> runInstallerAsAdmin(
+    VerifiedWindowsInstaller verifiedInstaller,
+  ) async {
     if (!Platform.isWindows) {
       return;
     }
+    final installer = verifiedInstaller.file;
     if (!await installer.exists()) {
       throw StateError('Downloaded installer not found: ${installer.path}');
     }
-
-    final helper = File(
-      '${installer.parent.path}\\run_yurich_connect_update_${DateTime.now().millisecondsSinceEpoch}.ps1',
+    final reverified = await _verifyInstallerForLaunch(
+      installer,
+      verifiedInstaller.sha256,
     );
-    await helper.writeAsString('''
-param(
-  [Parameter(Mandatory = \$true)]
-  [string]\$Installer,
-  [Parameter(Mandatory = \$true)]
-  [int]\$AppPid
-)
-
-\$ErrorActionPreference = 'Stop'
-try {
-  \$app = Get-Process -Id \$AppPid -ErrorAction SilentlyContinue
-  if (\$null -ne \$app) {
-    Wait-Process -Id \$AppPid -Timeout 30 -ErrorAction SilentlyContinue
-  }
-} catch {
-  # If the old app already exited, continue with the installer.
-}
-Start-Sleep -Milliseconds 700
-\$workingDirectory = Split-Path -Parent \$Installer
-\$setup = Start-Process -FilePath \$Installer -WorkingDirectory \$workingDirectory -Verb RunAs -Wait -PassThru
-try {
-  Remove-Item -LiteralPath \$PSCommandPath -Force -ErrorAction SilentlyContinue
-} catch {
-  # Cleanup is best-effort.
-}
-if (\$null -eq \$setup) { exit 1 }
-exit \$setup.ExitCode
-''', flush: true);
-
-    final helperPath = _quotePowerShell(helper.path);
+    if (verifiedInstaller.signerThumbprint != null &&
+        reverified.signerThumbprint != verifiedInstaller.signerThumbprint) {
+      throw StateError('The update signer changed before installation.');
+    }
     final installerPath = _quotePowerShell(installer.path);
     final workingDirectory = _quotePowerShell(installer.parent.path);
+    final expectedSha256 = _quotePowerShell(verifiedInstaller.sha256);
+    final expectedSigner = _quotePowerShell(
+      verifiedInstaller.signerThumbprint ?? '',
+    );
     final result = await Process.run('powershell', [
       '-NoProfile',
+      '-NonInteractive',
       '-ExecutionPolicy',
       'Bypass',
       '-Command',
       '''
 \$ErrorActionPreference = 'Stop'
-Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$helperPath,'-Installer',$installerPath,'-AppPid','$pid') | Out-Null
+\$stream = [IO.File]::Open($installerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+  \$actualHash = (Get-FileHash -InputStream \$stream -Algorithm SHA256).Hash.ToLowerInvariant()
+  if (\$actualHash -ne $expectedSha256) {
+    throw 'Installer SHA-256 changed before launch.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($expectedSigner)) {
+    \$signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+    \$actualSigner = ''
+    if (\$null -ne \$signature.SignerCertificate) {
+      \$actualSigner = [string]\$signature.SignerCertificate.Thumbprint
+    }
+    if ([string]\$signature.Status -ne 'Valid' -or \$actualSigner -ine $expectedSigner) {
+      throw 'Installer Authenticode signature changed before launch.'
+    }
+  }
+  Start-Process -FilePath $installerPath -WorkingDirectory $workingDirectory -Verb RunAs | Out-Null
+} finally {
+  \$stream.Dispose()
+}
 ''',
-    ]);
+    ]).timeout(const Duration(seconds: 45));
     if (result.exitCode != 0) {
       final error = '${result.stderr}'.trim();
       throw StateError(
@@ -876,11 +1115,30 @@ Start-Process -FilePath powershell.exe -WorkingDirectory $workingDirectory -Wind
         return asset;
       }
     }
+    return null;
+  }
+
+  static _ReleaseAsset? _findInstallerChecksumAsset(
+    Object? assets,
+    String? installerName,
+  ) {
+    if (assets is! List || installerName == null || installerName.isEmpty) {
+      return null;
+    }
+    final parsed = assets
+        .whereType<Map>()
+        .map((asset) => asset.cast<String, dynamic>())
+        .map(_ReleaseAsset.fromJson)
+        .whereType<_ReleaseAsset>()
+        .toList();
+    final sidecarName = '$installerName.sha256'.toLowerCase();
     for (final asset in parsed) {
-      final name = asset.name.toLowerCase();
-      if (name.endsWith('.exe') &&
-          name.contains('setup') &&
-          name.contains('yurich')) {
+      if (asset.name.toLowerCase() == sidecarName) {
+        return asset;
+      }
+    }
+    for (final asset in parsed) {
+      if (asset.name.toLowerCase() == 'sha256sums.txt') {
         return asset;
       }
     }
@@ -1224,6 +1482,33 @@ public static class YurichWinInet {
     return null;
   }
 
+  static bool isTrustedReleaseDownloadUrl(Uri uri, {String? expectedTag}) {
+    if (uri.scheme.toLowerCase() != 'https' ||
+        uri.host.toLowerCase() != 'github.com' ||
+        uri.userInfo.isNotEmpty ||
+        (uri.hasPort && uri.port != 443) ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      return false;
+    }
+    final segments = uri.pathSegments;
+    if (segments.length != 6) {
+      return false;
+    }
+    if (segments[0].toLowerCase() != githubOwner ||
+        segments[1].toLowerCase() != githubRepo ||
+        segments[2].toLowerCase() != 'releases' ||
+        segments[3].toLowerCase() != 'download' ||
+        segments[4].trim().isEmpty ||
+        (expectedTag != null && segments[4] != expectedTag)) {
+      return false;
+    }
+    final assetName = segments[5].toLowerCase();
+    return assetName == 'yurichconnect_setup.exe' ||
+        assetName == 'yurichconnect_setup.exe.sha256' ||
+        assetName == 'sha256sums.txt';
+  }
+
   static String? _releaseTagFromPathSegments(List<String> segments) {
     for (var i = 0; i < segments.length - 2; i++) {
       if (segments[i] == 'releases' && segments[i + 1] == 'tag') {
@@ -1240,11 +1525,13 @@ class _ReleaseAsset {
     required this.name,
     required this.downloadUrl,
     required this.size,
+    this.digest,
   });
 
   final String name;
   final Uri downloadUrl;
   final int? size;
+  final String? digest;
 
   static _ReleaseAsset? fromJson(Map<String, dynamic> json) {
     final name = (json['name'] as String?)?.trim();
@@ -1256,6 +1543,7 @@ class _ReleaseAsset {
       name: name,
       downloadUrl: Uri.parse(url),
       size: (json['size'] as num?)?.round(),
+      digest: (json['digest'] as String?)?.trim(),
     );
   }
 }

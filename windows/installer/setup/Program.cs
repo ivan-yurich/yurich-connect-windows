@@ -11,7 +11,7 @@ internal static class Program
     private const string AppName = "Yurich Connect";
     private const string LegacyAppName = "Aurum VPN";
     private const string Publisher = "Yurich";
-    private const string AppVersion = "1.0.104";
+    private const string AppVersion = "1.0.105";
     private const string StartupTaskName = "Yurich Connect";
     private const string LegacyStartupTaskName = "Aurum VPN";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Yurich Connect";
@@ -22,6 +22,18 @@ internal static class Program
         "MSVCP140.dll",
         "VCRUNTIME140.dll",
         "VCRUNTIME140_1.dll",
+    ];
+    private static readonly string[] RequiredPayloadPaths =
+    [
+        "YurichConnect.exe",
+        "flutter_windows.dll",
+        @"runtime\sing-box.exe",
+        @"runtime\xray.exe",
+        @"runtime\naive.exe",
+        @"runtime\wintun.dll",
+        @"runtime\libcronet.dll",
+        "START_YURICH_CONNECT.cmd",
+        "uninstall_yurich_connect.ps1",
     ];
 
     [STAThread]
@@ -84,7 +96,6 @@ internal static class Program
                 throw new FileNotFoundException("YurichConnect.exe не был установлен.", exePath);
             }
 
-            EnsureVisualRuntimePayload(installDir);
             CreateShortcut(
                 Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
@@ -156,6 +167,8 @@ internal static class Program
         {
             Directory.CreateDirectory(installDir);
             ZipFile.ExtractToDirectory(payloadPath, installDir, overwriteFiles: true);
+            EnsureRequiredPayload(installDir);
+            EnsureVisualRuntimePayload(installDir);
             TryDeleteDirectory(backupDir);
         }
         catch
@@ -299,6 +312,22 @@ internal static class Program
             "В установочном пакете отсутствуют DLL Microsoft Visual C++ Runtime: " +
             string.Join(", ", missing) +
             "\n\nПереустанови свежий YurichConnect_Setup.exe или установи Microsoft Visual C++ Redistributable 2015-2022 x64: https://aka.ms/vs/17/release/vc_redist.x64.exe");
+    }
+
+    private static void EnsureRequiredPayload(string installDir)
+    {
+        var missing = RequiredPayloadPaths
+            .Where(path => !File.Exists(Path.Combine(installDir, path)))
+            .ToArray();
+        if (missing.Length == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "Установочный пакет Yurich Connect повреждён. Отсутствуют файлы: " +
+            string.Join(", ", missing) +
+            "\n\nПредыдущая версия будет восстановлена автоматически.");
     }
 
     private static void LaunchApp(string exePath)

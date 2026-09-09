@@ -94,7 +94,7 @@ The report masks UUIDs, passwords, tokens, private keys, `vless://` links, `naiv
 
 ### Updates
 
-The app checks GitHub Releases for newer Windows builds. Update downloads are written to a temporary `.download` file first, checked, and only then renamed to the final installer file.
+The app checks GitHub Releases for newer Windows builds. Update downloads are written to a temporary `.download` file and must pass the published SHA-256 check before launch. Cached installers are checked again, and integrity is re-verified immediately before UAC. Once the installed app is code-signed, the updater also requires the same Authenticode signer.
 
 ### Windows Defender
 
@@ -194,7 +194,7 @@ Stable Proxy Mode не требует прав администратора. П�
 
 ### Обновления
 
-Приложение проверяет Windows-сборки в GitHub Releases. Обновление сначала скачивается во временный `.download` файл, проверяется и только потом переименовывается в финальный установщик.
+Приложение проверяет Windows-сборки в GitHub Releases. Обновление скачивается во временный `.download` файл и запускается только после обязательной проверки опубликованного SHA-256. Кэшированный установщик проверяется повторно, а целостность ещё раз сверяется непосредственно перед UAC. После подписания приложения updater также потребует подпись Authenticode того же издателя.
 
 ### Windows Defender
 

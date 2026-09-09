@@ -288,4 +288,92 @@ void main() {
       );
     });
   });
+
+  group('WindowsIntegrationService update trust boundary', () {
+    test('accepts only this repository release downloads over HTTPS', () {
+      expect(
+        WindowsIntegrationService.isTrustedReleaseDownloadUrl(
+          Uri.parse(
+            'https://github.com/ivan-yurich/yurich-connect-windows/releases/download/v1.0.105/YurichConnect_Setup.exe',
+          ),
+          expectedTag: 'v1.0.105',
+        ),
+        isTrue,
+      );
+      expect(
+        WindowsIntegrationService.isTrustedReleaseDownloadUrl(
+          Uri.parse(
+            'http://github.com/ivan-yurich/yurich-connect-windows/releases/download/v1.0.105/YurichConnect_Setup.exe',
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        WindowsIntegrationService.isTrustedReleaseDownloadUrl(
+          Uri.parse(
+            'https://github.com/ivan-yurich/yurich-connect-windows/releases/download/v1.0.104/YurichConnect_Setup.exe',
+          ),
+          expectedTag: 'v1.0.105',
+        ),
+        isFalse,
+      );
+      expect(
+        WindowsIntegrationService.isTrustedReleaseDownloadUrl(
+          Uri.parse(
+            'https://github.com/ivan-yurich/yurich-connect-windows/releases/download/v1.0.105/YurichConnect_Setup.exe?source=other',
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        WindowsIntegrationService.isTrustedReleaseDownloadUrl(
+          Uri.parse(
+            'https://github.com/ivan-yurich/yurich-connect-windows/releases/download/v1.0.105/other.exe',
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        WindowsIntegrationService.isTrustedReleaseDownloadUrl(
+          Uri.parse(
+            'https://github.com/attacker/yurich-connect-windows/releases/download/v1.0.105/YurichConnect_Setup.exe',
+          ),
+        ),
+        isFalse,
+      );
+    });
+
+    test('requires integrity metadata before enabling installation', () {
+      final installer = Uri.parse(
+        'https://github.com/ivan-yurich/yurich-connect-windows/releases/download/v1.0.105/YurichConnect_Setup.exe',
+      );
+      expect(
+        WindowsUpdateInfo(
+          message: 'update',
+          available: true,
+          installerUrl: installer,
+        ).canInstall,
+        isFalse,
+      );
+      expect(
+        WindowsUpdateInfo(
+          message: 'update',
+          available: true,
+          installerUrl: installer,
+          installerSha256:
+              '1111111111111111111111111111111111111111111111111111111111111111',
+        ).canInstall,
+        isTrue,
+      );
+      expect(
+        WindowsUpdateInfo(
+          message: 'update',
+          available: true,
+          installerUrl: installer,
+          installerChecksumUrl: Uri.parse('$installer.sha256'),
+        ).canInstall,
+        isTrue,
+      );
+    });
+  });
 }
