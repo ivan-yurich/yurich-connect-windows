@@ -83,20 +83,11 @@ jobs:
             Authorization = "Bearer $env:GH_TOKEN"
             'X-GitHub-Api-Version' = '2022-11-28'
           }
-          $existingRelease = $null
-          try {
-            $existingRelease = Invoke-RestMethod `
-              -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" `
-              -Headers $headers `
-              -TimeoutSec 30
-          } catch {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-            if ($statusCode -ne 404) {
-              throw "Could not verify whether release $tag already exists: $($_.Exception.Message)"
-            }
-          }
-          if ($null -ne $existingRelease) {
-            throw "Release $tag already exists. Refusing to overwrite a published release."
+          $releasesUrl = "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100"
+          $releases = @(Invoke-RestMethod -Uri $releasesUrl -Headers $headers -TimeoutSec 30)
+          $existingReleases = @($releases | Where-Object { $_.tag_name -eq $tag })
+          if ($existingReleases.Count -gt 0) {
+            throw "Release or draft $tag already exists. Refusing to overwrite it."
           }
 
           gh release create $tag `
@@ -114,8 +105,20 @@ jobs:
             throw "Could not create draft release $tag."
           }
 
-          $draft = gh api "repos/${{ github.repository }}/releases/tags/$tag" | ConvertFrom-Json
-          if (-not $draft.draft -or $draft.assets.Count -ne 5) {
+          $draft = $null
+          for ($attempt = 1; $attempt -le 5 -and $null -eq $draft; $attempt++) {
+            $releases = @(Invoke-RestMethod -Uri $releasesUrl -Headers $headers -TimeoutSec 30)
+            $draft = @(
+              $releases | Where-Object { $_.tag_name -eq $tag -and $_.draft }
+            ) | Select-Object -First 1
+            if ($null -eq $draft) {
+              Start-Sleep -Seconds 2
+            }
+          }
+          if ($null -eq $draft -or
+              $draft.target_commitish -ne '${{ github.sha }}' -or
+              $draft.name -ne "Yurich Connect for Windows v$version" -or
+              $draft.assets.Count -ne 5) {
             throw "Draft release $tag failed asset-count verification."
           }
           foreach ($file in @(
