@@ -84,7 +84,8 @@ jobs:
             'X-GitHub-Api-Version' = '2022-11-28'
           }
           $releasesUrl = "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100"
-          $releases = @(Invoke-RestMethod -Uri $releasesUrl -Headers $headers -TimeoutSec 30)
+          $releaseResponse = Invoke-RestMethod -Uri $releasesUrl -Headers $headers -TimeoutSec 30
+          $releases = @($releaseResponse.GetEnumerator())
           $existingReleases = @($releases | Where-Object { $_.tag_name -eq $tag })
           if ($existingReleases.Count -gt 0) {
             throw "Release or draft $tag already exists. Refusing to overwrite it."
@@ -107,7 +108,8 @@ jobs:
 
           $draft = $null
           for ($attempt = 1; $attempt -le 5 -and $null -eq $draft; $attempt++) {
-            $releases = @(Invoke-RestMethod -Uri $releasesUrl -Headers $headers -TimeoutSec 30)
+            $releaseResponse = Invoke-RestMethod -Uri $releasesUrl -Headers $headers -TimeoutSec 30
+            $releases = @($releaseResponse.GetEnumerator())
             $draft = @(
               $releases | Where-Object { $_.tag_name -eq $tag -and $_.draft }
             ) | Select-Object -First 1
