@@ -57,6 +57,7 @@ List<RankedProfile> rankProfilesForFailover({
   required VpnProfile preferred,
   required Map<String, ProfileRuntimeStats> runtimeStats,
   required Map<String, ProfileLatencySnapshot> latencies,
+  AdaptiveAccessStrategy adaptiveStrategy = AdaptiveAccessStrategy.auto,
   DateTime? now,
 }) {
   final currentTime = now ?? DateTime.now();
@@ -84,6 +85,18 @@ List<RankedProfile> rankProfilesForFailover({
       )
       .toList();
   ranked.sort((a, b) {
+    final aSameVariantGroup = _sameVariantGroup(a.profile, preferred);
+    final bSameVariantGroup = _sameVariantGroup(b.profile, preferred);
+    if (aSameVariantGroup != bSameVariantGroup) {
+      return aSameVariantGroup ? -1 : 1;
+    }
+    final byStrategy = _adaptiveStrategyPriority(
+      a.profile,
+      adaptiveStrategy,
+    ).compareTo(_adaptiveStrategyPriority(b.profile, adaptiveStrategy));
+    if (byStrategy != 0) {
+      return byStrategy;
+    }
     final byGroup = _profileFailoverGroupPriority(
       a.profile,
       preferred,
@@ -111,6 +124,7 @@ ProfileFailoverSelection selectProfileFailoverCandidates({
   required VpnProfile preferred,
   required Map<String, ProfileRuntimeStats> runtimeStats,
   required Map<String, ProfileLatencySnapshot> latencies,
+  AdaptiveAccessStrategy adaptiveStrategy = AdaptiveAccessStrategy.auto,
   int maxAttempts = 3,
   DateTime? now,
 }) {
@@ -123,6 +137,7 @@ ProfileFailoverSelection selectProfileFailoverCandidates({
     preferred: preferred,
     runtimeStats: runtimeStats,
     latencies: latencies,
+    adaptiveStrategy: adaptiveStrategy,
     now: currentTime,
   );
   if (ranked.isEmpty) {
@@ -165,6 +180,58 @@ ProfileFailoverSelection selectProfileFailoverCandidates({
     candidates: List.unmodifiable(ordered.take(maxAttempts)),
     autoSelectedProfile: useBest ? best.profile : null,
   );
+}
+
+int _adaptiveStrategyPriority(
+  VpnProfile profile,
+  AdaptiveAccessStrategy strategy,
+) {
+  final declared = profile.variantStrategy?.trim().toLowerCase();
+  final base = switch (strategy) {
+    AdaptiveAccessStrategy.auto => 0,
+    AdaptiveAccessStrategy.compatibility when declared == 'compatibility' => 0,
+    AdaptiveAccessStrategy.speed when declared == 'speed' => 0,
+    AdaptiveAccessStrategy.compatibility => _compatibilityPriority(profile),
+    AdaptiveAccessStrategy.speed => _speedPriority(profile),
+  };
+  return (base * 100) + _variantPriority(profile);
+}
+
+int _compatibilityPriority(VpnProfile profile) {
+  if (VlessProfileTools.isVlessProfile(profile)) {
+    final transport = VlessProfileTools.safeTransportType(profile);
+    if (transport == 'tcp' ||
+        transport == 'httpupgrade' ||
+        transport == 'xhttp') {
+      return 0;
+    }
+    return 2;
+  }
+  if (profile.kind == VpnProfileKind.naive) {
+    return profile.outbound?['quic'] == true ? 2 : 1;
+  }
+  if (profile.kind == VpnProfileKind.singBoxConfig) {
+    return 4;
+  }
+  return 6;
+}
+
+int _speedPriority(VpnProfile profile) {
+  if (profile.kind == VpnProfileKind.hysteria ||
+      profile.kind == VpnProfileKind.hysteria2) {
+    return 0;
+  }
+  if (profile.kind == VpnProfileKind.naive &&
+      profile.outbound?['quic'] == true) {
+    return 1;
+  }
+  if (VlessProfileTools.isVlessProfile(profile)) {
+    return 3;
+  }
+  if (profile.kind == VpnProfileKind.naive) {
+    return 4;
+  }
+  return 5;
 }
 
 String? startupProbeQuarantineReason({
@@ -295,6 +362,9 @@ int profileFailoverScore({
       profile.subscriptionSource == preferred.subscriptionSource) {
     score += 4;
   }
+  if (_sameVariantGroup(profile, preferred)) {
+    score += 9;
+  }
   if (profile.id == preferred.id) {
     score += 5;
   }
@@ -302,6 +372,9 @@ int profileFailoverScore({
 }
 
 int _profileFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
+  if (_sameVariantGroup(profile, preferred)) {
+    return 0;
+  }
   if (VlessProfileTools.isVlessProfile(preferred) &&
       VlessProfileTools.isVlessProfile(profile)) {
     return _vlessFailoverGroupPriority(profile, preferred);
@@ -335,6 +408,9 @@ int _profileFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
 }
 
 int _vlessFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
+  if (_sameVariantGroup(profile, preferred)) {
+    return 0;
+  }
   final sameKind = profile.kind == preferred.kind;
   final sameTransport =
       VlessProfileTools.safeTransportType(profile) ==
@@ -369,6 +445,24 @@ int _vlessFailoverGroupPriority(VpnProfile profile, VpnProfile preferred) {
     return 7;
   }
   return 8;
+}
+
+bool _sameVariantGroup(VpnProfile profile, VpnProfile preferred) {
+  final group = profile.variantGroup?.trim();
+  final preferredGroup = preferred.variantGroup?.trim();
+  return group != null &&
+      group.isNotEmpty &&
+      preferredGroup != null &&
+      preferredGroup.isNotEmpty &&
+      group == preferredGroup;
+}
+
+int _variantPriority(VpnProfile profile) {
+  final priority = profile.variantPriority;
+  if (priority == null) {
+    return 50;
+  }
+  return priority.clamp(0, 99).toInt();
 }
 
 String _profileRegionKey(VpnProfile profile) {

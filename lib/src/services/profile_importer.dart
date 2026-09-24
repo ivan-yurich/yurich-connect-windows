@@ -49,7 +49,7 @@ class ProfileImporter {
 
   Future<_SubscriptionFetchResult> _fetchSubscription(Uri uri) async {
     final clients = [
-      'YurichConnect-Windows/1.0.105 YurichCore-sing-box/1.13.12',
+      'YurichConnect-Windows/1.0.106 YurichCore-sing-box/1.13.12',
       'v2rayN/7.15.4',
       'HiddifyNext/2.5.7',
       'sing-box/1.13.12',
@@ -177,6 +177,14 @@ class ProfileImporter {
       return [jsonProfile.withExpiresAt(defaultExpiresAt)];
     }
 
+    final structuredVariants = _tryParseStructuredVariants(
+      text,
+      defaultExpiresAt: defaultExpiresAt,
+    );
+    if (structuredVariants.isNotEmpty) {
+      return structuredVariants;
+    }
+
     final jsonLinks = _tryParseJsonLinks(
       text,
       defaultExpiresAt: defaultExpiresAt,
@@ -207,6 +215,14 @@ class ProfileImporter {
       );
       if (decodedJsonProfile != null) {
         return [decodedJsonProfile];
+      }
+
+      final decodedStructuredVariants = _tryParseStructuredVariants(
+        decoded,
+        defaultExpiresAt: defaultExpiresAt,
+      );
+      if (decodedStructuredVariants.isNotEmpty) {
+        return decodedStructuredVariants;
       }
 
       final decodedJsonLinks = _tryParseJsonLinks(
@@ -306,6 +322,181 @@ class ProfileImporter {
       return const [];
     }
     return const [];
+  }
+
+  List<VpnProfile> _tryParseStructuredVariants(
+    String text, {
+    DateTime? defaultExpiresAt,
+  }) {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(text);
+    } on FormatException {
+      return const [];
+    }
+
+    final profiles = <VpnProfile>[];
+    final errors = <String>[];
+    var sawStructuredVariants = false;
+
+    void parseServer(Map<String, dynamic> server) {
+      final variants = server['variants'];
+      if (variants is! List || variants.isEmpty) {
+        return;
+      }
+      sawStructuredVariants = true;
+      final serverName = _firstText(server, const [
+        'name',
+        'remarks',
+        'title',
+        'location',
+      ]);
+      final group =
+          _firstText(server, const [
+            'group',
+            'variantGroup',
+            'variant_group',
+            'id',
+            'slug',
+          ]) ??
+          _stableId(
+            [
+              serverName,
+              _firstText(server, const ['country', 'region']),
+              _firstText(server, const ['city']),
+            ].whereType<String>().join(':'),
+          );
+      final serverExpiresAt =
+          _extractExpiryFromJson(server) ?? defaultExpiresAt;
+
+      for (final variant in variants) {
+        try {
+          profiles.addAll(
+            _profilesFromStructuredVariant(
+              variant,
+              group: group,
+              serverName: serverName,
+              defaultExpiresAt: serverExpiresAt,
+            ),
+          );
+        } on Object catch (error) {
+          errors.add('$error');
+        }
+      }
+    }
+
+    if (decoded is Map) {
+      final root = decoded.cast<String, dynamic>();
+      if (root['variants'] is List) {
+        parseServer(root);
+      }
+      for (final key in const [
+        'servers',
+        'nodes',
+        'locations',
+        'groups',
+        'profileGroups',
+        'profile_groups',
+      ]) {
+        final list = root[key];
+        if (list is List) {
+          for (final item in list.whereType<Map>()) {
+            parseServer(item.cast<String, dynamic>());
+          }
+        }
+      }
+      final profileList = root['profiles'];
+      if (profileList is List) {
+        for (final item in profileList.whereType<Map>()) {
+          final map = item.cast<String, dynamic>();
+          if (map['variants'] is List) {
+            parseServer(map);
+          }
+        }
+      }
+    } else if (decoded is List) {
+      for (final item in decoded.whereType<Map>()) {
+        final map = item.cast<String, dynamic>();
+        if (map['variants'] is List) {
+          parseServer(map);
+        }
+      }
+    }
+
+    if (profiles.isEmpty && sawStructuredVariants && errors.isNotEmpty) {
+      throw ProfileImportException(errors.join('\n'));
+    }
+    return profiles;
+  }
+
+  List<VpnProfile> _profilesFromStructuredVariant(
+    Object? variant, {
+    required String group,
+    required String? serverName,
+    DateTime? defaultExpiresAt,
+  }) {
+    final map = variant is Map ? variant.cast<String, dynamic>() : null;
+    final link = map == null
+        ? '$variant'.trim()
+        : _firstText(map, const ['link', 'uri', 'url', 'raw', 'profile']);
+    if (link == null || link.isEmpty || link == 'null') {
+      throw const ProfileImportException('Вариант сервера без raw-ссылки.');
+    }
+
+    final variantExpiresAt = map == null
+        ? defaultExpiresAt
+        : _extractExpiryFromJson(map) ?? defaultExpiresAt;
+    final role = _normalizeVariantRole(
+      map == null
+          ? null
+          : _firstText(map, const [
+              'role',
+              'variant',
+              'transport',
+              'transportRole',
+              'transport_role',
+              'label',
+            ]),
+    );
+    final strategy = _normalizeVariantStrategy(
+      map == null
+          ? null
+          : _firstText(map, const [
+              'strategy',
+              'accessStrategy',
+              'access_strategy',
+              'mode',
+            ]),
+    );
+    final priority = map == null
+        ? null
+        : _asInt(
+            map['priority'] ??
+                map['order'] ??
+                map['sort'] ??
+                map['weight'] ??
+                map['failoverPriority'],
+          );
+
+    return _profilesFromLinks([link], defaultExpiresAt: variantExpiresAt).map((
+      profile,
+    ) {
+      final effectiveRole = role ?? _inferVariantRole(profile);
+      final effectiveStrategy = strategy ?? _inferVariantStrategy(profile);
+      final effectivePriority = priority ?? _inferVariantPriority(profile);
+      final roleLabel = _variantRoleLabel(effectiveRole);
+      final displayName = serverName == null || serverName.trim().isEmpty
+          ? profile.name
+          : '$serverName • $roleLabel';
+      return profile.copyWith(
+        name: displayName,
+        expiresAt: variantExpiresAt,
+        variantGroup: group.trim(),
+        variantRole: effectiveRole,
+        variantStrategy: effectiveStrategy,
+        variantPriority: effectivePriority,
+      );
+    }).toList();
   }
 
   List<VpnProfile> _tryParseXrayConfigs(
@@ -617,7 +808,7 @@ class ProfileImporter {
     if (transport != null) {
       outbound['transport'] = transport;
     }
-    return VpnProfile(
+    final profile = VpnProfile(
       id: _stableId(link),
       name: name,
       kind: security == 'reality'
@@ -633,6 +824,7 @@ class ProfileImporter {
         candidates: [_extractExpiryFromQuery(query)],
       ),
     );
+    return _withVariantMetadataFromQuery(profile, query);
   }
 
   String? _normalizeVlessFlow(String? value) {
@@ -691,7 +883,7 @@ class ProfileImporter {
         'quic_congestion_control': query['quic_congestion_control'],
     };
 
-    return VpnProfile(
+    final profile = VpnProfile(
       id: _stableId(link),
       name: _displayName(uri.fragment, fallback: uri.host),
       kind: VpnProfileKind.naive,
@@ -704,6 +896,7 @@ class ProfileImporter {
         candidates: [_extractExpiryFromQuery(query)],
       ),
     );
+    return _withVariantMetadataFromQuery(profile, query);
   }
 
   VpnProfile _parseHysteria(String link, {DateTime? expiresAt}) {
@@ -747,7 +940,7 @@ class ProfileImporter {
       'tls': tls,
     };
 
-    return VpnProfile(
+    final profile = VpnProfile(
       id: _stableId(link),
       name: _displayName(uri.fragment, fallback: uri.host),
       kind: VpnProfileKind.hysteria,
@@ -760,6 +953,7 @@ class ProfileImporter {
         candidates: [_extractExpiryFromQuery(query)],
       ),
     );
+    return _withVariantMetadataFromQuery(profile, query);
   }
 
   VpnProfile _parseHysteria2(String link, {DateTime? expiresAt}) {
@@ -800,7 +994,7 @@ class ProfileImporter {
       outbound['down_mbps'] = downMbps;
     }
 
-    return VpnProfile(
+    final profile = VpnProfile(
       id: _stableId(link),
       name: _displayName(uri.fragment, fallback: uri.host),
       kind: VpnProfileKind.hysteria2,
@@ -813,6 +1007,7 @@ class ProfileImporter {
         candidates: [_extractExpiryFromQuery(query)],
       ),
     );
+    return _withVariantMetadataFromQuery(profile, query);
   }
 
   DateTime? _extractSubscriptionExpires(HttpHeaders headers) {
@@ -1215,8 +1410,193 @@ class ProfileImporter {
   int? _asInt(Object? value) {
     return switch (value) {
       int() => value,
+      num() => value.toInt(),
       String() => int.tryParse(value),
       _ => null,
+    };
+  }
+
+  VpnProfile _withVariantMetadataFromQuery(
+    VpnProfile profile,
+    Map<String, String> query,
+  ) {
+    final group = _firstQueryText(query, const [
+      'yc_group',
+      'yurich_group',
+      'variant_group',
+      'variantGroup',
+    ]);
+    final role = _normalizeVariantRole(
+      _firstQueryText(query, const [
+        'yc_role',
+        'yurich_role',
+        'variant_role',
+        'variantRole',
+      ]),
+    );
+    final strategy = _normalizeVariantStrategy(
+      _firstQueryText(query, const [
+        'yc_strategy',
+        'yurich_strategy',
+        'access_strategy',
+        'accessStrategy',
+      ]),
+    );
+    final priority = _asInt(
+      _firstQueryText(query, const [
+        'yc_priority',
+        'yurich_priority',
+        'variant_priority',
+        'variantPriority',
+      ]),
+    );
+    if (group == null && role == null && strategy == null && priority == null) {
+      return profile;
+    }
+    return profile.copyWith(
+      variantGroup: group,
+      variantRole: role ?? _inferVariantRole(profile),
+      variantStrategy: strategy ?? _inferVariantStrategy(profile),
+      variantPriority: priority ?? _inferVariantPriority(profile),
+    );
+  }
+
+  String? _firstText(Map<String, dynamic> map, List<String> keys) {
+    for (final key in keys) {
+      final value = map[key];
+      if (value == null) {
+        continue;
+      }
+      final text = '$value'.trim();
+      if (text.isNotEmpty && text != 'null') {
+        return text;
+      }
+    }
+    return null;
+  }
+
+  String? _firstQueryText(Map<String, String> query, List<String> keys) {
+    for (final key in keys) {
+      final value = query[key]?.trim();
+      if (value != null && value.isNotEmpty) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  String? _normalizeVariantRole(String? value) {
+    final role = value?.trim().toLowerCase();
+    if (role == null || role.isEmpty) {
+      return null;
+    }
+    return role
+        .replaceAll(RegExp(r'[\s_]+'), '-')
+        .replaceAll(RegExp(r'-+'), '-');
+  }
+
+  String? _normalizeVariantStrategy(String? value) {
+    final strategy = value?.trim().toLowerCase().replaceAll('_', '-');
+    if (strategy == null || strategy.isEmpty) {
+      return null;
+    }
+    if (const {
+      'compat',
+      'compatible',
+      'compatibility',
+      'tcp',
+      'tcp443',
+      'tcp-443',
+      'safe',
+    }.contains(strategy)) {
+      return 'compatibility';
+    }
+    if (const {'speed', 'fast', 'udp', 'quic', 'turbo'}.contains(strategy)) {
+      return 'speed';
+    }
+    return 'auto';
+  }
+
+  String _inferVariantRole(VpnProfile profile) {
+    if (profile.kind == VpnProfileKind.hysteria2) {
+      return 'hysteria2';
+    }
+    if (profile.kind == VpnProfileKind.hysteria) {
+      return 'hysteria';
+    }
+    if (profile.kind == VpnProfileKind.naive) {
+      return profile.outbound?['quic'] == true ? 'naive-quic' : 'naive-https';
+    }
+    if (VlessProfileTools.isVlessProfile(profile)) {
+      final transport = VlessProfileTools.safeTransportType(profile);
+      if (transport == 'xhttp') {
+        return 'xhttp';
+      }
+      if (profile.kind == VpnProfileKind.vlessReality) {
+        return 'vless-reality-$transport';
+      }
+      return 'vless-tls-$transport';
+    }
+    return profile.kind.name;
+  }
+
+  String _inferVariantStrategy(VpnProfile profile) {
+    if (profile.kind == VpnProfileKind.hysteria ||
+        profile.kind == VpnProfileKind.hysteria2) {
+      return 'speed';
+    }
+    if (profile.kind == VpnProfileKind.naive &&
+        profile.outbound?['quic'] == true) {
+      return 'speed';
+    }
+    if (profile.kind == VpnProfileKind.naive ||
+        VlessProfileTools.isVlessProfile(profile)) {
+      return 'compatibility';
+    }
+    return 'auto';
+  }
+
+  int _inferVariantPriority(VpnProfile profile) {
+    if (VlessProfileTools.isVlessProfile(profile)) {
+      final transport = VlessProfileTools.safeTransportType(profile);
+      return switch (transport) {
+        'tcp' => 10,
+        'httpupgrade' => 18,
+        'xhttp' => 30,
+        _ => 35,
+      };
+    }
+    if (profile.kind == VpnProfileKind.naive) {
+      return profile.outbound?['quic'] == true ? 25 : 20;
+    }
+    if (profile.kind == VpnProfileKind.hysteria ||
+        profile.kind == VpnProfileKind.hysteria2) {
+      return 10;
+    }
+    return 50;
+  }
+
+  String _variantRoleLabel(String role) {
+    return switch (role) {
+      'vless-reality-tcp' => 'VLESS Reality TCP',
+      'vless-tls-tcp' => 'VLESS TLS TCP',
+      'vless-reality-httpupgrade' => 'VLESS HTTPUpgrade',
+      'vless-tls-httpupgrade' => 'VLESS TLS HTTPUpgrade',
+      'naive-https' => 'Naive HTTPS',
+      'naive-quic' => 'Naive QUIC',
+      'xhttp' => 'XHTTP',
+      'hysteria2' => 'Hysteria2 Turbo',
+      'hysteria' => 'Hysteria',
+      _ =>
+        role
+            .split('-')
+            .where((part) => part.isNotEmpty)
+            .map(
+              (part) => part.length <= 4
+                  ? part.toUpperCase()
+                  : part[0].toUpperCase() + part.substring(1),
+            )
+            .join(' '),
     };
   }
 

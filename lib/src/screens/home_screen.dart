@@ -45,7 +45,7 @@ const _telegramUrl = 'https://t.me/ivan_it_net';
 const _vkUrl = 'https://vk.com/ivan_yurievich_it';
 const _donateUrl = 'https://dzen.ru/ivanyurievich?donate=true';
 const _supportEmail = 'ai@ivan-it.net';
-const _appVersion = '1.0.105';
+const _appVersion = '1.0.106';
 const _collapsedProfileLimit = 4;
 const _maxConcurrentPingChecks = 4;
 const _maxProfileFailoverAttempts = 5;
@@ -226,6 +226,8 @@ class _HomeScreenState extends State<HomeScreen>
   bool _terminalThroughVpn = ProfileStore.defaultTerminalThroughVpn;
   bool _dnsOnlyThroughVpn = ProfileStore.defaultDnsOnlyThroughVpn;
   bool _adaptiveAccess = ProfileStore.defaultAdaptiveAccess;
+  AdaptiveAccessStrategy _adaptiveAccessStrategy =
+      ProfileStore.defaultAdaptiveAccessStrategy;
   WindowsConnectionMode _windowsConnectionMode =
       ProfileStore.defaultWindowsConnectionMode;
   bool _systemProxyEnabled = false;
@@ -519,6 +521,7 @@ class _HomeScreenState extends State<HomeScreen>
     var terminalThroughVpn = await _store.loadTerminalThroughVpn();
     final dnsOnlyThroughVpn = await _store.loadDnsOnlyThroughVpn();
     final adaptiveAccess = await _store.loadAdaptiveAccess();
+    final adaptiveAccessStrategy = await _store.loadAdaptiveAccessStrategy();
     final windowsConnectionMode = await _store.loadWindowsConnectionMode();
     if (windowsConnectionMode != WindowsConnectionMode.advancedTun &&
         terminalThroughVpn) {
@@ -616,6 +619,7 @@ class _HomeScreenState extends State<HomeScreen>
       _terminalThroughVpn = terminalThroughVpn;
       _dnsOnlyThroughVpn = dnsOnlyThroughVpn;
       _adaptiveAccess = adaptiveAccess;
+      _adaptiveAccessStrategy = adaptiveAccessStrategy;
       _windowsConnectionMode = windowsConnectionMode;
       _systemProxyEnabled = systemProxyEnabled;
       _autoStart = autoStart;
@@ -1408,6 +1412,9 @@ class _HomeScreenState extends State<HomeScreen>
       preferred: preferred,
       runtimeStats: _profileRuntimeStats,
       latencies: latencySnapshots,
+      adaptiveStrategy: _adaptiveAccess
+          ? _adaptiveAccessStrategy
+          : AdaptiveAccessStrategy.auto,
       maxAttempts: _maxProfileFailoverAttempts,
     );
     final autoSelected = selection.autoSelectedProfile;
@@ -2935,7 +2942,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
 
   Future<void> _disconnect() async {
     final executed = await _runBusy(
-      () => _stopVpnCore(),
+      () => _stopVpnCore(restoreSystemProxy: true),
       operation: ConnectionOperation.disconnect,
       message: s.disconnectingVpn,
     );
@@ -2987,7 +2994,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
     );
   }
 
-  Future<void> _stopVpnCore({bool updateMessage = true}) async {
+  Future<void> _stopVpnCore({
+    bool updateMessage = true,
+    bool restoreSystemProxy = false,
+  }) async {
     final stopwatch = Stopwatch()..start();
     _stoppingByUser = true;
     _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
@@ -3010,6 +3020,22 @@ if ($null -ne $match) { 'true' } else { 'false' }
         await Future<void>.delayed(const Duration(milliseconds: 700));
       }
 
+      var systemProxyEnabled = _systemProxyEnabled;
+      if (restoreSystemProxy && Platform.isWindows && systemProxyEnabled) {
+        try {
+          await _windowsIntegration.setSystemProxyEnabled(false);
+          systemProxyEnabled = await _windowsIntegration.isSystemProxyEnabled();
+          _queueLog(
+            'Windows system proxy restored after VPN stop: enabled=$systemProxyEnabled.',
+          );
+        } on Object catch (error) {
+          _queueLog(
+            'Windows system proxy restore after VPN stop failed: '
+            '${_redactSensitive('$error')}',
+          );
+        }
+      }
+
       if (mounted) {
         _ignoreStoppedUntil = DateTime.now().add(const Duration(seconds: 18));
         setState(() {
@@ -3018,6 +3044,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
           _connectionLifecycleChangedAt = DateTime.now();
           _uplink = '0 B/s';
           _downlink = '0 B/s';
+          _systemProxyEnabled = systemProxyEnabled;
           _lastError = null;
           if (updateMessage) {
             _message = s.vpnStopped;
@@ -3275,6 +3302,26 @@ if ($null -ne $match) { 'true' } else { 'false' }
       value
           ? 'Adaptive access enabled: compatible VLESS profiles use TLS record fragmentation and startup failover may try another protocol.'
           : 'Adaptive access disabled: standard profile transport and protocol-local VLESS failover restored.',
+    );
+  }
+
+  Future<void> _setAdaptiveAccessStrategy(
+    AdaptiveAccessStrategy strategy,
+  ) async {
+    if (!Platform.isWindows) {
+      return;
+    }
+    await _store.saveAdaptiveAccessStrategy(strategy);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _adaptiveAccessStrategy = strategy;
+      _message = _connected ? s.reconnectToApply : s.settingsSaved;
+    });
+    _queueLog(
+      'Adaptive access strategy changed: ${strategy.code}. '
+      'Reconnect required for profile ordering changes.',
     );
   }
 
@@ -3557,10 +3604,12 @@ if ($null -ne $match) { 'true' } else { 'false' }
     setState(() => _networkCompatibilityDiagnosticsBusy = true);
     final lines = <String>[
       'Network compatibility diagnostics started. adaptive_access=$_adaptiveAccess, '
-          'connected=$_connected, mode=${_windowsConnectionMode.code}.',
+          'strategy=${_adaptiveAccessStrategy.code}, connected=$_connected, '
+          'mode=${_windowsConnectionMode.code}.',
     ];
     var verdict = NetworkCompatibilityIssue.unavailable;
     try {
+      final networkKey = await NetworkCompatibilityService.currentNetworkKey();
       Uri? subscriptionUri;
       for (final source in _subscriptionSources) {
         final candidate = Uri.tryParse(source);
@@ -3574,6 +3623,18 @@ if ($null -ne $match) { 'true' } else { 'false' }
         subscriptionUri: subscriptionUri,
       );
       verdict = report.issue;
+      final stats = await _store.recordAdaptiveAccessNetworkResult(
+        networkKey: networkKey,
+        strategy: _adaptiveAccessStrategy,
+        issueCode: report.issue.code,
+      );
+      lines.add(
+        'Network compatibility fingerprint=$networkKey '
+        'strategy=${_adaptiveAccessStrategy.code} successes=${stats.successes} '
+        'failures=${stats.failures} dns=${stats.dnsFailures} '
+        'tcp=${stats.tcpFailures} tls=${stats.tlsFailures} '
+        'udp=${stats.udpFailures} endpoint=${stats.endpointFailures}.',
+      );
       for (final check in report.checks) {
         lines.add(
           'Network compatibility check kind=${check.kind.name} '
@@ -3622,6 +3683,10 @@ if ($null -ne $match) { 'true' } else { 'false' }
         russian
             ? 'TCP работает, но TLS-подключение перехватывается или блокируется.'
             : 'TCP works, but TLS appears to be intercepted or blocked.',
+      NetworkCompatibilityIssue.udp =>
+        russian
+            ? 'UDP выглядит нестабильно. Для этой сети лучше TCP/443 режим.'
+            : 'UDP looks unstable. TCP/443 compatibility mode is safer on this network.',
       NetworkCompatibilityIssue.endpoint =>
         russian
             ? 'Интернет работает, но адрес VPN или подписки недоступен.'
@@ -3745,7 +3810,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
         return;
       }
       setState(() => _message = s.startingUpdater);
-      await _stopVpnCore(updateMessage: false);
+      await _stopVpnCore(updateMessage: false, restoreSystemProxy: true);
       await _windowsIntegration.runInstallerAsAdmin(installer);
       exit(0);
     } on Object catch (error) {
@@ -4990,6 +5055,7 @@ if ($null -ne $match) { 'true' } else { 'false' }
       terminalThroughVpn: _terminalThroughVpn,
       dnsOnlyThroughVpn: _dnsOnlyThroughVpn,
       adaptiveAccess: _adaptiveAccess,
+      adaptiveAccessStrategy: _adaptiveAccessStrategy,
       codexThroughVpn: _codexThroughVpn,
       codexThroughVpnSupported: _codexThroughVpnSupported,
       chatGptThroughVpn: _chatGptThroughVpn,
@@ -5015,6 +5081,8 @@ if ($null -ne $match) { 'true' } else { 'false' }
       onDnsOnlyThroughVpnChanged: (value) =>
           unawaited(_setDnsOnlyThroughVpn(value)),
       onAdaptiveAccessChanged: (value) => unawaited(_setAdaptiveAccess(value)),
+      onAdaptiveAccessStrategyChanged: (strategy) =>
+          unawaited(_setAdaptiveAccessStrategy(strategy)),
       onCodexThroughVpnChanged: (value) =>
           unawaited(_setCodexThroughVpn(value)),
       onChatGptThroughVpnChanged: (value) =>
@@ -6111,11 +6179,44 @@ String _profileProtocolLabel(
   VpnProfile profile,
   String Function(VpnProfileKind kind) kindLabel,
 ) {
-  final label = kindLabel(profile.kind);
+  final parts = <String>[kindLabel(profile.kind)];
   if (ProfileIdentity.isXhttpProfile(profile)) {
-    return '$label · XHTTP';
+    parts.add('XHTTP');
   }
-  return label;
+  final variantLabel = _profileVariantRoleLabel(profile.variantRole);
+  if (variantLabel != null &&
+      !parts.any((part) => part.toLowerCase() == variantLabel.toLowerCase())) {
+    parts.add(variantLabel);
+  }
+  return parts.join(' · ');
+}
+
+String? _profileVariantRoleLabel(String? role) {
+  final normalized = role?.trim().toLowerCase();
+  if (normalized == null || normalized.isEmpty) {
+    return null;
+  }
+  return switch (normalized) {
+    'vless-reality-tcp' => 'VLESS Reality TCP',
+    'vless-tls-tcp' => 'VLESS TLS TCP',
+    'vless-reality-httpupgrade' => 'VLESS HTTPUpgrade',
+    'vless-tls-httpupgrade' => 'VLESS TLS HTTPUpgrade',
+    'naive-https' => 'Naive HTTPS',
+    'naive-quic' => 'Naive QUIC',
+    'xhttp' => 'XHTTP',
+    'hysteria2' => 'Hysteria2 Turbo',
+    'hysteria' => 'Hysteria',
+    _ =>
+      normalized
+          .split('-')
+          .where((part) => part.isNotEmpty)
+          .map(
+            (part) => part.length <= 4
+                ? part.toUpperCase()
+                : part[0].toUpperCase() + part.substring(1),
+          )
+          .join(' '),
+  };
 }
 
 String _formatSessionDuration(Duration duration) {
@@ -6252,6 +6353,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.terminalThroughVpn,
     required this.dnsOnlyThroughVpn,
     required this.adaptiveAccess,
+    required this.adaptiveAccessStrategy,
     required this.codexThroughVpn,
     required this.codexThroughVpnSupported,
     required this.chatGptThroughVpn,
@@ -6274,6 +6376,7 @@ class _WindowsToolsPanel extends StatelessWidget {
     required this.onTerminalThroughVpnChanged,
     required this.onDnsOnlyThroughVpnChanged,
     required this.onAdaptiveAccessChanged,
+    required this.onAdaptiveAccessStrategyChanged,
     required this.onCodexThroughVpnChanged,
     required this.onChatGptThroughVpnChanged,
     required this.onEditSplitTunnel,
@@ -6300,6 +6403,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final bool terminalThroughVpn;
   final bool dnsOnlyThroughVpn;
   final bool adaptiveAccess;
+  final AdaptiveAccessStrategy adaptiveAccessStrategy;
   final bool codexThroughVpn;
   final bool codexThroughVpnSupported;
   final bool chatGptThroughVpn;
@@ -6322,6 +6426,7 @@ class _WindowsToolsPanel extends StatelessWidget {
   final ValueChanged<bool> onTerminalThroughVpnChanged;
   final ValueChanged<bool> onDnsOnlyThroughVpnChanged;
   final ValueChanged<bool> onAdaptiveAccessChanged;
+  final ValueChanged<AdaptiveAccessStrategy> onAdaptiveAccessStrategyChanged;
   final ValueChanged<bool> onCodexThroughVpnChanged;
   final ValueChanged<bool> onChatGptThroughVpnChanged;
   final VoidCallback onEditSplitTunnel;
@@ -6404,6 +6509,13 @@ class _WindowsToolsPanel extends StatelessWidget {
                 onChanged: busy ? null : onAdaptiveAccessChanged,
                 title: Text(strings.adaptiveAccess),
                 subtitle: Text(strings.adaptiveAccessHint),
+              ),
+              const SizedBox(height: 8),
+              _AdaptiveAccessStrategyPicker(
+                strings: strings,
+                value: adaptiveAccessStrategy,
+                enabled: adaptiveAccess && !busy,
+                onChanged: onAdaptiveAccessStrategyChanged,
               ),
               const SizedBox(height: 8),
               _SettingsSwitchRow(
@@ -6655,6 +6767,80 @@ class _SettingsSwitchRow extends StatelessWidget {
             Switch(value: value, onChanged: onChanged),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _AdaptiveAccessStrategyPicker extends StatelessWidget {
+  const _AdaptiveAccessStrategyPicker({
+    required this.strings,
+    required this.value,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final _Strings strings;
+  final AdaptiveAccessStrategy value;
+  final bool enabled;
+  final ValueChanged<AdaptiveAccessStrategy> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _gold.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.tune_outlined, color: _goldSoft, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  strings.adaptiveAccessStrategy,
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: AdaptiveAccessStrategy.values.map((strategy) {
+              final selected = strategy == value;
+              return ChoiceChip(
+                label: Text(strings.adaptiveAccessStrategyName(strategy)),
+                selected: selected,
+                onSelected: enabled ? (_) => onChanged(strategy) : null,
+                showCheckmark: false,
+                visualDensity: VisualDensity.compact,
+                selectedColor: _gold,
+                backgroundColor: _surface,
+                disabledColor: _surface.withValues(alpha: 0.75),
+                labelStyle: TextStyle(
+                  color: selected ? Colors.black : _goldSoft,
+                  fontWeight: FontWeight.w700,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  side: BorderSide(
+                    color: selected
+                        ? _gold
+                        : _gold.withValues(alpha: enabled ? 0.35 : 0.12),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
       ),
     );
   }
@@ -7031,6 +7217,7 @@ class _Strings {
     required this.dnsOnlyThroughVpnHint,
     required this.adaptiveAccess,
     required this.adaptiveAccessHint,
+    required this.adaptiveAccessStrategy,
     required this.codexThroughVpn,
     required this.codexThroughVpnHint,
     required this.codexThroughVpnTunOnly,
@@ -7166,6 +7353,7 @@ class _Strings {
   final String dnsOnlyThroughVpnHint;
   final String adaptiveAccess;
   final String adaptiveAccessHint;
+  final String adaptiveAccessStrategy;
   final String codexThroughVpn;
   final String codexThroughVpnHint;
   final String codexThroughVpnTunOnly;
@@ -7295,6 +7483,23 @@ class _Strings {
       _Strings.en =>
         '$kind server $server:$port is not responding. Check the server or port.',
       _ => '$kind сервер $server:$port не отвечает. Проверь сервер или порт.',
+    };
+  }
+
+  String adaptiveAccessStrategyName(AdaptiveAccessStrategy strategy) {
+    return switch (strategy) {
+      AdaptiveAccessStrategy.auto => switch (this) {
+        _Strings.en => 'Auto',
+        _ => 'Авто',
+      },
+      AdaptiveAccessStrategy.compatibility => switch (this) {
+        _Strings.en => 'Compatibility',
+        _ => 'Совместимость',
+      },
+      AdaptiveAccessStrategy.speed => switch (this) {
+        _Strings.en => 'Speed',
+        _ => 'Скорость',
+      },
     };
   }
 
@@ -7626,7 +7831,8 @@ class _Strings {
         'Обычные DNS-запросы идут через Yurich Core и DoH поверх VPN/proxy. Bootstrap использует Cloudflare DoH без DNS провайдера.',
     adaptiveAccess: 'Адаптивный обход блокировок',
     adaptiveAccessHint:
-        'Экспериментально: безопасно дробит TLS-записи совместимых VLESS-профилей и при неудаче старта пробует другой протокол. Требуется переподключение.',
+        'Экспериментально: проверяет TCP/TLS/UDP, запоминает результат сети и при старте выбирает более подходящий транспорт. Требуется переподключение.',
+    adaptiveAccessStrategy: 'Стратегия обхода',
     codexThroughVpn: 'Codex CLI только через VPN',
     codexThroughVpnHint:
         'Процессы Codex принудительно идут через текущий VPN. Применяется после переподключения.',
@@ -7816,7 +8022,8 @@ class _Strings {
         'Regular DNS queries use Yurich Core and DoH over VPN/proxy. Bootstrap uses Cloudflare DoH without ISP DNS.',
     adaptiveAccess: 'Adaptive access',
     adaptiveAccessHint:
-        'Experimental: safely fragments TLS records for compatible VLESS profiles and tries another protocol after a startup failure. Reconnect to apply.',
+        'Experimental: checks TCP/TLS/UDP, remembers this network result, and chooses a safer transport on startup. Reconnect to apply.',
+    adaptiveAccessStrategy: 'Access strategy',
     codexThroughVpn: 'Codex CLI through VPN only',
     codexThroughVpnHint:
         'Codex processes are forced through the current VPN. Reconnect to apply.',

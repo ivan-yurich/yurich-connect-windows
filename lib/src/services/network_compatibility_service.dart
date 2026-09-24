@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import '../models/vpn_profile.dart';
 
@@ -8,13 +11,17 @@ typedef TcpProbe =
     Future<void> Function(String host, int port, Duration timeout);
 typedef TlsProbe =
     Future<void> Function(String host, int port, Duration timeout);
+typedef UdpProbe =
+    Future<void> Function(String host, int port, Duration timeout);
 
 enum NetworkCompatibilityCheckKind {
   profileDns,
   profileEndpoint,
+  profileUdp,
   subscriptionEndpoint,
   publicTcp,
   publicTls,
+  publicUdp,
 }
 
 enum NetworkCompatibilityCheckState { passed, failed, skipped }
@@ -24,6 +31,7 @@ enum NetworkCompatibilityIssue {
   dns('dns'),
   tcp('tcp'),
   tlsInterference('tls_interference'),
+  udp('udp'),
   endpoint('endpoint'),
   unavailable('unavailable');
 
@@ -62,9 +70,11 @@ class NetworkCompatibilityService {
     DnsProbe? dnsProbe,
     TcpProbe? tcpProbe,
     TlsProbe? tlsProbe,
+    UdpProbe? udpProbe,
   }) : _dnsProbe = dnsProbe ?? _defaultDnsProbe,
        _tcpProbe = tcpProbe ?? _defaultTcpProbe,
-       _tlsProbe = tlsProbe ?? _defaultTlsProbe;
+       _tlsProbe = tlsProbe ?? _defaultTlsProbe,
+       _udpProbe = udpProbe ?? _defaultUdpProbe;
 
   static const _publicTcpTargets = <(String, int)>[
     ('cp.cloudflare.com', 443),
@@ -74,10 +84,41 @@ class NetworkCompatibilityService {
     ('www.cloudflare.com', 443),
     ('www.microsoft.com', 443),
   ];
+  static const _publicUdpTargets = <(String, int)>[
+    ('one.one.one.one', 443),
+    ('dns.google', 443),
+  ];
 
   final DnsProbe _dnsProbe;
   final TcpProbe _tcpProbe;
   final TlsProbe _tlsProbe;
+  final UdpProbe _udpProbe;
+
+  static Future<String> currentNetworkKey() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+        includeLoopback: false,
+      );
+      final material =
+          interfaces
+              .expand(
+                (interface) => interface.addresses.map(
+                  (address) => '${interface.name}:${address.address}',
+                ),
+              )
+              .toList()
+            ..sort();
+      if (material.isEmpty) {
+        return 'net_unknown';
+      }
+      final digest = sha256.convert(utf8.encode(material.join('|')));
+      return 'net_${digest.toString().substring(0, 16)}';
+    } on Object {
+      return 'net_unknown';
+    }
+  }
 
   Future<NetworkCompatibilityReport> run({
     VpnProfile? profile,
@@ -125,6 +166,15 @@ class NetworkCompatibilityService {
                 : 'udp_protocol_probe_required',
           ),
         );
+        if (profilePort != null) {
+          pending.add(
+            _runCheck(
+              kind: NetworkCompatibilityCheckKind.profileUdp,
+              target: '$profileHost:$profilePort',
+              action: () => _udpProbe(profileHost, profilePort, timeout),
+            ),
+          );
+        }
       }
     }
 
@@ -154,6 +204,11 @@ class NetworkCompatibilityService {
         kind: NetworkCompatibilityCheckKind.publicTls,
         target: 'public_tls_multi_endpoint',
         action: () => _probeAnyTls(_publicTlsTargets, timeout),
+      ),
+      _runCheck(
+        kind: NetworkCompatibilityCheckKind.publicUdp,
+        target: 'public_udp_multi_endpoint',
+        action: () => _probeAnyUdp(_publicUdpTargets, timeout),
       ),
     ]);
 
@@ -196,6 +251,10 @@ class NetworkCompatibilityService {
     if (failed(NetworkCompatibilityCheckKind.publicTls)) {
       return NetworkCompatibilityIssue.tlsInterference;
     }
+    if (failed(NetworkCompatibilityCheckKind.profileUdp) ||
+        failed(NetworkCompatibilityCheckKind.publicUdp)) {
+      return NetworkCompatibilityIssue.udp;
+    }
     if (failed(NetworkCompatibilityCheckKind.profileEndpoint) ||
         failed(NetworkCompatibilityCheckKind.subscriptionEndpoint)) {
       return NetworkCompatibilityIssue.endpoint;
@@ -233,6 +292,22 @@ class NetworkCompatibilityService {
       }
     }
     throw lastError ?? const SocketException('No TLS targets');
+  }
+
+  Future<void> _probeAnyUdp(
+    List<(String, int)> targets,
+    Duration timeout,
+  ) async {
+    Object? lastError;
+    for (final target in targets) {
+      try {
+        await _udpProbe(target.$1, target.$2, timeout);
+        return;
+      } on Object catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? const SocketException('No UDP targets');
   }
 
   Future<NetworkCompatibilityCheck> _runCheck({
@@ -331,5 +406,26 @@ class NetworkCompatibilityService {
   ) async {
     final socket = await SecureSocket.connect(host, port, timeout: timeout);
     await socket.close();
+  }
+
+  static Future<void> _defaultUdpProbe(
+    String host,
+    int port,
+    Duration timeout,
+  ) async {
+    final addresses = await InternetAddress.lookup(host).timeout(timeout);
+    if (addresses.isEmpty) {
+      throw const SocketException('UDP host resolved without addresses');
+    }
+    RawDatagramSocket? socket;
+    try {
+      socket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        0,
+      ).timeout(timeout);
+      socket.send(<int>[0], addresses.first, port);
+    } finally {
+      socket?.close();
+    }
   }
 }

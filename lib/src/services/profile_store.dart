@@ -20,6 +20,115 @@ enum WindowsConnectionMode {
   }
 }
 
+enum AdaptiveAccessStrategy {
+  auto('auto'),
+  compatibility('compatibility'),
+  speed('speed');
+
+  const AdaptiveAccessStrategy(this.code);
+
+  final String code;
+
+  static AdaptiveAccessStrategy fromCode(String? code) {
+    return values.firstWhere(
+      (strategy) => strategy.code == code,
+      orElse: () => AdaptiveAccessStrategy.auto,
+    );
+  }
+}
+
+class AdaptiveAccessNetworkStats {
+  const AdaptiveAccessNetworkStats({
+    this.successes = 0,
+    this.failures = 0,
+    this.dnsFailures = 0,
+    this.tcpFailures = 0,
+    this.tlsFailures = 0,
+    this.udpFailures = 0,
+    this.endpointFailures = 0,
+    this.lastIssueCode,
+    this.lastStrategyCode,
+    this.updatedAt,
+  });
+
+  final int successes;
+  final int failures;
+  final int dnsFailures;
+  final int tcpFailures;
+  final int tlsFailures;
+  final int udpFailures;
+  final int endpointFailures;
+  final String? lastIssueCode;
+  final String? lastStrategyCode;
+  final DateTime? updatedAt;
+
+  AdaptiveAccessNetworkStats record({
+    required String issueCode,
+    required AdaptiveAccessStrategy strategy,
+  }) {
+    final healthy = issueCode == 'none';
+    return AdaptiveAccessNetworkStats(
+      successes: successes + (healthy ? 1 : 0),
+      failures: failures + (healthy ? 0 : 1),
+      dnsFailures: dnsFailures + (issueCode == 'dns' ? 1 : 0),
+      tcpFailures: tcpFailures + (issueCode == 'tcp' ? 1 : 0),
+      tlsFailures: tlsFailures + (issueCode == 'tls_interference' ? 1 : 0),
+      udpFailures: udpFailures + (issueCode == 'udp' ? 1 : 0),
+      endpointFailures: endpointFailures + (issueCode == 'endpoint' ? 1 : 0),
+      lastIssueCode: issueCode,
+      lastStrategyCode: strategy.code,
+      updatedAt: DateTime.now(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'successes': successes,
+      'failures': failures,
+      'dnsFailures': dnsFailures,
+      'tcpFailures': tcpFailures,
+      'tlsFailures': tlsFailures,
+      'udpFailures': udpFailures,
+      'endpointFailures': endpointFailures,
+      'lastIssueCode': lastIssueCode,
+      'lastStrategyCode': lastStrategyCode,
+      'updatedAt': updatedAt?.toIso8601String(),
+    };
+  }
+
+  factory AdaptiveAccessNetworkStats.fromJson(Map<String, dynamic> json) {
+    int readInt(String key) {
+      final value = json[key];
+      if (value is int) {
+        return value < 0 ? 0 : value;
+      }
+      if (value is num) {
+        return value < 0 ? 0 : value.toInt();
+      }
+      return 0;
+    }
+
+    return AdaptiveAccessNetworkStats(
+      successes: readInt('successes'),
+      failures: readInt('failures'),
+      dnsFailures: readInt('dnsFailures'),
+      tcpFailures: readInt('tcpFailures'),
+      tlsFailures: readInt('tlsFailures'),
+      udpFailures: readInt('udpFailures'),
+      endpointFailures: readInt('endpointFailures'),
+      lastIssueCode: json['lastIssueCode'] == null
+          ? null
+          : '${json['lastIssueCode']}',
+      lastStrategyCode: json['lastStrategyCode'] == null
+          ? null
+          : '${json['lastStrategyCode']}',
+      updatedAt: json['updatedAt'] == null
+          ? null
+          : DateTime.tryParse('${json['updatedAt']}'),
+    );
+  }
+}
+
 class ProfileRuntimeStats {
   const ProfileRuntimeStats({
     this.successes = 0,
@@ -247,6 +356,8 @@ class ProfileStore {
   static const _terminalThroughVpnKey = 'terminalThroughVpn';
   static const _dnsOnlyThroughVpnKey = 'dnsOnlyThroughVpn';
   static const _adaptiveAccessKey = 'adaptiveAccess';
+  static const _adaptiveAccessStrategyKey = 'adaptiveAccessStrategy';
+  static const _adaptiveAccessNetworkStatsKey = 'adaptiveAccessNetworkStats';
   static const _windowsConnectionModeKey = 'windowsConnectionMode';
   static const _profileRuntimeStatsKey = 'profileRuntimeStats';
   static const _connectionSessionHistoryKey = 'connectionSessionHistory';
@@ -258,6 +369,7 @@ class ProfileStore {
   static const defaultTerminalThroughVpn = false;
   static const defaultDnsOnlyThroughVpn = true;
   static const defaultAdaptiveAccess = false;
+  static const defaultAdaptiveAccessStrategy = AdaptiveAccessStrategy.auto;
   static const defaultWindowsConnectionMode = WindowsConnectionMode.stableProxy;
 
   Future<List<VpnProfile>> loadProfiles() async {
@@ -485,6 +597,85 @@ class ProfileStore {
   Future<void> saveAdaptiveAccess(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_adaptiveAccessKey, enabled);
+  }
+
+  Future<AdaptiveAccessStrategy> loadAdaptiveAccessStrategy() async {
+    final prefs = await SharedPreferences.getInstance();
+    return AdaptiveAccessStrategy.fromCode(
+      prefs.getString(_adaptiveAccessStrategyKey),
+    );
+  }
+
+  Future<void> saveAdaptiveAccessStrategy(
+    AdaptiveAccessStrategy strategy,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_adaptiveAccessStrategyKey, strategy.code);
+  }
+
+  Future<Map<String, AdaptiveAccessNetworkStats>>
+  loadAdaptiveAccessNetworkStats() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getString(_adaptiveAccessNetworkStatsKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const {};
+    }
+
+    Object? decoded;
+    try {
+      decoded = jsonDecode(encoded);
+    } on FormatException {
+      return const {};
+    }
+    if (decoded is! Map) {
+      return const {};
+    }
+
+    final result = <String, AdaptiveAccessNetworkStats>{};
+    for (final entry in decoded.entries) {
+      final key = '${entry.key}'.trim();
+      if (key.isEmpty) {
+        continue;
+      }
+      final value = entry.value;
+      result[key] = value is Map
+          ? AdaptiveAccessNetworkStats.fromJson(value.cast<String, dynamic>())
+          : const AdaptiveAccessNetworkStats();
+    }
+    return result;
+  }
+
+  Future<AdaptiveAccessNetworkStats> recordAdaptiveAccessNetworkResult({
+    required String networkKey,
+    required AdaptiveAccessStrategy strategy,
+    required String issueCode,
+  }) async {
+    final normalizedKey = networkKey.trim();
+    if (normalizedKey.isEmpty) {
+      return const AdaptiveAccessNetworkStats();
+    }
+    final stats = Map<String, AdaptiveAccessNetworkStats>.of(
+      await loadAdaptiveAccessNetworkStats(),
+    );
+    final updated = (stats[normalizedKey] ?? const AdaptiveAccessNetworkStats())
+        .record(issueCode: issueCode, strategy: strategy);
+    stats[normalizedKey] = updated;
+    await _saveAdaptiveAccessNetworkStats(stats);
+    return updated;
+  }
+
+  Future<void> _saveAdaptiveAccessNetworkStats(
+    Map<String, AdaptiveAccessNetworkStats> stats,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = <String, dynamic>{
+      for (final entry in stats.entries)
+        if (entry.key.trim().isNotEmpty) entry.key.trim(): entry.value.toJson(),
+    };
+    await prefs.setString(
+      _adaptiveAccessNetworkStatsKey,
+      jsonEncode(normalized),
+    );
   }
 
   Future<WindowsConnectionMode> loadWindowsConnectionMode() async {

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.106 - 2026-09-24
+
+### Added
+
+- Added Adaptive Access strategy selection: Auto, Compatibility, and Speed.
+- Added TCP/TLS/UDP network compatibility diagnostics with local per-network learning.
+- Added support for Yurich server transport variants in subscriptions, so one location can expose VLESS Reality TCP, Naive HTTPS, XHTTP, and Hysteria2 Turbo alternatives.
+- Added profile variant metadata for group, role, strategy, and priority.
+
+### Changed
+
+- Improved failover ranking to keep related server variants from the same location together before jumping to another server.
+- Compatibility strategy now prefers TCP/443-friendly transports, while Speed strategy prefers UDP-capable transports when available.
+- Profile cards now show variant role labels such as Naive HTTPS, XHTTP, and Hysteria2 Turbo.
+
+### Fixed
+
+- Restores Windows system proxy state when the VPN is stopped manually or before launching the updater.
+- Reduces stale process/session races during sing-box, NaiveProxy, and traffic WebSocket restarts.
+
+### Tests
+
+- Added coverage for Adaptive Access strategies, UDP diagnostics, server variant import, variant metadata persistence, and variant-aware failover.
+
 ## 1.0.105 - 2026-09-08
 
 ### Security

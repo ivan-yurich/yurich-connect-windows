@@ -41,6 +41,10 @@ class VpnProfile {
     this.expiresAt,
     this.subscriptionSource,
     this.coreBackend = VpnCoreBackend.auto,
+    this.variantGroup,
+    this.variantRole,
+    this.variantStrategy,
+    this.variantPriority,
   });
 
   final String id;
@@ -54,6 +58,10 @@ class VpnProfile {
   final DateTime? expiresAt;
   final String? subscriptionSource;
   final VpnCoreBackend coreBackend;
+  final String? variantGroup;
+  final String? variantRole;
+  final String? variantStrategy;
+  final int? variantPriority;
 
   String get endpoint {
     if (server == null || server!.isEmpty) {
@@ -78,6 +86,10 @@ class VpnProfile {
       expiresAt: expiresAt,
       subscriptionSource: subscriptionSource,
       coreBackend: coreBackend,
+      variantGroup: variantGroup,
+      variantRole: variantRole,
+      variantStrategy: variantStrategy,
+      variantPriority: variantPriority,
     );
   }
 
@@ -97,6 +109,10 @@ class VpnProfile {
       expiresAt: value,
       subscriptionSource: subscriptionSource,
       coreBackend: coreBackend,
+      variantGroup: variantGroup,
+      variantRole: variantRole,
+      variantStrategy: variantStrategy,
+      variantPriority: variantPriority,
     );
   }
 
@@ -116,6 +132,46 @@ class VpnProfile {
       expiresAt: expiresAt,
       subscriptionSource: value.trim(),
       coreBackend: coreBackend,
+      variantGroup: variantGroup,
+      variantRole: variantRole,
+      variantStrategy: variantStrategy,
+      variantPriority: variantPriority,
+    );
+  }
+
+  VpnProfile copyWith({
+    String? id,
+    String? name,
+    VpnProfileKind? kind,
+    String? originalInput,
+    String? server,
+    int? port,
+    Map<String, dynamic>? outbound,
+    String? rawConfig,
+    DateTime? expiresAt,
+    String? subscriptionSource,
+    VpnCoreBackend? coreBackend,
+    String? variantGroup,
+    String? variantRole,
+    String? variantStrategy,
+    int? variantPriority,
+  }) {
+    return VpnProfile(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      kind: kind ?? this.kind,
+      originalInput: originalInput ?? this.originalInput,
+      server: server ?? this.server,
+      port: port ?? this.port,
+      outbound: outbound ?? this.outbound,
+      rawConfig: rawConfig ?? this.rawConfig,
+      expiresAt: expiresAt ?? this.expiresAt,
+      subscriptionSource: subscriptionSource ?? this.subscriptionSource,
+      coreBackend: coreBackend ?? this.coreBackend,
+      variantGroup: variantGroup ?? this.variantGroup,
+      variantRole: variantRole ?? this.variantRole,
+      variantStrategy: variantStrategy ?? this.variantStrategy,
+      variantPriority: variantPriority ?? this.variantPriority,
     );
   }
 
@@ -132,6 +188,10 @@ class VpnProfile {
       'expiresAt': expiresAt?.toIso8601String(),
       'subscriptionSource': subscriptionSource,
       'coreBackend': coreBackend.name,
+      'variantGroup': variantGroup,
+      'variantRole': variantRole,
+      'variantStrategy': variantStrategy,
+      'variantPriority': variantPriority,
     };
   }
 
@@ -140,6 +200,16 @@ class VpnProfile {
         json['kind'] as String? ?? VpnProfileKind.vlessReality.name;
     final coreBackendName =
         json['coreBackend'] as String? ?? VpnCoreBackend.auto.name;
+    int? readInt(String key) {
+      final value = json[key];
+      return switch (value) {
+        int() => value,
+        num() => value.toInt(),
+        String() => int.tryParse(value),
+        _ => null,
+      };
+    }
+
     return VpnProfile(
       id: json['id'] as String,
       name: json['name'] as String,
@@ -160,6 +230,10 @@ class VpnProfile {
         (value) => value.name == coreBackendName,
         orElse: () => VpnCoreBackend.auto,
       ),
+      variantGroup: json['variantGroup'] as String?,
+      variantRole: json['variantRole'] as String?,
+      variantStrategy: json['variantStrategy'] as String?,
+      variantPriority: readInt('variantPriority'),
     );
   }
 }

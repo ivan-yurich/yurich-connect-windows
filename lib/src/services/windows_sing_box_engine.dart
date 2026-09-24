@@ -21,6 +21,10 @@ class WindowsSingBoxEngine implements VpnEngine {
   Process? _naiveProcess;
   int? _processPid;
   int? _naiveProcessPid;
+  int _runtimeSession = 0;
+  int _processSession = 0;
+  int _naiveProcessSession = 0;
+  int _trafficSession = 0;
   String _status = YurichConnectStatus.stopped;
   String _config = '{}';
   String? _naiveProxyConfig;
@@ -146,6 +150,25 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   String get _coreLogFileName => _usesXrayCore ? 'xray.log' : 'sing-box.log';
 
+  bool _isCurrentProcess(Process process, int session) {
+    return _runtimeSession == session &&
+        _processSession == session &&
+        _process == process;
+  }
+
+  bool _isCurrentSession(int session) {
+    return _runtimeSession == session &&
+        _processSession == session &&
+        _process != null;
+  }
+
+  Future<void> _waitForTransitionToFinish(Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (_transitioning && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
   @override
   Future<bool> startVPN() async {
     final startStopwatch = Stopwatch()..start();
@@ -161,6 +184,7 @@ class WindowsSingBoxEngine implements VpnEngine {
     }
 
     _transitioning = true;
+    final session = ++_runtimeSession;
     _setStatus(YurichConnectStatus.starting);
     _reportedAdminIssue = false;
     _clearStartupFailure();
@@ -200,7 +224,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       }
 
       if (needsNaiveProxy) {
-        final started = await _startNaiveProxy(runtimeDir, configDir);
+        final started = await _startNaiveProxy(runtimeDir, configDir, session);
         if (!started) {
           _setStatus(YurichConnectStatus.stopped);
           return false;
@@ -257,7 +281,7 @@ class WindowsSingBoxEngine implements VpnEngine {
                 'Yurich Core не стартовал. Открой логи ниже.',
             code: canary.fatal ? 'startupFatal' : null,
           );
-          await _stopNaiveProxy();
+          await _stopNaiveProxy(expectedSession: session);
           if (_status != YurichConnectStatus.adminRequired) {
             _setStatus(YurichConnectStatus.error);
           }
@@ -283,22 +307,29 @@ class WindowsSingBoxEngine implements VpnEngine {
       );
       _process = process;
       _processPid = process.pid;
+      _processSession = session;
       _appendLog('$_coreProcessName PID ${process.pid}');
       _pipeProcess(process);
-      _startTrafficTicker();
+      _startTrafficTicker(session);
 
       unawaited(
         process.exitCode.then((code) async {
+          final current = _isCurrentProcess(process, session);
+          if (!current) {
+            _appendLog(
+              'Ignored stale $_coreProcessName exit code $code from session $session.',
+            );
+            return;
+          }
           _appendLog('$_coreProcessName exited with code $code');
           if (_status != YurichConnectStatus.stopping) {
             _recordRuntimeFailure(_coreProcessName, code);
           }
-          if (_process == process) {
-            _process = null;
-            _processPid = null;
-          }
-          await _stopNaiveProxy();
-          _stopTrafficTicker();
+          _process = null;
+          _processPid = null;
+          _processSession = 0;
+          await _stopNaiveProxy(expectedSession: session);
+          _stopTrafficTicker(expectedSession: session);
           if (_status != YurichConnectStatus.stopping) {
             _setStatus(YurichConnectStatus.stopped);
           }
@@ -306,7 +337,7 @@ class WindowsSingBoxEngine implements VpnEngine {
       );
 
       await Future<void>.delayed(const Duration(milliseconds: 450));
-      if (_process == process) {
+      if (_isCurrentProcess(process, session)) {
         _resetRuntimeBackoff();
         _setStatus(YurichConnectStatus.started);
         _appendLog(
@@ -315,14 +346,14 @@ class WindowsSingBoxEngine implements VpnEngine {
         return true;
       }
 
-      await _stopNaiveProxy();
+      await _stopNaiveProxy(expectedSession: session);
       if (_status != YurichConnectStatus.adminRequired) {
         _setStatus(YurichConnectStatus.error);
       }
       return false;
     } on Object catch (e) {
       _appendLog('Не удалось запустить $_coreProcessName: $e');
-      await _stopNaiveProxy();
+      await _stopNaiveProxy(expectedSession: session);
       if (_status != YurichConnectStatus.adminRequired) {
         _setStatus(YurichConnectStatus.error);
       }
@@ -395,57 +426,73 @@ class WindowsSingBoxEngine implements VpnEngine {
     required bool stopStaleWhenUntracked,
   }) async {
     final stopwatch = Stopwatch()..start();
-    if (_transitioning && _status == YurichConnectStatus.starting) {
-      _appendLog('Stop requested while VPN is starting; waiting for cleanup.');
+    if (_transitioning) {
+      _appendLog('Stop requested during VPN transition; waiting first.');
+      await _waitForTransitionToFinish(const Duration(seconds: 24));
+      if (_transitioning) {
+        _appendLog(
+          'VPN stop skipped because another transition is still running.',
+        );
+        return false;
+      }
     }
+    _transitioning = true;
+    ++_runtimeSession;
     final process = _process;
-    if (process == null) {
-      if (stopStaleWhenUntracked) {
+    try {
+      if (process == null) {
+        _processSession = 0;
+        _stopTrafficTicker();
+        if (stopStaleWhenUntracked) {
+          try {
+            await _stopStaleRuntimeProcesses(await _runtimeDir());
+          } on Object {
+            // Best-effort cleanup for untracked processes after app restarts.
+          }
+        }
+        await _stopNaiveProxy(
+          gracefulTimeout: gracefulTimeout,
+          killTimeout: killTimeout,
+        );
+        _setStatus(YurichConnectStatus.stopped);
+        _appendLog(
+          'Windows VPN stop completed without tracked process in ${stopwatch.elapsedMilliseconds}ms.',
+        );
+        return true;
+      }
+
+      _setStatus(YurichConnectStatus.stopping);
+      _appendLog('Stopping $_coreProcessName...');
+      process.kill();
+      try {
+        await process.exitCode.timeout(gracefulTimeout);
+      } on TimeoutException {
+        _appendLog(
+          '$_coreProcessName did not exit in time; killing PID $_processPid.',
+        );
+        process.kill(ProcessSignal.sigkill);
         try {
-          await _stopStaleRuntimeProcesses(await _runtimeDir());
-        } on Object {
-          // Best-effort cleanup for untracked processes after app restarts.
+          await process.exitCode.timeout(killTimeout);
+        } on TimeoutException {
+          _appendLog('$_coreProcessName kill timeout for PID $_processPid.');
         }
       }
+      _process = null;
+      _processPid = null;
+      _processSession = 0;
       await _stopNaiveProxy(
         gracefulTimeout: gracefulTimeout,
         killTimeout: killTimeout,
       );
+      _stopTrafficTicker();
       _setStatus(YurichConnectStatus.stopped);
       _appendLog(
-        'Windows VPN stop completed without tracked process in ${stopwatch.elapsedMilliseconds}ms.',
+        'Windows VPN stop completed in ${stopwatch.elapsedMilliseconds}ms.',
       );
       return true;
+    } finally {
+      _transitioning = false;
     }
-
-    _setStatus(YurichConnectStatus.stopping);
-    _appendLog('Stopping $_coreProcessName...');
-    process.kill();
-    try {
-      await process.exitCode.timeout(gracefulTimeout);
-    } on TimeoutException {
-      _appendLog(
-        '$_coreProcessName did not exit in time; killing PID $_processPid.',
-      );
-      process.kill(ProcessSignal.sigkill);
-      try {
-        await process.exitCode.timeout(killTimeout);
-      } on TimeoutException {
-        _appendLog('$_coreProcessName kill timeout for PID $_processPid.');
-      }
-    }
-    _process = null;
-    _processPid = null;
-    await _stopNaiveProxy(
-      gracefulTimeout: gracefulTimeout,
-      killTimeout: killTimeout,
-    );
-    _stopTrafficTicker();
-    _setStatus(YurichConnectStatus.stopped);
-    _appendLog(
-      'Windows VPN stop completed in ${stopwatch.elapsedMilliseconds}ms.',
-    );
-    return true;
   }
 
   @override
@@ -508,17 +555,18 @@ class WindowsSingBoxEngine implements VpnEngine {
 
   Future<bool> softRecoverConnection() async {
     _appendLog('Soft recovery started: no core restart.');
-    if (_process == null) {
+    final session = _processSession;
+    if (!_isCurrentSession(session)) {
       _appendLog('Soft recovery skipped: $_coreProcessName is not tracked.');
       return false;
     }
 
-    await _flushDnsCache();
+    _appendLog('Soft recovery kept Windows DNS cache intact.');
     if (!_usesXrayCore) {
       unawaited(_trafficSocket?.close());
       _trafficSocket = null;
       _trafficSocketConnecting = false;
-      unawaited(_connectTrafficSocket());
+      unawaited(_connectTrafficSocket(session));
     }
 
     final ports = <int>[
@@ -1597,6 +1645,7 @@ Write-Output \$stopped
   Future<bool> _startNaiveProxy(
     Directory runtimeDir,
     Directory configDir,
+    int session,
   ) async {
     final exe = File('${runtimeDir.path}\\naive.exe');
     if (!await exe.exists()) {
@@ -1615,6 +1664,7 @@ Write-Output \$stopped
     );
     _naiveProcess = process;
     _naiveProcessPid = process.pid;
+    _naiveProcessSession = session;
     _appendLog('NaiveProxy PID ${process.pid}');
     process.stdout
         .transform(utf8.decoder)
@@ -1627,12 +1677,22 @@ Write-Output \$stopped
 
     unawaited(
       process.exitCode.then((code) {
-        _appendLog('naive exited with code $code');
-        if (_naiveProcess == process) {
-          _naiveProcess = null;
-          _naiveProcessPid = null;
+        final current =
+            _runtimeSession == session &&
+            _naiveProcessSession == session &&
+            _naiveProcess == process;
+        if (!current) {
+          _appendLog(
+            'Ignored stale naive exit code $code from session $session.',
+          );
+          return;
         }
-        if (_process != null && _status != YurichConnectStatus.stopping) {
+        _appendLog('naive exited with code $code');
+        _naiveProcess = null;
+        _naiveProcessPid = null;
+        _naiveProcessSession = 0;
+        if (_isCurrentSession(session) &&
+            _status != YurichConnectStatus.stopping) {
           _recordRuntimeFailure('naive', code);
           _appendLog(
             'NaiveProxy core stopped while VPN was running; keeping Yurich Core alive and reporting a degraded Naive runtime event. Reconnect manually or try another Naive mode.',
@@ -1650,16 +1710,26 @@ Write-Output \$stopped
     );
 
     await Future<void>.delayed(const Duration(milliseconds: 350));
-    return _naiveProcess == process;
+    return _runtimeSession == session &&
+        _naiveProcessSession == session &&
+        _naiveProcess == process;
   }
 
   Future<void> _stopNaiveProxy({
+    int? expectedSession,
     Duration gracefulTimeout = const Duration(seconds: 4),
     Duration killTimeout = const Duration(seconds: 2),
   }) async {
+    if (expectedSession != null && _naiveProcessSession != expectedSession) {
+      _appendLog('NaiveProxy stop skipped for stale session $expectedSession.');
+      return;
+    }
     final process = _naiveProcess;
     if (process == null) {
       _naiveProcessPid = null;
+      if (expectedSession == null || _naiveProcessSession == expectedSession) {
+        _naiveProcessSession = 0;
+      }
       return;
     }
     _appendLog('Stopping NaiveProxy core PID $_naiveProcessPid...');
@@ -1681,6 +1751,9 @@ Write-Output \$stopped
         _naiveProcess = null;
       }
       _naiveProcessPid = null;
+      if (expectedSession == null || _naiveProcessSession == expectedSession) {
+        _naiveProcessSession = 0;
+      }
     }
   }
 
@@ -1809,8 +1882,9 @@ Write-Output \$stopped
     return SecretRedactor.redact(value);
   }
 
-  void _startTrafficTicker() {
+  void _startTrafficTicker(int session) {
     _stopTrafficTicker();
+    _trafficSession = session;
     _sessionTotalBytes = 0;
     _emitTraffic(0, 0);
     if (_usesXrayCore) {
@@ -1820,50 +1894,59 @@ Write-Output \$stopped
       return;
     }
     _trafficTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_process != null &&
+      if (_isCurrentSession(session) &&
           _trafficSocket == null &&
           !_trafficSocketConnecting) {
-        unawaited(_connectTrafficSocket());
+        unawaited(_connectTrafficSocket(session));
       }
     });
-    unawaited(_connectTrafficSocket());
+    unawaited(_connectTrafficSocket(session));
   }
 
-  void _stopTrafficTicker() {
+  void _stopTrafficTicker({int? expectedSession}) {
+    if (expectedSession != null && _trafficSession != expectedSession) {
+      return;
+    }
     _trafficTimer?.cancel();
     _trafficTimer = null;
     unawaited(_trafficSocket?.close());
     _trafficSocket = null;
     _trafficSocketConnecting = false;
+    _trafficSession = 0;
     _sessionTotalBytes = 0;
     _emitTraffic(0, 0);
   }
 
-  Future<void> _connectTrafficSocket() async {
+  Future<void> _connectTrafficSocket(int session) async {
     if (_trafficSocketConnecting ||
         _trafficSocket != null ||
-        _process == null) {
+        !_isCurrentSession(session) ||
+        _trafficSession != session) {
       return;
     }
     _trafficSocketConnecting = true;
     try {
       await Future<void>.delayed(const Duration(milliseconds: 250));
-      if (_process == null) {
+      if (!_isCurrentSession(session) || _trafficSession != session) {
         return;
       }
       final socket = await WebSocket.connect(
         'ws://127.0.0.1:${SingBoxConfigBuilder.windowsClashApiPort}/traffic',
       ).timeout(const Duration(seconds: 3));
+      if (!_isCurrentSession(session) || _trafficSession != session) {
+        unawaited(socket.close());
+        return;
+      }
       _trafficSocket = socket;
       socket.listen(
         _handleTrafficMessage,
         onDone: () {
-          if (_trafficSocket == socket) {
+          if (_trafficSocket == socket && _trafficSession == session) {
             _trafficSocket = null;
           }
         },
         onError: (_) {
-          if (_trafficSocket == socket) {
+          if (_trafficSocket == socket && _trafficSession == session) {
             _trafficSocket = null;
           }
         },

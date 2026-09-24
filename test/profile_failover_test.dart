@@ -202,6 +202,120 @@ void main() {
       expect(ranked.map((entry) => entry.profile.id), contains(grpc.id));
     });
 
+    test('compatibility strategy prefers TCP friendly transports', () {
+      final preferred = _profile('preferred', 'Current Reality');
+      final hysteria = _profile(
+        'hysteria',
+        'Hysteria Turbo',
+        kind: VpnProfileKind.hysteria2,
+      );
+      final naiveHttps = _profile(
+        'naive-https',
+        'Naive HTTPS',
+        kind: VpnProfileKind.naive,
+      );
+      final now = DateTime(2026, 6, 18);
+
+      final ranked = rankProfilesForFailover(
+        profiles: [hysteria, naiveHttps, preferred],
+        preferred: preferred,
+        runtimeStats: const {},
+        latencies: {
+          hysteria.id: const ProfileLatencySnapshot.ok(20),
+          naiveHttps.id: const ProfileLatencySnapshot.ok(70),
+          preferred.id: const ProfileLatencySnapshot.ok(90),
+        },
+        adaptiveStrategy: AdaptiveAccessStrategy.compatibility,
+        now: now,
+      );
+
+      expect(ranked.map((entry) => entry.profile.id).take(2), [
+        'preferred',
+        'naive-https',
+      ]);
+    });
+
+    test('speed strategy prefers UDP capable transports', () {
+      final preferred = _profile('preferred', 'Current Reality');
+      final hysteria = _profile(
+        'hysteria',
+        'Hysteria Turbo',
+        kind: VpnProfileKind.hysteria2,
+      );
+      final naiveQuic = _profile(
+        'naive-quic',
+        'Naive QUIC',
+        kind: VpnProfileKind.naive,
+        quic: true,
+      );
+      final now = DateTime(2026, 6, 18);
+
+      final ranked = rankProfilesForFailover(
+        profiles: [preferred, naiveQuic, hysteria],
+        preferred: preferred,
+        runtimeStats: const {},
+        latencies: {
+          preferred.id: const ProfileLatencySnapshot.ok(40),
+          naiveQuic.id: const ProfileLatencySnapshot.ok(60),
+          hysteria.id: const ProfileLatencySnapshot.ok(80),
+        },
+        adaptiveStrategy: AdaptiveAccessStrategy.speed,
+        now: now,
+      );
+
+      expect(ranked.map((entry) => entry.profile.id).take(2), [
+        'hysteria',
+        'naive-quic',
+      ]);
+    });
+
+    test('server variant metadata keeps failover inside the same location', () {
+      final preferred = _profile(
+        'preferred',
+        'DE Frankfurt • VLESS TCP',
+        variantGroup: 'de-frankfurt-1',
+        variantRole: 'vless-reality-tcp',
+        variantStrategy: 'compatibility',
+        variantPriority: 10,
+      );
+      final sameGroupNaive = _profile(
+        'same-naive',
+        'DE Frankfurt • Naive HTTPS',
+        kind: VpnProfileKind.naive,
+        variantGroup: 'de-frankfurt-1',
+        variantRole: 'naive-https',
+        variantStrategy: 'compatibility',
+        variantPriority: 20,
+      );
+      final otherVless = _profile(
+        'other-vless',
+        'NL Amsterdam • VLESS TCP',
+        variantGroup: 'nl-amsterdam-1',
+        variantRole: 'vless-reality-tcp',
+        variantStrategy: 'compatibility',
+        variantPriority: 10,
+      );
+      final now = DateTime(2026, 6, 18);
+
+      final ranked = rankProfilesForFailover(
+        profiles: [otherVless, sameGroupNaive, preferred],
+        preferred: preferred,
+        runtimeStats: const {},
+        latencies: {
+          preferred.id: const ProfileLatencySnapshot.ok(90),
+          sameGroupNaive.id: const ProfileLatencySnapshot.ok(120),
+          otherVless.id: const ProfileLatencySnapshot.ok(30),
+        },
+        adaptiveStrategy: AdaptiveAccessStrategy.compatibility,
+        now: now,
+      );
+
+      expect(ranked.map((entry) => entry.profile.id).take(2), [
+        'preferred',
+        'same-naive',
+      ]);
+    });
+
     test('does not retry a quarantined preferred profile after failover', () {
       final preferred = _profile('preferred', 'Estonia Broken');
       final healthy = _profile('healthy', 'France Healthy');
@@ -317,11 +431,22 @@ VpnProfile _profile(
   DateTime? expiresAt,
   String transport = 'tcp',
   VpnProfileKind kind = VpnProfileKind.vlessReality,
+  bool quic = false,
+  String? variantGroup,
+  String? variantRole,
+  String? variantStrategy,
+  int? variantPriority,
 }) {
+  final outboundType = switch (kind) {
+    VpnProfileKind.naive => 'naive',
+    VpnProfileKind.hysteria || VpnProfileKind.hysteria2 => 'hysteria2',
+    _ => 'vless',
+  };
   final outbound = <String, dynamic>{
-    'type': kind == VpnProfileKind.naive ? 'naive' : 'vless',
+    'type': outboundType,
     'server': 'example.com',
     'uuid': '11111111-1111-4111-8111-111111111111',
+    if (quic) 'quic': true,
     if (transport != 'tcp') 'transport': {'type': transport},
   };
   return VpnProfile(
@@ -334,5 +459,9 @@ VpnProfile _profile(
     outbound: outbound,
     subscriptionSource: 'https://example.com/sub',
     expiresAt: expiresAt,
+    variantGroup: variantGroup,
+    variantRole: variantRole,
+    variantStrategy: variantStrategy,
+    variantPriority: variantPriority,
   );
 }

@@ -14,6 +14,10 @@ void main() {
       expect(await store.loadTerminalThroughVpn(), isFalse);
       expect(await store.loadDnsOnlyThroughVpn(), isTrue);
       expect(await store.loadAdaptiveAccess(), isFalse);
+      expect(
+        await store.loadAdaptiveAccessStrategy(),
+        AdaptiveAccessStrategy.auto,
+      );
       expect(await store.loadVpnOnlyProcesses(), isEmpty);
     });
 
@@ -81,6 +85,46 @@ void main() {
 
       expect(await store.loadAdaptiveAccess(), isTrue);
     });
+
+    test('saves adaptive access strategy preference', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = ProfileStore();
+
+      await store.saveAdaptiveAccessStrategy(
+        AdaptiveAccessStrategy.compatibility,
+      );
+
+      expect(
+        await store.loadAdaptiveAccessStrategy(),
+        AdaptiveAccessStrategy.compatibility,
+      );
+    });
+
+    test(
+      'records adaptive access network stats without user identifiers',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final store = ProfileStore();
+
+        final stats = await store.recordAdaptiveAccessNetworkResult(
+          networkKey: 'net_test',
+          strategy: AdaptiveAccessStrategy.compatibility,
+          issueCode: 'udp',
+        );
+
+        expect(stats.failures, 1);
+        expect(stats.udpFailures, 1);
+        expect(stats.lastIssueCode, 'udp');
+        expect(
+          stats.lastStrategyCode,
+          AdaptiveAccessStrategy.compatibility.code,
+        );
+
+        final loaded = await store.loadAdaptiveAccessNetworkStats();
+        expect(loaded['net_test']?.udpFailures, 1);
+        expect(loaded.keys.single, 'net_test');
+      },
+    );
   });
 
   group('ProfileStore subscription sources', () {

@@ -228,6 +228,89 @@ void main() {
     expect(profiles.first.expiresAt, isNotNull);
   });
 
+  test('imports Yurich server transport variants as one failover group', () async {
+    final xhttpLink = Uri(
+      scheme: 'vless',
+      userInfo: '11111111-1111-4111-8111-111111111111',
+      host: 'de-xhttp.example.com',
+      port: 443,
+      queryParameters: {
+        'security': 'tls',
+        'type': 'xhttp',
+        'sni': 'cdn.example.com',
+        'path': '/xhttp',
+        'mode': 'stream-up',
+      },
+      fragment: 'Raw XHTTP',
+    ).toString();
+    final payload = jsonEncode({
+      'servers': [
+        {
+          'id': 'de-frankfurt-1',
+          'name': 'DE Frankfurt',
+          'expire': '2027-06-13',
+          'variants': [
+            {
+              'role': 'vless-reality-tcp',
+              'strategy': 'compatibility',
+              'priority': 10,
+              'link':
+                  'vless://11111111-1111-4111-8111-111111111111@de-tcp.example.com:443?security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=abc123&sid=01#Raw%20TCP',
+            },
+            {
+              'role': 'naive-https',
+              'strategy': 'compatibility',
+              'priority': 20,
+              'link':
+                  'naive+https://user:pass@de-naive.example.com:443#Raw%20Naive',
+            },
+            {'role': 'xhttp', 'strategy': 'compatibility', 'link': xhttpLink},
+            {
+              'role': 'hysteria2',
+              'strategy': 'speed',
+              'priority': 10,
+              'link':
+                  'hy2://secret@de-hy2.example.com:8443?sni=cdn.example.com#Raw%20Hy2',
+            },
+          ],
+        },
+      ],
+    });
+
+    final profiles = await ProfileImporter().importFromText(payload);
+
+    expect(profiles, hasLength(4));
+    expect(profiles.map((profile) => profile.variantGroup).toSet(), {
+      'de-frankfurt-1',
+    });
+    expect(profiles.map((profile) => profile.variantRole), [
+      'vless-reality-tcp',
+      'naive-https',
+      'xhttp',
+      'hysteria2',
+    ]);
+    expect(profiles.map((profile) => profile.variantStrategy), [
+      'compatibility',
+      'compatibility',
+      'compatibility',
+      'speed',
+    ]);
+    expect(profiles.map((profile) => profile.name), [
+      'DE Frankfurt • VLESS Reality TCP',
+      'DE Frankfurt • Naive HTTPS',
+      'DE Frankfurt • XHTTP',
+      'DE Frankfurt • Hysteria2 Turbo',
+    ]);
+    expect(profiles.last.kind, VpnProfileKind.hysteria2);
+    expect(
+      VlessProfileTools.requiresXrayBackend(
+        profiles.singleWhere((profile) => profile.variantRole == 'xhttp'),
+      ),
+      isTrue,
+    );
+    expect(profiles.first.expiresAt?.year, 2027);
+  });
+
   test('imports NaiveProxy link', () async {
     const link = 'naive+https://example.com:pass@example.com:443#Naive';
 

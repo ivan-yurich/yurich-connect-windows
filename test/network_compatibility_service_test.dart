@@ -25,6 +25,7 @@ void main() {
         dnsProbe: (_, _) async {},
         tcpProbe: (_, _, _) async {},
         tlsProbe: (_, _, _) async {},
+        udpProbe: (_, _, _) async {},
       );
 
       final report = await service.run(
@@ -56,6 +57,7 @@ void main() {
         }
       },
       tlsProbe: (_, _, _) async {},
+      udpProbe: (_, _, _) async {},
     );
 
     final report = await service.run(profile: profile());
@@ -68,6 +70,7 @@ void main() {
       dnsProbe: (_, _) async {},
       tcpProbe: (_, _, _) async {},
       tlsProbe: (_, _, _) async => throw const HandshakeException('blocked'),
+      udpProbe: (_, _, _) async {},
     );
 
     final report = await service.run(profile: profile());
@@ -82,6 +85,7 @@ void main() {
         dnsProbe: (_, _) async => throw const SocketException('transient'),
         tcpProbe: (_, _, _) async {},
         tlsProbe: (_, _, _) async {},
+        udpProbe: (_, _, _) async {},
       );
 
       final report = await service.run(profile: profile());
@@ -95,6 +99,7 @@ void main() {
       dnsProbe: (_, _) async {},
       tcpProbe: (_, _, _) async {},
       tlsProbe: (_, _, _) async {},
+      udpProbe: (_, _, _) async {},
     );
 
     final report = await service.run(
@@ -107,5 +112,28 @@ void main() {
     expect(endpoint.state, NetworkCompatibilityCheckState.skipped);
     expect(endpoint.resultCode, 'udp_protocol_probe_required');
     expect(report.issue, NetworkCompatibilityIssue.none);
+  });
+
+  test('classifies blocked UDP separately for UDP-based profiles', () async {
+    final service = NetworkCompatibilityService(
+      dnsProbe: (_, _) async {},
+      tcpProbe: (_, _, _) async {},
+      tlsProbe: (_, _, _) async {},
+      udpProbe: (_, _, _) async => throw TimeoutException('udp blocked'),
+    );
+
+    final report = await service.run(
+      profile: profile(kind: VpnProfileKind.hysteria2),
+    );
+
+    expect(report.issue, NetworkCompatibilityIssue.udp);
+    expect(
+      report.checks.any(
+        (check) =>
+            check.kind == NetworkCompatibilityCheckKind.profileUdp &&
+            check.state == NetworkCompatibilityCheckState.failed,
+      ),
+      isTrue,
+    );
   });
 }
